@@ -22,7 +22,7 @@ services:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-tickets}:${MYSQL_PASSWORD:-tickets}@db:3306/${MYSQL_DATABASE:-tickets}
       APP_ENV: development
       DEBUG: "true"
-      SECRET_KEY: change-this-development-secret
+      SECRET_KEY: change-this-development-secret-key-32-chars-min
     ports:
       - "8000:8000"
     depends_on:

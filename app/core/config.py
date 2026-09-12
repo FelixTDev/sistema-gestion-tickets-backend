@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     app_env: str = "development"
     debug: bool = False
     database_url: str = "mysql+pymysql://tickets:tickets@localhost:3306/tickets"
-    secret_key: str = "change-this-development-secret"
+    secret_key: str = "change-this-development-secret-key-32-chars-min"
+    jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

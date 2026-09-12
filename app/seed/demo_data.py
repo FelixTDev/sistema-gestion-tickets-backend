@@ -1,7 +1,6 @@
-import hashlib
 import os
-import secrets
 
+from pwdlib import PasswordHash
 from sqlmodel import Session, select
 
 from app.db.models import FAQ, Role, TicketCategory, User
@@ -48,10 +47,11 @@ DEMO_FAQS = (
 )
 
 
+password_hasher = PasswordHash.recommended()
+
+
 def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
-    return f"scrypt${salt.hex()}${digest.hex()}"
+    return password_hasher.hash(password)
 
 
 def seed_demo_data(session: Session) -> None:
@@ -81,8 +81,9 @@ def seed_demo_data(session: Session) -> None:
 
     session.flush()
     for email, full_name, role_name, password_env in DEMO_USERS:
-        if session.exec(select(User).where(User.email == email)).first() is None:
-            password = os.getenv(password_env, "demo-password-local")
+        user = session.exec(select(User).where(User.email == email)).first()
+        password = os.getenv(password_env, "demo-password-local")
+        if user is None:
             session.add(
                 User(
                     full_name=full_name,
@@ -91,6 +92,8 @@ def seed_demo_data(session: Session) -> None:
                     role_id=roles[role_name].id,
                 )
             )
+        elif not user.password_hash.startswith("$argon2"):
+            user.password_hash = hash_password(password)
     session.commit()
     supervisor = session.exec(
         select(User).where(User.email == "supervisor@demo.com")
