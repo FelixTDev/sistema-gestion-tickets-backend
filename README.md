@@ -65,3 +65,47 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
 curl -X POST http://localhost:8000/api/v1/chat/conversations/<conversation_id>/link-user \
   -H "Authorization: Bearer <access_token>"
 ```
+
+## Gestión de tickets
+
+Un cliente autenticado puede crear un ticket manual o convertir una conversación
+autenticada y no resuelta mediante
+`POST /api/v1/chat/conversations/{conversation_id}/convert-to-ticket`. Cada ticket
+recibe un código `TCK-...` único, categoría, prioridad y estado inicial `NUEVO`.
+
+Endpoints principales:
+
+- `POST /api/v1/tickets`: creación manual autenticada.
+- `GET /api/v1/tickets/mine`: tickets del cliente autenticado.
+- `GET /api/v1/tickets`: consulta global para asesores y supervisores, con filtros `status`, `category_id`, `priority`, `created_from` y `created_to`.
+- `GET /api/v1/tickets/{ticket_id}` y `GET /api/v1/tickets/{ticket_id}/history`: seguimiento y trazabilidad.
+- `POST /api/v1/tickets/{ticket_id}/comments`: agregar comentarios autorizados.
+- `POST /api/v1/tickets/{ticket_id}/assignments`: asignación realizada por un supervisor.
+- `POST /api/v1/tickets/{ticket_id}/status`: transición de estado válida.
+- `POST /api/v1/tickets/{ticket_id}/close`, `/reopen` y `/cancel`: cierre, reapertura con motivo y cancelación con motivo.
+
+Ejemplos:
+
+```bash
+# Crear ticket manual
+curl -X POST http://localhost:8000/api/v1/tickets \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"category_id":"<category_id>","subject":"Consulta","description":"Necesito orientación","priority":"MEDIA"}'
+
+# Consultar tickets propios
+curl http://localhost:8000/api/v1/tickets/mine \
+  -H "Authorization: Bearer <access_token>"
+
+# Cambiar estado y consultar historial
+curl -X POST http://localhost:8000/api/v1/tickets/<ticket_id>/status \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"EN_PROCESO"}'
+curl http://localhost:8000/api/v1/tickets/<ticket_id>/history \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Las transiciones, asignaciones, comentarios, cancelaciones y motivos quedan
+registrados en `ticket_history` junto con el actor y los valores anterior y nuevo.
+Los tickets cerrados no admiten modificaciones directas.

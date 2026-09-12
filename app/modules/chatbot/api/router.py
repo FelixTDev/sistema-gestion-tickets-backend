@@ -12,6 +12,8 @@ from app.modules.chatbot.schemas.chatbot import (
     MessageCreate,
 )
 from app.modules.chatbot.services.chatbot_service import ChatbotService
+from app.modules.tickets.schemas.ticket import TicketCreate, TicketRead
+from app.modules.tickets.services.ticket_service import TicketService
 
 router = APIRouter(prefix="/chat", tags=["chatbot"])
 
@@ -20,7 +22,12 @@ def get_chatbot_service() -> ChatbotService:
     return ChatbotService()
 
 
+def get_ticket_service() -> TicketService:
+    return TicketService()
+
+
 ChatbotServiceDependency = Annotated[ChatbotService, Depends(get_chatbot_service)]
+TicketServiceDependency = Annotated[TicketService, Depends(get_ticket_service)]
 
 
 @router.post(
@@ -74,3 +81,20 @@ def link_conversation(
     service: ChatbotServiceDependency,
 ) -> LinkConversationResponse:
     return service.link_user(session, conversation_id, current_user)
+
+
+@router.post(
+    "/conversations/{conversation_id}/convert-to-ticket",
+    response_model=TicketRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def convert_conversation_to_ticket(
+    conversation_id: str,
+    data: TicketCreate,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: CurrentUser,
+    ticket_service: TicketServiceDependency,
+) -> TicketRead:
+    return ticket_service.convert_conversation(
+        session, conversation_id, data, current_user
+    )
