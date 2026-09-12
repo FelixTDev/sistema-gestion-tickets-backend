@@ -29,6 +29,29 @@ def get_current_user(
         detail="Credenciales de autenticación inválidas",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    current_user = _authenticate(credentials, session, unauthorized)
+    return current_user
+
+
+def get_optional_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    session: Annotated[Session, Depends(get_session)],
+) -> AuthenticatedUser | None:
+    if credentials is None:
+        return None
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Credenciales de autenticación inválidas",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    return _authenticate(credentials, session, unauthorized)
+
+
+def _authenticate(
+    credentials: HTTPAuthorizationCredentials | None,
+    session: Session,
+    unauthorized: HTTPException,
+) -> AuthenticatedUser:
     if credentials is None:
         raise unauthorized
     try:
@@ -54,6 +77,9 @@ def get_current_user(
 
 
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
+OptionalCurrentUser = Annotated[
+    AuthenticatedUser | None, Depends(get_optional_current_user)
+]
 
 
 def require_roles(*allowed_roles: str):
