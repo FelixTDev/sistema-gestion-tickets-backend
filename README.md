@@ -109,3 +109,37 @@ curl http://localhost:8000/api/v1/tickets/<ticket_id>/history \
 Las transiciones, asignaciones, comentarios, cancelaciones y motivos quedan
 registrados en `ticket_history` junto con el actor y los valores anterior y nuevo.
 Los tickets cerrados no admiten modificaciones directas.
+
+## Administración de conocimiento y reportes
+
+Las lecturas públicas de FAQ y categorías muestran únicamente registros activos.
+La creación, edición, activación y desactivación requieren rol `SUPERVISOR`.
+Las categorías usadas por tickets no pueden desactivarse y las FAQ mantienen su
+`created_by`, fecha de creación y fecha de modificación.
+
+Endpoints de conocimiento:
+
+- `GET /api/v1/faqs` y `GET /api/v1/faqs/{faq_id}`
+- `POST /api/v1/faqs`, `PATCH /api/v1/faqs/{faq_id}` y `PATCH /api/v1/faqs/{faq_id}/status`
+- `GET /api/v1/categories`, `POST /api/v1/categories`, `PATCH /api/v1/categories/{category_id}` y `PATCH /api/v1/categories/{category_id}/status`
+
+Endpoints de dashboard, disponibles solo para supervisores:
+
+- `GET /api/v1/reports/summary`
+- `GET /api/v1/reports/by-status`
+- `GET /api/v1/reports/by-category`
+- `GET /api/v1/reports/by-priority`
+- `GET /api/v1/reports/resolution-time`
+
+Todos aceptan los filtros opcionales `from`, `to`, `category_id`, `status` y
+`priority`. Por ejemplo:
+
+```bash
+curl "http://localhost:8000/api/v1/reports/summary?status=RESUELTO&priority=ALTA" \
+  -H "Authorization: Bearer <supervisor_access_token>"
+curl "http://localhost:8000/api/v1/reports/by-category?from=2026-01-01T00:00:00Z&to=2026-12-31T23:59:59Z" \
+  -H "Authorization: Bearer <supervisor_access_token>"
+```
+
+Los reportes devuelven ceros y listas vacías cuando no hay datos, validan rangos
+de fechas y no exponen información sensible.
