@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ticket-management-backend"
+version = "0.1.0"
+description = "Academic ticket management API"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.13,<2.0",
+  "fastapi[standard]>=0.115,<1.0",
+  "pydantic-settings>=2.6,<3.0",
+  "PyMySQL>=1.1,<2.0",
+  "python-dotenv>=1.0,<2.0",
+  "sqlmodel>=0.0.22,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27,<1.0",
+  "pytest>=8.0,<9.0",
+  "pytest-cov>=5.0,<7.0",
+  "ruff>=0.8,<1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

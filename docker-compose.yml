@@ -1,0 +1,33 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tickets}
+      MYSQL_USER: ${MYSQL_USER:-tickets}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tickets}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-this-local-password}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-tickets}:${MYSQL_PASSWORD:-tickets}@db:3306/${MYSQL_DATABASE:-tickets}
+      APP_ENV: development
+      DEBUG: "true"
+      SECRET_KEY: change-this-development-secret
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
