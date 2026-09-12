@@ -23,11 +23,28 @@ CATEGORIES = {
 DEMO_USERS = (
     ("cliente@demo.com", "Cliente Demo", "CLIENTE", "DEMO_CLIENT_PASSWORD"),
     ("asesor@demo.com", "Asesor Demo", "ASESOR", "DEMO_ADVISOR_PASSWORD"),
-    ("supervisor@demo.com", "Supervisor Demo", "SUPERVISOR", "DEMO_SUPERVISOR_PASSWORD"),
+    (
+        "supervisor@demo.com",
+        "Supervisor Demo",
+        "SUPERVISOR",
+        "DEMO_SUPERVISOR_PASSWORD",
+    ),
 )
 DEMO_FAQS = (
-    ("TARJETAS", "¿Qué requisitos necesito para una tarjeta?", "En este prototipo puedes consultar requisitos generales de tarjetas ficticias.", "tarjeta,requisitos"),
-    ("BANCA_DIGITAL", "¿Cómo ingreso a la banca digital?", "En este prototipo, la banca digital es una funcionalidad simulada para fines académicos.", "banca,aplicacion,acceso"),
+    (
+        "TARJETAS",
+        "¿Qué requisitos necesito para una tarjeta?",
+        "En este prototipo puedes consultar requisitos generales de "
+        "tarjetas ficticias.",
+        "tarjeta,requisitos",
+    ),
+    (
+        "BANCA_DIGITAL",
+        "¿Cómo ingreso a la banca digital?",
+        "En este prototipo, la banca digital es una funcionalidad simulada "
+        "para fines académicos.",
+        "banca,aplicacion,acceso",
+    ),
 )
 
 
@@ -49,23 +66,47 @@ def seed_demo_data(session: Session) -> None:
 
     categories = {}
     for name, description in CATEGORIES.items():
-        if session.exec(select(TicketCategory).where(TicketCategory.name == name)).first() is None:
+        if (
+            session.exec(
+                select(TicketCategory).where(TicketCategory.name == name)
+            ).first()
+            is None
+        ):
             category = TicketCategory(name=name, description=description)
             session.add(category)
             session.flush()
-        categories[name] = session.exec(select(TicketCategory).where(TicketCategory.name == name)).one()
+        categories[name] = session.exec(
+            select(TicketCategory).where(TicketCategory.name == name)
+        ).one()
 
     session.flush()
     for email, full_name, role_name, password_env in DEMO_USERS:
         if session.exec(select(User).where(User.email == email)).first() is None:
             password = os.getenv(password_env, "demo-password-local")
-            session.add(User(full_name=full_name, email=email, password_hash=hash_password(password), role_id=roles[role_name].id))
+            session.add(
+                User(
+                    full_name=full_name,
+                    email=email,
+                    password_hash=hash_password(password),
+                    role_id=roles[role_name].id,
+                )
+            )
     session.commit()
-    supervisor = session.exec(select(User).where(User.email == "supervisor@demo.com")).one()
+    supervisor = session.exec(
+        select(User).where(User.email == "supervisor@demo.com")
+    ).one()
     for category_name, question, answer, keywords in DEMO_FAQS:
         exists = session.exec(select(FAQ).where(FAQ.question == question)).first()
         if exists is None:
-            session.add(FAQ(category_id=categories[category_name].id, question=question, answer=answer, keywords=keywords, created_by=supervisor.id))
+            session.add(
+                FAQ(
+                    category_id=categories[category_name].id,
+                    question=question,
+                    answer=answer,
+                    keywords=keywords,
+                    created_by=supervisor.id,
+                )
+            )
     session.commit()
 
 
