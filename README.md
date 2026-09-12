@@ -13,6 +13,22 @@ Prototipo académico independiente para gestión de tickets. No se conecta a sis
 
 Swagger queda disponible en `http://localhost:8000/docs` y el health check en `/api/v1/health`.
 
+### CORS para el frontend
+
+Los orígenes permitidos se configuran mediante `CORS_ORIGINS` como una lista JSON.
+El valor local incluido en `.env.example` permite el frontend Vite en
+`http://localhost:5173`:
+
+```env
+CORS_ORIGINS=["http://localhost:5173"]
+```
+
+Para varios orígenes utiliza, por ejemplo,
+`["http://localhost:5173","https://frontend.example"]`. La API permite los métodos
+`GET`, `POST`, `PATCH` y `OPTIONS`, y los encabezados `Content-Type` y
+`Authorization`. CORS no habilita credenciales basadas en cookies; la autenticación
+continúa usando tokens Bearer en el encabezado `Authorization`.
+
 ## Autenticación
 
 El registro crea únicamente usuarios con rol `CLIENTE`. El login devuelve un access token JWT para enviarlo como `Authorization: Bearer <access_token>` en `/api/v1/auth/me` y en futuras rutas protegidas. El logout es lógico y confirma el cierre de sesión del cliente; los JWT son stateless y expiran según `ACCESS_TOKEN_EXPIRE_MINUTES`.
