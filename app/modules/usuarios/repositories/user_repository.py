@@ -17,6 +17,15 @@ class UserRepository:
     def get_role_by_name(self, session: Session, name: str) -> Role | None:
         return session.exec(select(Role).where(Role.name == name)).first()
 
+    def list_active_advisors(self, session: Session) -> list[tuple[User, Role]]:
+        statement = (
+            select(User, Role)
+            .join(Role, User.role_id == Role.id)
+            .where(User.is_active, Role.name == "ASESOR")
+            .order_by(User.full_name.asc(), User.id.asc())
+        )
+        return list(session.exec(statement).all())
+
     def add(self, session: Session, user: User) -> User:
         session.add(user)
         session.commit()

@@ -131,6 +131,18 @@ Las transiciones, asignaciones, comentarios, cancelaciones y motivos quedan
 registrados en `ticket_history` junto con el actor y los valores anterior y nuevo.
 Los tickets cerrados no admiten modificaciones directas.
 
+### Directorio de asesores
+
+El supervisor puede consultar `GET /api/v1/users/advisors` para seleccionar un
+asesor activo al asignar un ticket. La ruta requiere un token Bearer con rol
+`SUPERVISOR`, ordena los resultados por nombre y devuelve únicamente `id`,
+`full_name`, `email` y `role` con valor `ASESOR`.
+
+```bash
+curl http://localhost:8000/api/v1/users/advisors \
+  -H "Authorization: Bearer <supervisor_access_token>"
+```
+
 ## Administración de conocimiento y reportes
 
 Las lecturas públicas de FAQ y categorías muestran únicamente registros activos.
