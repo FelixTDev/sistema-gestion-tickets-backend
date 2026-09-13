@@ -23,6 +23,7 @@ services:
       APP_ENV: development
       DEBUG: "true"
       SECRET_KEY: change-this-development-secret-key-32-chars-min
+      CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}'
     ports:
       - "8000:8000"
     depends_on:

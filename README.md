@@ -17,10 +17,10 @@ Swagger queda disponible en `http://localhost:8000/docs` y el health check en `/
 
 Los orígenes permitidos se configuran mediante `CORS_ORIGINS` como una lista JSON.
 El valor local incluido en `.env.example` permite el frontend Vite en
-`http://localhost:5173`:
+`http://localhost:5173` y `http://127.0.0.1:5173`:
 
 ```env
-CORS_ORIGINS=["http://localhost:5173"]
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
 ```
 
 Para varios orígenes utiliza, por ejemplo,
