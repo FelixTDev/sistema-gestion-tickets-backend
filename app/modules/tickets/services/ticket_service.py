@@ -142,6 +142,12 @@ class TicketService:
         session.refresh(comment)
         return comment
 
+    def comments(
+        self, session: Session, ticket_id: str, actor: AuthenticatedUser
+    ) -> list[TicketComment]:
+        self._get_authorized(session, ticket_id, actor)
+        return self.repository.list_comments(session, ticket_id)
+
     def assign(
         self,
         session: Session,

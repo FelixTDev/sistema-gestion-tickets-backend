@@ -96,6 +96,7 @@ Endpoints principales:
 - `GET /api/v1/tickets`: consulta global para asesores y supervisores, con filtros `status`, `category_id`, `priority`, `created_from` y `created_to`.
 - `GET /api/v1/tickets/{ticket_id}` y `GET /api/v1/tickets/{ticket_id}/history`: seguimiento y trazabilidad.
 - `POST /api/v1/tickets/{ticket_id}/comments`: agregar comentarios autorizados.
+- `GET /api/v1/tickets/{ticket_id}/comments`: recuperar los comentarios autorizados en orden ascendente por fecha.
 - `POST /api/v1/tickets/{ticket_id}/assignments`: asignación realizada por un supervisor.
 - `POST /api/v1/tickets/{ticket_id}/status`: transición de estado válida.
 - `POST /api/v1/tickets/{ticket_id}/close`, `/reopen` y `/cancel`: cierre, reapertura con motivo y cancelación con motivo.
@@ -119,6 +120,10 @@ curl -X POST http://localhost:8000/api/v1/tickets/<ticket_id>/status \
   -H "Content-Type: application/json" \
   -d '{"status":"EN_PROCESO"}'
 curl http://localhost:8000/api/v1/tickets/<ticket_id>/history \
+  -H "Authorization: Bearer <access_token>"
+
+# Recuperar comentarios
+curl http://localhost:8000/api/v1/tickets/<ticket_id>/comments \
   -H "Authorization: Bearer <access_token>"
 ```
 

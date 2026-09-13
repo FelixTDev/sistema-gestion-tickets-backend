@@ -92,6 +92,16 @@ def add_comment(
     return service.add_comment(session, ticket_id, data, current_user)
 
 
+@router.get("/{ticket_id}/comments", response_model=list[CommentRead])
+def get_comments(
+    ticket_id: str,
+    session: SessionDependency,
+    current_user: CurrentUser,
+    service: TicketServiceDependency,
+) -> list[CommentRead]:
+    return service.comments(session, ticket_id, current_user)
+
+
 @router.post("/{ticket_id}/status", response_model=TicketRead)
 def change_status(
     ticket_id: str,

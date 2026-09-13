@@ -79,6 +79,15 @@ class TicketRepository:
             ).all()
         )
 
+    def list_comments(self, session: Session, ticket_id: str) -> list[TicketComment]:
+        return list(
+            session.exec(
+                select(TicketComment)
+                .where(TicketComment.ticket_id == ticket_id)
+                .order_by(TicketComment.created_at.asc())
+            ).all()
+        )
+
     def history(self, session: Session, ticket_id: str) -> list[TicketHistory]:
         return list(
             session.exec(
