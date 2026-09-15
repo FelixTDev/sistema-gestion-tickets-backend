@@ -8,7 +8,7 @@ Prototipo académico independiente para gestión de tickets. No se conecta a sis
 2. Crear un entorno virtual e instalar dependencias: `pip install -e ".[dev]"`.
 3. Iniciar MySQL: `docker compose up -d db`.
 4. Aplicar migraciones: `alembic upgrade head`.
-5. Cargar datos demo: `python -m app.seed.demo_data`.
+5. Cargar datos locales: `python -m app.seed.demo_data`.
 6. Iniciar API: `fastapi dev app/main.py`.
 
 Swagger queda disponible en `http://localhost:8000/docs` y el health check en `/api/v1/health`.
@@ -33,7 +33,10 @@ continúa usando tokens Bearer en el encabezado `Authorization`.
 
 El registro crea únicamente usuarios con rol `CLIENTE`. El login devuelve un access token JWT para enviarlo como `Authorization: Bearer <access_token>` en `/api/v1/auth/me` y en futuras rutas protegidas. El logout es lógico y confirma el cierre de sesión del cliente; los JWT son stateless y expiran según `ACCESS_TOKEN_EXPIRE_MINUTES`.
 
-Las cuentas demo usan las variables `DEMO_CLIENT_PASSWORD`, `DEMO_ADVISOR_PASSWORD` y `DEMO_SUPERVISOR_PASSWORD`. Si no se definen en desarrollo, el seed usa `demo-password-local`.
+Las cuentas de acceso local usan las variables `DEMO_CLIENT_PASSWORD`,
+`DEMO_ADVISOR_PASSWORD` y `DEMO_SUPERVISOR_PASSWORD`. El archivo
+`.env.example` incluye `demo-password-local` como valor de desarrollo para las
+tres cuentas; el seed guarda únicamente hashes Argon2.
 
 ## Pruebas y calidad
 
@@ -44,7 +47,18 @@ ruff format --check .
 alembic check
 ```
 
-Las cuentas demo se crean mediante seed idempotente. Sus contraseñas se leen desde variables de entorno (`DEMO_*_PASSWORD`) y tienen valores locales únicamente para desarrollo; no son credenciales reales.
+El seed es idempotente: se puede ejecutar varias veces sin duplicar roles,
+usuarios, categorías, FAQ, tickets, conversaciones, mensajes, asignaciones,
+comentarios ni historiales. Conserva datos existentes y agrega un conjunto
+operativo con tickets en todos los estados, prioridades y canales, incluidos
+tickets asignados, pendientes, resueltos, cerrados y cancelados. También deja
+una categoría inactiva sin referencias para validar la administración del
+catálogo.
+
+Después de cargar el seed, el cliente puede consultar sus tickets, el asesor
+puede revisar la bandeja y sus asignaciones, y el supervisor puede consultar
+reportes, asesores, tickets e información de seguimiento. Los datos visibles
+están redactados en español y no incluyen información bancaria sensible.
 
 ## Chatbot V1 y base de conocimiento
 

@@ -22,7 +22,7 @@ def ticket_client() -> Generator[tuple[TestClient, object], None, None]:
     )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        seed_demo_data(session)
+        seed_demo_data(session, include_operational_data=False)
 
     def override_session() -> Generator[Session, None, None]:
         with Session(engine) as session:
