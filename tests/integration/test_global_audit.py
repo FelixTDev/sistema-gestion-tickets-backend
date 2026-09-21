@@ -196,11 +196,168 @@ def test_audit_query_is_supervisor_only_paginated_and_stable(audit_client) -> No
     assert "password_hash" not in response.text
 
 
+def test_audit_free_search_matches_export_event(audit_client) -> None:
+    client, engine = audit_client
+    with Session(engine) as session:
+        AuditService().record(
+            session,
+            event_type="REPORT",
+            action="EXPORT_SUCCEEDED",
+            actor_user_id=None,
+            actor_role="SUPERVISOR",
+            resource_type="REPORT",
+            resource_id="summary",
+            success=True,
+        )
+        session.commit()
+
+    response = client.get(
+        "/api/v1/audit",
+        params={"search": "EXPORT"},
+        headers={"Authorization": f"Bearer {login(client, 'supervisor@demo.com')}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["action"] == "EXPORT_SUCCEEDED"
+
+
+@pytest.mark.parametrize(
+    ("search", "expected_field", "expected_value"),
+    [
+        ("security", "event_type", "SECURITY"),
+        ("login_failed", "action", "LOGIN_FAILED"),
+        ("custom_resource", "resource_type", "CUSTOM_RESOURCE"),
+    ],
+)
+def test_audit_free_search_matches_authorized_fields(
+    audit_client, search: str, expected_field: str, expected_value: str
+) -> None:
+    client, engine = audit_client
+    with Session(engine) as session:
+        AuditService().record(
+            session,
+            event_type="SECURITY",
+            action="LOGIN_FAILED",
+            actor_user_id=None,
+            actor_role=None,
+            resource_type="CUSTOM_RESOURCE",
+            resource_id="auth-1",
+            success=False,
+        )
+        session.commit()
+
+    response = client.get(
+        "/api/v1/audit",
+        params={"search": search},
+        headers={"Authorization": f"Bearer {login(client, 'supervisor@demo.com')}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0][expected_field] == expected_value
+
+
+def test_audit_free_search_combines_with_dates_and_is_case_insensitive(
+    audit_client,
+) -> None:
+    client, engine = audit_client
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        service = AuditService()
+        service.record(
+            session,
+            event_type="REPORT",
+            action="EXPORT_SUCCEEDED",
+            actor_user_id=None,
+            actor_role="SUPERVISOR",
+            resource_type="REPORT",
+            resource_id="inside-range",
+            success=True,
+            occurred_at=now - timedelta(days=1),
+        )
+        service.record(
+            session,
+            event_type="REPORT",
+            action="EXPORT_FAILED",
+            actor_user_id=None,
+            actor_role="SUPERVISOR",
+            resource_type="REPORT",
+            resource_id="outside-range",
+            success=False,
+            occurred_at=now - timedelta(days=3),
+        )
+        session.commit()
+
+    response = client.get(
+        "/api/v1/audit",
+        params={
+            "search": "export",
+            "from": (now - timedelta(days=2)).isoformat(),
+            "to": now.isoformat(),
+        },
+        headers={"Authorization": f"Bearer {login(client, 'supervisor@demo.com')}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["resource_id"] == "inside-range"
+
+
+def test_audit_free_search_empty_and_injection_terms_return_no_matches(
+    audit_client,
+) -> None:
+    client, _ = audit_client
+    headers = {"Authorization": f"Bearer {login(client, 'supervisor@demo.com')}"}
+
+    for search in ("does-not-exist", "' OR 1=1 --"):
+        response = client.get(
+            "/api/v1/audit", params={"search": search}, headers=headers
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 0
+
+
+def test_audit_free_search_supports_stable_pagination(audit_client) -> None:
+    client, engine = audit_client
+    with Session(engine) as session:
+        service = AuditService()
+        for index in range(3):
+            service.record(
+                session,
+                event_type="REPORT",
+                action="EXPORT_SUCCEEDED",
+                actor_user_id=None,
+                actor_role="SUPERVISOR",
+                resource_type="REPORT",
+                resource_id=f"export-{index}",
+                success=True,
+                occurred_at=datetime.now(UTC) - timedelta(seconds=index),
+            )
+        session.commit()
+
+    response = client.get(
+        "/api/v1/audit",
+        params={"search": "EXPORT", "page": 2, "page_size": 2},
+        headers={"Authorization": f"Bearer {login(client, 'supervisor@demo.com')}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 3
+    assert body["total_pages"] == 2
+    assert [item["resource_id"] for item in body["items"]] == ["export-2"]
+
+
 @pytest.mark.parametrize("email", ["cliente@demo.com", "asesor@demo.com"])
 def test_non_supervisors_cannot_query_global_audit(audit_client, email: str) -> None:
     client, _ = audit_client
     response = client.get(
         "/api/v1/audit",
+        params={"search": "EXPORT"},
         headers={"Authorization": f"Bearer {login(client, email)}"},
     )
     assert response.status_code == 403

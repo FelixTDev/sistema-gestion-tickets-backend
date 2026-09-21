@@ -118,8 +118,11 @@ class AuditRepository:
         if search:
             pattern = f"%{search}%"
             statement = statement.where(
-                (AuditLog.resource_id.like(pattern))
-                | (AuditLog.request_id.like(pattern))
-                | (AuditLog.correlation_id.like(pattern))
+                (AuditLog.event_type.ilike(pattern))
+                | (AuditLog.action.ilike(pattern))
+                | (AuditLog.resource_type.ilike(pattern))
+                | (AuditLog.resource_id.ilike(pattern))
+                | (AuditLog.request_id.ilike(pattern))
+                | (AuditLog.correlation_id.ilike(pattern))
             )
         return statement
