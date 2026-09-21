@@ -28,6 +28,5 @@ class UserRepository:
 
     def add(self, session: Session, user: User) -> User:
         session.add(user)
-        session.commit()
-        session.refresh(user)
+        session.flush()
         return user

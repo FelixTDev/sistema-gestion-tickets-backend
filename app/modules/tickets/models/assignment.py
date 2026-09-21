@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Column, DateTime, Index
 from sqlmodel import Field, SQLModel
 
 from app.modules.usuarios.models.user import utc_now
@@ -9,6 +9,14 @@ from app.modules.usuarios.models.user import utc_now
 
 class TicketAssignment(SQLModel, table=True):
     __tablename__ = "ticket_assignments"
+    __table_args__ = (
+        Index(
+            "ix_ticket_assignments_ticket_active",
+            "ticket_id",
+            "unassigned_at",
+            "assigned_at",
+        ),
+    )
 
     id: str = Field(
         default_factory=lambda: str(uuid4()), primary_key=True, max_length=36

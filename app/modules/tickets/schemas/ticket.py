@@ -27,14 +27,25 @@ class TicketRead(BaseModel):
     source: TicketSource
     assigned_advisor_id: str | None
     created_at: datetime
+    updated_at: datetime
+    version: int
     assigned_at: datetime | None
     resolved_at: datetime | None
     closed_at: datetime | None
     cancelled_at: datetime | None
 
 
+class TicketPage(BaseModel):
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
+    total_pages: int = Field(ge=0)
+    items: list[TicketRead]
+
+
 class CommentCreate(BaseModel):
     content: str = Field(min_length=1, max_length=5000)
+    expected_version: int | None = Field(default=None, ge=1)
 
     @field_validator("content")
     @classmethod
@@ -57,10 +68,12 @@ class CommentRead(BaseModel):
 class StatusChange(BaseModel):
     status: TicketStatus
     reason: str | None = Field(default=None, max_length=1000)
+    expected_version: int | None = Field(default=None, ge=1)
 
 
 class ReasonRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
+    expected_version: int | None = Field(default=None, ge=1)
 
     @field_validator("reason")
     @classmethod
@@ -72,6 +85,7 @@ class ReasonRequest(BaseModel):
 
 class AssignmentCreate(BaseModel):
     advisor_id: str
+    expected_version: int | None = Field(default=None, ge=1)
 
 
 class HistoryRead(BaseModel):

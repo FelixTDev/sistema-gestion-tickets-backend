@@ -167,8 +167,15 @@ def test_advisor_lists_tickets_and_supervisor_lists_all(ticket_client):
         json={"email": "asesor@demo.com", "password": "demo-password-local"},
     )
     advisor_token = advisor_login.json()["access_token"]
+    advisor_id = advisor_login.json()["user"]["id"]
     supervisor_token = token(client, "supervisor@demo.com")
     ticket = create_ticket(client, client_token, category_id(engine))
+    assigned = client.post(
+        f"/api/v1/tickets/{ticket['id']}/assignments",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+        json={"advisor_id": advisor_id},
+    )
+    assert assigned.status_code == 201
 
     advisor_list = client.get(
         "/api/v1/tickets", headers={"Authorization": f"Bearer {advisor_token}"}

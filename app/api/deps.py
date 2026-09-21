@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated
 
 import jwt
@@ -9,7 +10,9 @@ from sqlmodel import Session
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.modules.usuarios.models.user import User
+from app.modules.usuarios.repositories.auth_repository import AuthRepository
 from app.modules.usuarios.repositories.user_repository import UserRepository
+from app.shared.datetime import as_utc
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -18,6 +21,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 class AuthenticatedUser:
     user: User
     role: str
+    session_id: str | None = None
 
 
 def get_current_user(
@@ -59,6 +63,7 @@ def _authenticate(
             credentials.credentials,
             get_settings().secret_key,
             algorithms=[get_settings().jwt_algorithm],
+            options={"require": ["exp", "iat", "sub", "type"]},
         )
         user_id = payload.get("sub")
         if payload.get("type") != "access" or not isinstance(user_id, str):
@@ -70,10 +75,36 @@ def _authenticate(
     user = repository.get_by_id(session, user_id)
     if user is None or not user.is_active:
         raise unauthorized
+    issued_at = payload.get("iat")
+    if not isinstance(issued_at, (int, float)):
+        raise unauthorized
+    issued_at_datetime = datetime.fromtimestamp(issued_at, UTC)
+    session_id = payload.get("jti")
+    if session_id is not None:
+        if not isinstance(session_id, str):
+            raise unauthorized
+        auth_session = AuthRepository().get_session(session, session_id)
+        now = datetime.now(UTC)
+        if (
+            auth_session is None
+            or auth_session.user_id != user.id
+            or auth_session.revoked_at is not None
+            or as_utc(auth_session.expires_at) <= now
+        ):
+            raise unauthorized
+        if user.sessions_invalidated_at is not None and as_utc(
+            auth_session.issued_at
+        ) <= as_utc(user.sessions_invalidated_at):
+            raise unauthorized
+    elif user.sessions_invalidated_at is not None and issued_at_datetime <= as_utc(
+        user.sessions_invalidated_at
+    ):
+        # Legacy JWTs without jti cannot be checked against an auth_sessions row.
+        raise unauthorized
     role = repository.get_role_by_id(session, user.role_id)
     if role is None:
         raise unauthorized
-    return AuthenticatedUser(user=user, role=role.name)
+    return AuthenticatedUser(user=user, role=role.name, session_id=session_id)
 
 
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]

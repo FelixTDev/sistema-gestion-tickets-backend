@@ -148,7 +148,22 @@ def test_internal_authorized_users_get_comments(ticket_client, email: str):
     client, engine = ticket_client
     ticket, client_token = create_ticket(client, engine)
     add_comment(client, ticket["id"], client_token, "Comentario visible al equipo")
-    internal_token = login(client, email)
+    if email == "asesor@demo.com":
+        advisor_login = client.post(
+            "/api/v1/auth/login",
+            json={"email": email, "password": "demo-password-local"},
+        )
+        internal_token = advisor_login.json()["access_token"]
+        advisor_id = advisor_login.json()["user"]["id"]
+        supervisor_token = login(client, "supervisor@demo.com")
+        assigned = client.post(
+            f"/api/v1/tickets/{ticket['id']}/assignments",
+            headers={"Authorization": f"Bearer {supervisor_token}"},
+            json={"advisor_id": advisor_id},
+        )
+        assert assigned.status_code == 201
+    else:
+        internal_token = login(client, email)
 
     response = client.get(
         f"/api/v1/tickets/{ticket['id']}/comments",

@@ -1,6 +1,49 @@
-from pydantic import BaseModel
+from datetime import datetime
+from enum import StrEnum
 
-from app.modules.tickets.models.ticket import TicketPriority, TicketStatus
+from pydantic import BaseModel, Field
+
+from app.modules.tickets.models.ticket import (
+    TicketPriority,
+    TicketSource,
+    TicketStatus,
+)
+
+
+class ReportName(StrEnum):
+    SUMMARY = "summary"
+    BY_STATUS = "by-status"
+    BY_PRIORITY = "by-priority"
+    BY_CATEGORY = "by-category"
+    BY_SOURCE = "by-source"
+    BY_ADVISOR = "by-advisor"
+    CREATED_TICKETS = "created-tickets"
+    RESOLVED_TICKETS = "resolved-tickets"
+    FIRST_RESPONSE_TIME = "first-response-time"
+    RESOLUTION_TIME = "resolution-time"
+    SLA_COMPLIANCE = "sla-compliance"
+    CONVERSATIONS = "conversations"
+    FAQ_UTILITY = "faq-utility"
+    OPERATIONAL_ACTIVITY = "operational-activity"
+
+
+class ReportFormat(StrEnum):
+    CSV = "csv"
+    XLSX = "xlsx"
+
+
+class ReportExportFilters(BaseModel):
+    from_date: datetime | None = None
+    to_date: datetime | None = None
+    status: TicketStatus | None = None
+    priority: TicketPriority | None = None
+    category_id: str | None = Field(default=None, min_length=1, max_length=36)
+    source: TicketSource | None = None
+    advisor_id: str | None = Field(default=None, min_length=1, max_length=36)
+    client_id: str | None = Field(default=None, min_length=1, max_length=36)
+    sla_compliant: bool | None = None
+    search: str | None = Field(default=None, min_length=1, max_length=120)
+    limit: int = Field(default=10_000, ge=1, le=10_000)
 
 
 class ReportItemStatus(BaseModel):

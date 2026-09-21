@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from sqlalchemy import Column, DateTime, Enum, String, Text
+from sqlalchemy import Column, DateTime, Enum, Index, String, Text
 from sqlmodel import Field, SQLModel
 
 from app.modules.usuarios.models.user import utc_now
@@ -32,6 +32,21 @@ class TicketSource(StrEnum):
 
 class Ticket(SQLModel, table=True):
     __tablename__ = "tickets"
+    __table_args__ = (
+        Index("ix_tickets_client_created_id", "client_id", "created_at", "id"),
+        Index(
+            "ix_tickets_assigned_advisor_created_id",
+            "assigned_advisor_id",
+            "created_at",
+            "id",
+        ),
+        Index("ix_tickets_status_created_id", "status", "created_at", "id"),
+        Index("ix_tickets_category_created_id", "category_id", "created_at", "id"),
+        Index("ix_tickets_priority_created_id", "priority", "created_at", "id"),
+        Index("ix_tickets_source_created_id", "source", "created_at", "id"),
+        Index("ix_tickets_created_id", "created_at", "id"),
+        Index("ix_tickets_updated_id", "updated_at", "id"),
+    )
 
     id: str = Field(
         default_factory=lambda: str(uuid4()), primary_key=True, max_length=36
@@ -65,6 +80,11 @@ class Ticket(SQLModel, table=True):
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    version: int = Field(default=1, nullable=False)
     assigned_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )

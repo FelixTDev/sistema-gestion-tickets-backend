@@ -1,5 +1,6 @@
 """Idempotent local data seed for the ticket management backend."""
 
+import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
@@ -7,22 +8,29 @@ from datetime import UTC, datetime, timedelta
 from pwdlib import PasswordHash
 from sqlmodel import Session, select
 
+from app.core.config import get_settings
 from app.db.models import (
     FAQ,
     ChatMessage,
     Conversation,
+    FAQVersion,
     Role,
+    SlaPolicy,
     Ticket,
     TicketAssignment,
     TicketCategory,
     TicketComment,
     TicketHistory,
+    TicketSla,
     User,
+    UserPreference,
 )
 from app.db.session import engine
 from app.modules.chatbot.models.conversation import ConversationStatus
 from app.modules.chatbot.models.message import SenderType
+from app.modules.tickets.models.sla import SlaStatus
 from app.modules.tickets.models.ticket import TicketPriority, TicketSource, TicketStatus
+from app.shared.text import normalize_text
 
 ROLES = {
     "CLIENTE": "Usuario que solicita orientación y seguimiento de sus tickets.",
@@ -447,6 +455,101 @@ def _ensure_conversation(
         )
 
 
+def _sla_policy_key(priority: TicketPriority) -> str:
+    return f"priority={priority.value}|category=*|source=*"
+
+
+def _ensure_sla_policies(session: Session) -> None:
+    settings = get_settings()
+    for priority in TicketPriority:
+        values = settings.sla_policy_defaults.get(priority.value)
+        if values is None:
+            continue
+        key = _sla_policy_key(priority)
+        policy = session.exec(
+            select(SlaPolicy).where(SlaPolicy.policy_key == key)
+        ).first()
+        now = datetime.now(UTC)
+        if policy is None:
+            session.add(
+                SlaPolicy(
+                    policy_key=key,
+                    priority=priority,
+                    first_response_seconds=values["first_response_seconds"],
+                    resolution_seconds=values["resolution_seconds"],
+                    warning_seconds=values["warning_seconds"],
+                    timezone_name=settings.sla_default_timezone,
+                    calendar_name=settings.sla_default_calendar,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        else:
+            policy.first_response_seconds = values["first_response_seconds"]
+            policy.resolution_seconds = values["resolution_seconds"]
+            policy.warning_seconds = values["warning_seconds"]
+            policy.timezone_name = settings.sla_default_timezone
+            policy.calendar_name = settings.sla_default_calendar
+            policy.is_active = True
+            policy.updated_at = now
+    session.flush()
+
+
+def _ensure_existing_ticket_slas(session: Session, actor_id: str) -> None:
+    policies = {
+        policy.priority: policy
+        for policy in session.exec(
+            select(SlaPolicy).where(
+                SlaPolicy.is_active,
+                SlaPolicy.category_id.is_(None),
+                SlaPolicy.source.is_(None),
+            )
+        ).all()
+        if policy.priority is not None
+    }
+    for ticket in session.exec(select(Ticket)).all():
+        if (
+            session.exec(
+                select(TicketSla).where(TicketSla.ticket_id == ticket.id)
+            ).first()
+            is not None
+        ):
+            continue
+        policy = policies.get(ticket.priority)
+        if policy is None:
+            continue
+        started_at = ticket.created_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        resolved_at = ticket.resolved_at
+        if resolved_at is not None and resolved_at.tzinfo is None:
+            resolved_at = resolved_at.replace(tzinfo=UTC)
+        sla = TicketSla(
+            ticket_id=ticket.id,
+            policy_id=policy.id,
+            started_at=started_at,
+            first_response_due_at=started_at
+            + timedelta(seconds=policy.first_response_seconds),
+            resolution_due_at=started_at + timedelta(seconds=policy.resolution_seconds),
+            status=(
+                SlaStatus.CANCELLED
+                if ticket.status == TicketStatus.CANCELADO
+                else SlaStatus.COMPLETED
+                if ticket.status in {TicketStatus.RESUELTO, TicketStatus.CERRADO}
+                else SlaStatus.ACTIVE
+            ),
+            resolved_at=resolved_at,
+            completed_within_sla=(
+                resolved_at is not None
+                and resolved_at
+                <= started_at + timedelta(seconds=policy.resolution_seconds)
+            )
+            if ticket.status in {TicketStatus.RESUELTO, TicketStatus.CERRADO}
+            else None,
+        )
+        session.add(sla)
+
+
 def _ensure_comment(
     session: Session,
     ticket: Ticket,
@@ -668,6 +771,8 @@ def seed_demo_data(session: Session, include_operational_data: bool = True) -> N
                 category.is_active = is_active
         categories[name] = category
 
+    _ensure_sla_policies(session)
+
     users: dict[str, User] = {}
     for email, full_name, role_name, password_env in DEMO_USERS:
         user = session.exec(select(User).where(User.email == email)).first()
@@ -678,6 +783,7 @@ def seed_demo_data(session: Session, include_operational_data: bool = True) -> N
                 email=email,
                 password_hash=hash_password(password),
                 role_id=roles[role_name].id,
+                email_verified=True,
             )
             session.add(user)
             session.flush()
@@ -685,9 +791,15 @@ def seed_demo_data(session: Session, include_operational_data: bool = True) -> N
             user.full_name = full_name
             user.role_id = roles[role_name].id
             user.is_active = True
+            user.email_verified = True
             if not user.password_hash.startswith("$argon2"):
                 user.password_hash = hash_password(password)
         users[role_name] = user
+
+    for user in users.values():
+        if session.get(UserPreference, user.id) is None:
+            session.add(UserPreference(user_id=user.id))
+    session.flush()
 
     for category_name, question, answer, keywords in DEMO_FAQS:
         faq = session.exec(select(FAQ).where(FAQ.question == question)).first()
@@ -702,22 +814,71 @@ def seed_demo_data(session: Session, include_operational_data: bool = True) -> N
                 legacy_faq.is_active = False
         values = {
             "category_id": categories[category_name].id,
+            "title": question,
             "question": question,
             "answer": answer,
+            "summary": answer[:1000],
             "keywords": keywords,
+            "tags": json.dumps(
+                [term.strip() for term in keywords.split(",") if term.strip()],
+                ensure_ascii=False,
+            ),
+            "synonyms": "[]",
+            "normalized_content": normalize_text(
+                f"{question} {answer} {keywords} {categories[category_name].name}"
+            ),
+            "normalized_title": normalize_text(question),
+            "normalized_question": normalize_text(question),
+            "status": FAQ.Status.PUBLISHED,
+            "priority": 0,
+            "display_order": 0,
             "is_active": True,
             "created_by": users["SUPERVISOR"].id,
+            "updated_by": users["SUPERVISOR"].id,
         }
         if faq is None:
-            session.add(FAQ(**values))
+            faq = FAQ(**values)
+            session.add(faq)
         else:
             for field, value in values.items():
                 setattr(faq, field, value)
+        session.flush()
+        faq.published_at = faq.published_at or faq.created_at
+        if (
+            session.exec(select(FAQVersion).where(FAQVersion.faq_id == faq.id)).first()
+            is None
+        ):
+            session.add(
+                FAQVersion(
+                    faq_id=faq.id,
+                    version=faq.version,
+                    category_id=faq.category_id,
+                    title=faq.title,
+                    question=faq.question,
+                    answer=faq.answer,
+                    summary=faq.summary,
+                    keywords=faq.keywords,
+                    tags=faq.tags,
+                    synonyms=faq.synonyms,
+                    normalized_content=faq.normalized_content,
+                    intent=faq.intent,
+                    status=faq.status,
+                    priority=faq.priority,
+                    display_order=faq.display_order,
+                    is_active=faq.is_active,
+                    published_at=faq.published_at,
+                    unpublished_at=faq.unpublished_at,
+                    changed_by=faq.updated_by or faq.created_by,
+                    action="SEEDED",
+                    changed_at=faq.updated_at,
+                )
+            )
 
     session.flush()
     _clean_existing_visible_text(session)
     if include_operational_data:
         _seed_operational_data(session, categories, users)
+    _ensure_existing_ticket_slas(session, users["SUPERVISOR"].id)
     session.commit()
 
 

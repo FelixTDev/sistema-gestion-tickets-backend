@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import Column, DateTime, String, Text
+from sqlalchemy import Boolean, Column, DateTime, String, Text
 from sqlmodel import Field, SQLModel
 
 
@@ -21,6 +21,12 @@ class User(SQLModel, table=True):
     password_hash: str = Field(sa_column=Column(Text, nullable=False))
     phone: str | None = Field(default=None, sa_column=Column(String(30), nullable=True))
     is_active: bool = Field(default=True, nullable=False)
+    email_verified: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False)
+    )
+    sessions_invalidated_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),

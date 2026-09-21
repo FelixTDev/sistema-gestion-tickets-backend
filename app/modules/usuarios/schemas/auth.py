@@ -1,6 +1,6 @@
-import re
-
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from app.modules.usuarios.services.password_policy import validate_password_policy
 
 
 class RegisterRequest(BaseModel):
@@ -12,13 +12,7 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: str) -> str:
-        if (
-            not re.search(r"[A-Z]", value)
-            or not re.search(r"[a-z]", value)
-            or not re.search(r"\d", value)
-        ):
-            raise ValueError("La contraseña debe incluir mayúscula, minúscula y número")
-        return value
+        return validate_password_policy(value)
 
 
 class LoginRequest(BaseModel):
@@ -42,4 +36,36 @@ class LoginResponse(BaseModel):
 
 
 class LogoutResponse(BaseModel):
+    message: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(default="", max_length=256)
+    new_password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: str) -> str:
+        return validate_password_policy(value)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: str) -> str:
+        return validate_password_policy(value)
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(default="", max_length=256)
+
+
+class MessageResponse(BaseModel):
     message: str
