@@ -22,7 +22,8 @@ from app.modules.adjuntos.services.storage_provider import (
 )
 from app.modules.auditoria.services.audit_service import AuditService
 from app.modules.tickets.models.history import TicketHistory
-from app.modules.tickets.models.ticket import Ticket
+from app.modules.tickets.models.ticket import Ticket, TicketStatus
+from app.shared.exceptions import AppError
 
 _EXTENSION_TO_MIME = {
     ".pdf": "application/pdf",
@@ -106,6 +107,7 @@ class AttachmentService:
         comment_id: str | None = None,
     ) -> Attachment:
         ticket = self._authorized_ticket(session, ticket_id, actor)
+        self._ensure_ticket_accepts_attachment_mutation(ticket)
         if comment_id is not None:
             comment = self.repository.get_comment(session, comment_id)
             if comment is None or comment.ticket_id != ticket.id:
@@ -115,11 +117,6 @@ class AttachmentService:
         extension = PurePath(filename).suffix.casefold()
         declared_mime = self._declared_mime(upload.content_type)
         self._validate_declared_type(extension, declared_mime)
-        if self.repository.count_active_for_ticket(session, ticket.id) >= (
-            self.max_files_per_ticket
-        ):
-            raise AttachmentTooLargeError("Se alcanzó el límite de archivos del ticket")
-
         storage_key = f"attachments/{uuid4().hex}"
         try:
             stored = self.storage.store(upload.file, storage_key, self.max_file_size)
@@ -142,6 +139,15 @@ class AttachmentService:
             if _EXTENSION_TO_MIME.get(extension) != stored.detected_mime.casefold():
                 raise AttachmentMimeError(
                     "La extensión no coincide con el contenido del archivo"
+                )
+
+            ticket = self._authorized_ticket(session, ticket_id, actor, for_update=True)
+            self._ensure_ticket_accepts_attachment_mutation(ticket)
+            if self.repository.count_active_for_ticket(session, ticket.id) >= (
+                self.max_files_per_ticket
+            ):
+                raise AttachmentTooLargeError(
+                    "Se alcanzó el límite de archivos del ticket"
                 )
             current_total = self.repository.total_size_active_for_ticket(
                 session, ticket.id
@@ -204,7 +210,10 @@ class AttachmentService:
         attachment = self.repository.get(session, attachment_id)
         if attachment is None:
             raise HTTPException(status_code=404, detail="Adjunto no encontrado")
-        self._authorized_ticket(session, attachment.ticket_id, actor)
+        ticket = self._authorized_ticket(
+            session, attachment.ticket_id, actor, for_update=True
+        )
+        self._ensure_ticket_accepts_attachment_mutation(ticket)
         if attachment.status == AttachmentStatus.DELETED:
             return attachment
         deleted_at = datetime.now(UTC)
@@ -223,9 +232,18 @@ class AttachmentService:
         return attachment
 
     def _authorized_ticket(
-        self, session: Session, ticket_id: str, actor: AuthenticatedUser
+        self,
+        session: Session,
+        ticket_id: str,
+        actor: AuthenticatedUser,
+        *,
+        for_update: bool = False,
     ) -> Ticket:
-        ticket = self.repository.get_ticket(session, ticket_id)
+        ticket = (
+            self.repository.get_ticket_for_update(session, ticket_id)
+            if for_update
+            else self.repository.get_ticket(session, ticket_id)
+        )
         if ticket is None:
             raise HTTPException(status_code=404, detail="Ticket no encontrado")
         if actor.role == "CLIENTE" and ticket.client_id != actor.user.id:
@@ -235,6 +253,15 @@ class AttachmentService:
         if actor.role not in {"CLIENTE", "ASESOR", "SUPERVISOR"}:
             raise HTTPException(status_code=403, detail="Ticket no autorizado")
         return ticket
+
+    @staticmethod
+    def _ensure_ticket_accepts_attachment_mutation(ticket: Ticket) -> None:
+        if ticket.status in {TicketStatus.CERRADO, TicketStatus.CANCELADO}:
+            raise AppError(
+                409,
+                "TICKET_TERMINAL_MUTATION_FORBIDDEN",
+                "No se pueden modificar adjuntos de un ticket terminal.",
+            )
 
     @staticmethod
     def _sanitize_filename(filename: str | None) -> str:

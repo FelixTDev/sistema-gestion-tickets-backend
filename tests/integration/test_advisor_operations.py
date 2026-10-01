@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.db import models  # noqa: F401
 from app.db.session import get_session
 from app.main import app
+from app.modules.auditoria.models.audit_log import AuditLog
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.notificaciones.models.notification import Notification
 from app.modules.tickets.models.history import TicketHistory
@@ -190,28 +191,124 @@ def test_take_release_and_duplicate_assignment_are_audited_and_notified(
         f"/api/v1/tickets/{ticket['id']}/take",
         headers={"Authorization": f"Bearer {advisor_token}"},
     )
+    missing_reason = client.post(
+        f"/api/v1/tickets/{ticket['id']}/release",
+        headers={"Authorization": f"Bearer {advisor_token}"},
+    )
     released = client.post(
         f"/api/v1/tickets/{ticket['id']}/release",
         headers={"Authorization": f"Bearer {advisor_token}"},
+        json={"reason": "Cambio de turno operativo"},
     )
 
     assert taken.status_code == 200
     assert taken.json()["assigned_advisor_id"] == advisor_id
     assert duplicate_take.status_code == 409
+    assert missing_reason.status_code == 422
     assert released.status_code == 200
+    assert released.json()["status"] == "NUEVO"
     assert released.json()["assigned_advisor_id"] is None
     with Session(engine) as session:
         history = session.exec(
             select(TicketHistory).where(TicketHistory.ticket_id == ticket["id"])
         ).all()
+        audit_rows = session.exec(
+            select(AuditLog).where(AuditLog.resource_id == ticket["id"])
+        ).all()
         notifications = session.exec(
             select(Notification).where(Notification.related_ticket_id == ticket["id"])
         ).all()
-    assert {row.action for row in history} >= {"TAKEN", "RELEASED"}
+    assert {row.action for row in history} >= {
+        "TAKEN",
+        "RELEASED",
+        "STATUS_CHANGED",
+    }
+    assert any("Cambio de turno operativo" in row.description for row in history)
+    assert any(
+        row.metadata_json
+        and "Cambio de turno operativo" in str(row.metadata_json.get("description", ""))
+        for row in audit_rows
+    )
     assert any(
         item.notification_type.value == "ticket_assigned" for item in notifications
     )
     assert supervisor_token
+
+
+@pytest.mark.parametrize(
+    ("status_path", "expected_cleared_field"),
+    [
+        (("EN_PROCESO",), None),
+        (("EN_PROCESO", "PENDIENTE_CLIENTE"), None),
+        (("EN_PROCESO", "RESUELTO"), "resolved_at"),
+    ],
+)
+def test_release_returns_every_operational_ticket_to_new_without_touching_sla(
+    operations_client,
+    status_path,
+    expected_cleared_field,
+):
+    client, engine = operations_client
+    client_token = login(client, "cliente@demo.com")
+    advisor_token = login(client, "asesor@demo.com")
+    supervisor_token = login(client, "supervisor@demo.com")
+    advisor_id = client.get(
+        "/api/v1/auth/me", headers={"Authorization": f"Bearer {advisor_token}"}
+    ).json()["id"]
+    ticket = create_ticket(
+        client, client_token, category_id(engine), "Liberación con SLA"
+    )
+    assigned = assign(client, supervisor_token, ticket["id"], advisor_id)
+    assert assigned.status_code == 201
+    current = assigned.json()
+    for next_status in status_path:
+        response = client.post(
+            f"/api/v1/tickets/{ticket['id']}/status",
+            headers={"Authorization": f"Bearer {advisor_token}"},
+            json={"status": next_status, "expected_version": current["version"]},
+        )
+        assert response.status_code == 200
+        current = response.json()
+
+    with Session(engine) as session:
+        sla_before = session.exec(
+            select(TicketSla).where(TicketSla.ticket_id == ticket["id"])
+        ).one()
+        sla_snapshot = {
+            "status": sla_before.status,
+            "first_response_due_at": sla_before.first_response_due_at,
+            "resolution_due_at": sla_before.resolution_due_at,
+            "paused_at": sla_before.paused_at,
+            "total_paused_seconds": sla_before.total_paused_seconds,
+        }
+
+    released = client.post(
+        f"/api/v1/tickets/{ticket['id']}/release",
+        headers={"Authorization": f"Bearer {advisor_token}"},
+        json={
+            "reason": "Derivar a la cola para nueva asignación",
+            "expected_version": current["version"],
+        },
+    )
+
+    assert released.status_code == 200
+    body = released.json()
+    assert body["status"] == "NUEVO"
+    assert body["assigned_advisor_id"] is None
+    assert body["assigned_at"] is None
+    if expected_cleared_field is not None:
+        assert body[expected_cleared_field] is None
+    with Session(engine) as session:
+        sla_after = session.exec(
+            select(TicketSla).where(TicketSla.ticket_id == ticket["id"])
+        ).one()
+        assert {
+            "status": sla_after.status,
+            "first_response_due_at": sla_after.first_response_due_at,
+            "resolution_due_at": sla_after.resolution_due_at,
+            "paused_at": sla_after.paused_at,
+            "total_paused_seconds": sla_after.total_paused_seconds,
+        } == sla_snapshot
 
 
 def test_supervisor_reassigns_and_rejects_invalid_assignees(operations_client):

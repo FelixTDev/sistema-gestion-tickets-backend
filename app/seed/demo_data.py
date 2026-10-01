@@ -611,6 +611,10 @@ def _seed_operational_data(
                 status=spec["status"],
                 source=spec["source"],
                 created_at=created_at,
+                assigned_advisor_id=advisor.id if spec["advisor"] else None,
+                assigned_at=(
+                    created_at + timedelta(hours=4) if spec["advisor"] else None
+                ),
             )
             session.add(ticket)
             session.flush()
@@ -624,14 +628,6 @@ def _seed_operational_data(
             ticket.source = spec["source"]
             ticket.created_at = created_at
 
-        if spec["source"] == TicketSource.CHATBOT:
-            _ensure_conversation(
-                session,
-                ticket,
-                client.id,
-                spec["days_ago"],
-                spec["status"] == TicketStatus.CANCELADO,
-            )
         if spec["advisor"]:
             ticket.assigned_advisor_id = advisor.id
             ticket.assigned_at = created_at + timedelta(hours=4)
@@ -657,6 +653,15 @@ def _seed_operational_data(
         else:
             ticket.assigned_advisor_id = None
             ticket.assigned_at = None
+
+        if spec["source"] == TicketSource.CHATBOT:
+            _ensure_conversation(
+                session,
+                ticket,
+                client.id,
+                spec["days_ago"],
+                spec["status"] == TicketStatus.CANCELADO,
+            )
 
         ticket.resolved_at = (
             created_at + timedelta(days=2)

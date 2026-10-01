@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from sqlalchemy import Column, DateTime, Enum, Index, String, Text
+from sqlalchemy import CheckConstraint, Column, DateTime, Enum, Index, String, Text
 from sqlmodel import Field, SQLModel
 
 from app.modules.usuarios.models.user import utc_now
@@ -33,6 +33,13 @@ class TicketSource(StrEnum):
 class Ticket(SQLModel, table=True):
     __tablename__ = "tickets"
     __table_args__ = (
+        CheckConstraint(
+            "(status = 'NUEVO' AND assigned_advisor_id IS NULL) OR "
+            "(status IN ('ASIGNADO', 'EN_PROCESO', 'PENDIENTE_CLIENTE', "
+            "'RESUELTO') AND assigned_advisor_id IS NOT NULL) OR "
+            "status IN ('CERRADO', 'CANCELADO')",
+            name="ck_tickets_assignment_state",
+        ),
         Index("ix_tickets_client_created_id", "client_id", "created_at", "id"),
         Index(
             "ix_tickets_assigned_advisor_created_id",

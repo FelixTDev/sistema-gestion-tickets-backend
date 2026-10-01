@@ -18,8 +18,13 @@ from app.modules.reportes.schemas.report import (
 )
 from app.modules.reportes.services.report_service import ReportService
 from app.modules.tickets.models.ticket import TicketPriority, TicketStatus
+from app.shared.api_errors import error_responses
 
-router = APIRouter(prefix="/reports", tags=["reports"])
+router = APIRouter(
+    prefix="/reports",
+    tags=["reports"],
+    responses=error_responses(401, 403, 404, 409, 422),
+)
 
 
 def get_report_service() -> ReportService:
@@ -130,7 +135,16 @@ def resolution_time(
     return service.resolution_time(session, current_user, **report_filters)
 
 
-@router.get("/{report_name}/export", response_class=Response)
+@router.get(
+    "/{report_name}/export",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "Reporte exportado en formato CSV",
+            "content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}},
+        }
+    },
+)
 def export_report(
     report_name: ReportName,
     session: SessionDependency,

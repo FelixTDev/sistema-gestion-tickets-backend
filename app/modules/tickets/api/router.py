@@ -7,7 +7,11 @@ from sqlmodel import Session
 from app.api.deps import CurrentUser
 from app.db.session import get_session
 from app.modules.tickets.models.ticket import TicketPriority, TicketSource, TicketStatus
-from app.modules.tickets.schemas.operations import OperationalQueue, TicketActionRequest
+from app.modules.tickets.schemas.operations import (
+    OperationalQueue,
+    TicketActionRequest,
+    TicketReleaseRequest,
+)
 from app.modules.tickets.schemas.ticket import (
     AssignmentCreate,
     CommentCreate,
@@ -20,9 +24,14 @@ from app.modules.tickets.schemas.ticket import (
     TicketRead,
 )
 from app.modules.tickets.services.ticket_service import TicketService
+from app.shared.api_errors import error_responses
 from app.shared.pagination import PaginationResult
 
-router = APIRouter(prefix="/tickets", tags=["tickets"])
+router = APIRouter(
+    prefix="/tickets",
+    tags=["tickets"],
+    responses=error_responses(401, 403, 404, 409, 422, 429),
+)
 
 
 def get_ticket_service() -> TicketService:
@@ -246,17 +255,12 @@ def take_ticket(
 @router.post("/{ticket_id}/release", response_model=TicketRead)
 def release_ticket(
     ticket_id: str,
+    data: TicketReleaseRequest,
     session: SessionDependency,
     current_user: CurrentUser,
     service: TicketServiceDependency,
-    data: TicketActionRequest | None = None,
 ) -> TicketRead:
-    return service.release(
-        session,
-        ticket_id,
-        current_user,
-        data.expected_version if data is not None else None,
-    )
+    return service.release(session, ticket_id, data, current_user)
 
 
 @router.get("/{ticket_id}/history", response_model=list[HistoryRead])

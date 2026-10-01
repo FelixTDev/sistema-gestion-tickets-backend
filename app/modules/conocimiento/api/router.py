@@ -28,9 +28,15 @@ from app.modules.conocimiento.schemas.faq import (
 )
 from app.modules.conocimiento.services.category_service import CategoryService
 from app.modules.conocimiento.services.faq_service import FAQService
+from app.shared.api_errors import error_responses
 from app.shared.pagination import PaginationResult
 
-router = APIRouter(prefix="/faqs", tags=["faqs"])
+router = APIRouter(
+    prefix="/faqs",
+    tags=["faqs"],
+    responses=error_responses(401, 403, 404, 409, 422),
+)
+OPTIONAL_AUTH_OPENAPI = {"security": [{}, {"HTTPBearer": []}]}
 
 
 def get_faq_service() -> FAQService:
@@ -128,6 +134,7 @@ def get_faq_history(
     "/{faq_id}/feedback",
     response_model=FAQFeedbackRead,
     status_code=status.HTTP_201_CREATED,
+    openapi_extra=OPTIONAL_AUTH_OPENAPI,
 )
 def add_faq_feedback(
     faq_id: str,
@@ -203,7 +210,11 @@ def _public_response(result: list[FAQ] | PaginationResult[FAQ]):
     return result
 
 
-category_router = APIRouter(prefix="/categories", tags=["categories"])
+category_router = APIRouter(
+    prefix="/categories",
+    tags=["categories"],
+    responses=error_responses(401, 403, 404, 409, 422),
+)
 
 
 @category_router.get("", response_model=list[CategoryRead])

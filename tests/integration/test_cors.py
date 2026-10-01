@@ -18,7 +18,9 @@ def test_cors_preflight_allows_local_frontend_origins(origin: str):
             headers={
                 "Origin": origin,
                 "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "Authorization, Content-Type",
+                "Access-Control-Request-Headers": (
+                    "Authorization, Content-Type, X-Request-ID"
+                ),
             },
         )
 
@@ -27,6 +29,8 @@ def test_cors_preflight_allows_local_frontend_origins(origin: str):
     assert "POST" in response.headers["access-control-allow-methods"]
     assert "authorization" in response.headers["access-control-allow-headers"].lower()
     assert "content-type" in response.headers["access-control-allow-headers"].lower()
+    assert "x-request-id" in response.headers["access-control-allow-headers"].lower()
+    assert response.headers["X-Request-ID"]
     assert "access-control-allow-credentials" not in response.headers
 
 
@@ -40,6 +44,7 @@ def test_cors_real_response_includes_local_origin(origin: str):
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == origin
+    assert "x-request-id" in response.headers["access-control-expose-headers"].lower()
 
 
 def test_cors_does_not_authorize_unconfigured_origin():

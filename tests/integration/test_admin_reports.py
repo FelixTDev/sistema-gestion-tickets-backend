@@ -11,6 +11,7 @@ from app.db.session import get_session
 from app.main import app
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.tickets.models.ticket import Ticket, TicketStatus
+from app.modules.usuarios.models.user import User
 from app.seed.demo_data import seed_demo_data
 
 
@@ -51,6 +52,14 @@ def supervisor_headers(client: TestClient) -> dict[str, str]:
 def category_id(engine: object) -> str:
     with Session(engine) as session:
         return session.exec(select(TicketCategory)).first().id
+
+
+def advisor_id(engine: object) -> str:
+    with Session(engine) as session:
+        advisor = session.exec(
+            select(User).where(User.email == "asesor@demo.com")
+        ).one()
+        return advisor.id
 
 
 def test_supervisor_can_create_update_and_toggle_faq(admin_client):
@@ -236,11 +245,12 @@ def test_reports_support_filters_and_empty_results(admin_client):
     category = category_id(engine)
     ticket = create_report_ticket(client, category, "URGENTE")
     supervisor = supervisor_headers(client)
-    client.post(
-        f"/api/v1/tickets/{ticket['id']}/status",
+    assigned = client.post(
+        f"/api/v1/tickets/{ticket['id']}/assignments",
         headers=supervisor,
-        json={"status": "ASIGNADO"},
+        json={"advisor_id": advisor_id(engine)},
     )
+    assert assigned.status_code == 201
 
     filtered = client.get(
         "/api/v1/reports/summary",
@@ -271,13 +281,18 @@ def test_resolution_time_report_calculates_average_hours(admin_client):
     first = create_report_ticket(client, category)
     second = create_report_ticket(client, category)
     now = datetime.now(UTC)
+    assigned_advisor_id = advisor_id(engine)
     with Session(engine) as session:
         first_model = session.get(Ticket, first["id"])
         second_model = session.get(Ticket, second["id"])
         first_model.created_at = now - timedelta(hours=4)
+        first_model.assigned_advisor_id = assigned_advisor_id
+        first_model.assigned_at = now - timedelta(hours=3)
         first_model.resolved_at = now - timedelta(hours=2)
         first_model.status = TicketStatus.RESUELTO
         second_model.created_at = now - timedelta(hours=6)
+        second_model.assigned_advisor_id = assigned_advisor_id
+        second_model.assigned_at = now - timedelta(hours=5)
         second_model.resolved_at = now - timedelta(hours=2)
         second_model.status = TicketStatus.RESUELTO
         session.commit()

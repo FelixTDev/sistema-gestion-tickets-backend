@@ -17,8 +17,14 @@ from app.modules.chatbot.schemas.chatbot import (
 from app.modules.chatbot.services.chatbot_service import ChatbotService
 from app.modules.tickets.schemas.ticket import TicketCreate, TicketRead
 from app.modules.tickets.services.ticket_service import TicketService
+from app.shared.api_errors import error_responses
 
-router = APIRouter(prefix="/chat", tags=["chatbot"])
+router = APIRouter(
+    prefix="/chat",
+    tags=["chatbot"],
+    responses=error_responses(400, 401, 403, 404, 409, 422, 429),
+)
+OPTIONAL_AUTH_OPENAPI = {"security": [{}, {"HTTPBearer": []}]}
 
 
 def get_chatbot_service() -> ChatbotService:
@@ -37,6 +43,7 @@ TicketServiceDependency = Annotated[TicketService, Depends(get_ticket_service)]
     "/conversations",
     response_model=ConversationRead,
     status_code=status.HTTP_201_CREATED,
+    openapi_extra=OPTIONAL_AUTH_OPENAPI,
 )
 def create_conversation(
     request: Request,
@@ -55,7 +62,11 @@ def create_conversation(
     )
 
 
-@router.get("/conversations/{conversation_id}", response_model=ConversationRead)
+@router.get(
+    "/conversations/{conversation_id}",
+    response_model=ConversationRead,
+    openapi_extra=OPTIONAL_AUTH_OPENAPI,
+)
 def get_conversation(
     conversation_id: str,
     session: Annotated[Session, Depends(get_session)],
@@ -66,7 +77,9 @@ def get_conversation(
 
 
 @router.post(
-    "/conversations/{conversation_id}/messages", response_model=BotMessageResponse
+    "/conversations/{conversation_id}/messages",
+    response_model=BotMessageResponse,
+    openapi_extra=OPTIONAL_AUTH_OPENAPI,
 )
 def send_message(
     conversation_id: str,
@@ -79,7 +92,9 @@ def send_message(
 
 
 @router.post(
-    "/conversations/{conversation_id}/escalate", response_model=ConversationRead
+    "/conversations/{conversation_id}/escalate",
+    response_model=ConversationRead,
+    openapi_extra=OPTIONAL_AUTH_OPENAPI,
 )
 def escalate_conversation(
     conversation_id: str,
@@ -91,7 +106,11 @@ def escalate_conversation(
     return service.escalate(session, conversation_id, data.reason, current_user)
 
 
-@router.post("/conversations/{conversation_id}/reset", response_model=ConversationRead)
+@router.post(
+    "/conversations/{conversation_id}/reset",
+    response_model=ConversationRead,
+    openapi_extra=OPTIONAL_AUTH_OPENAPI,
+)
 def reset_conversation(
     conversation_id: str,
     session: Annotated[Session, Depends(get_session)],
@@ -105,6 +124,7 @@ def reset_conversation(
     "/conversations/{conversation_id}/feedback",
     response_model=ChatFeedbackRead,
     status_code=status.HTTP_201_CREATED,
+    openapi_extra=OPTIONAL_AUTH_OPENAPI,
 )
 def feedback_conversation(
     conversation_id: str,

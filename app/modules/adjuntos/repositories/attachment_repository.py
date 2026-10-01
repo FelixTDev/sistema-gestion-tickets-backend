@@ -13,6 +13,14 @@ class AttachmentRepository:
     def get_ticket(self, session: Session, ticket_id: str) -> Ticket | None:
         return session.get(Ticket, ticket_id)
 
+    def get_ticket_for_update(self, session: Session, ticket_id: str) -> Ticket | None:
+        return session.exec(
+            select(Ticket)
+            .where(Ticket.id == ticket_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
+
     def get_comment(self, session: Session, comment_id: str) -> TicketComment | None:
         return session.get(TicketComment, comment_id)
 

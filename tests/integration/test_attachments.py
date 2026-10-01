@@ -164,6 +164,7 @@ def test_upload_list_download_and_delete_attachment(attachment_client):
     assert [item["id"] for item in listed.json()] == [body["id"]]
     assert downloaded.status_code == 200
     assert downloaded.content == PDF_BYTES
+    assert downloaded.headers["content-type"].startswith("application/octet-stream")
     assert downloaded.headers["content-disposition"].startswith("attachment;")
     assert downloaded.headers["x-content-type-options"] == "nosniff"
     assert downloaded.headers["cache-control"] == "no-store"
@@ -342,3 +343,66 @@ def test_attachment_history_records_actor_without_binary(attachment_client):
     }
     assert all(item.actor_id is not None for item in history)
     assert all("%PDF" not in (item.description or "") for item in history)
+
+
+@pytest.mark.parametrize("terminal_status", ["CERRADO", "CANCELADO"])
+def test_terminal_ticket_blocks_attachment_mutations_but_keeps_read_access(
+    attachment_client,
+    terminal_status,
+):
+    client, engine = attachment_client
+    owner_token = login(client, "cliente@demo.com")
+    supervisor_token = login(client, "supervisor@demo.com")
+    _advisor_token, advisor_id = advisor_credentials(client)
+    ticket = create_ticket(client, owner_token, category_id(engine))
+    existing = upload(client, ticket["id"], owner_token)
+    assert existing.status_code == 201
+    attachment_id = existing.json()["id"]
+
+    if terminal_status == "CERRADO":
+        assign_ticket(client, ticket["id"], supervisor_token, advisor_id)
+        for next_status in ("EN_PROCESO", "RESUELTO"):
+            response = client.post(
+                f"/api/v1/tickets/{ticket['id']}/status",
+                headers={"Authorization": f"Bearer {supervisor_token}"},
+                json={"status": next_status},
+            )
+            assert response.status_code == 200
+        terminal = client.post(
+            f"/api/v1/tickets/{ticket['id']}/close",
+            headers={"Authorization": f"Bearer {supervisor_token}"},
+        )
+    else:
+        terminal = client.post(
+            f"/api/v1/tickets/{ticket['id']}/cancel",
+            headers={"Authorization": f"Bearer {supervisor_token}"},
+            json={"reason": "Solicitud cancelada antes de modificar adjuntos"},
+        )
+    assert terminal.status_code == 200
+    assert terminal.json()["status"] == terminal_status
+
+    rejected_upload = upload(
+        client,
+        ticket["id"],
+        owner_token,
+        filename="posterior.pdf",
+    )
+    rejected_delete = client.delete(
+        f"/api/v1/attachments/{attachment_id}",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    listed = client.get(
+        f"/api/v1/tickets/{ticket['id']}/attachments",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    downloaded = client.get(
+        f"/api/v1/attachments/{attachment_id}/download",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+
+    assert rejected_upload.status_code == 409
+    assert rejected_delete.status_code == 409
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [attachment_id]
+    assert downloaded.status_code == 200
+    assert downloaded.content == PDF_BYTES

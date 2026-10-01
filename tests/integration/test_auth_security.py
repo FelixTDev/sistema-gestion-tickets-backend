@@ -157,7 +157,7 @@ def test_reset_password_rejects_invalid_tokens(
     response = security_client.post("/api/v1/auth/reset-password", json=payload)
 
     assert response.status_code == 400
-    assert "token" not in response.json()["detail"].casefold()
+    assert "token" not in response.json()["message"].casefold()
 
 
 def test_reset_password_rejects_invalid_password_policy(

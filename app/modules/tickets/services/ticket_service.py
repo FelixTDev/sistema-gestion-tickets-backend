@@ -21,7 +21,10 @@ from app.modules.tickets.models.ticket import (
     TicketStatus,
 )
 from app.modules.tickets.repositories.ticket_repository import TicketRepository
-from app.modules.tickets.schemas.operations import OperationalQueue
+from app.modules.tickets.schemas.operations import (
+    OperationalQueue,
+    TicketReleaseRequest,
+)
 from app.modules.tickets.schemas.ticket import (
     AssignmentCreate,
     CommentCreate,
@@ -30,6 +33,7 @@ from app.modules.tickets.schemas.ticket import (
     TicketCreate,
 )
 from app.modules.tickets.services.sla_service import SlaService
+from app.shared.exceptions import AppError
 from app.shared.pagination import PaginationResult
 
 ALLOWED_TRANSITIONS: dict[TicketStatus, set[TicketStatus]] = {
@@ -49,6 +53,15 @@ ALLOWED_TRANSITIONS: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.CERRADO: set(),
     TicketStatus.CANCELADO: set(),
 }
+
+REQUIRES_ASSIGNED_ADVISOR = frozenset(
+    {
+        TicketStatus.ASIGNADO,
+        TicketStatus.EN_PROCESO,
+        TicketStatus.PENDIENTE_CLIENTE,
+        TicketStatus.RESUELTO,
+    }
+)
 
 
 class TicketService:
@@ -566,11 +579,11 @@ class TicketService:
         self,
         session: Session,
         ticket_id: str,
+        data: TicketReleaseRequest,
         actor: AuthenticatedUser,
-        expected_version: int | None = None,
     ) -> Ticket:
         self._require_staff(actor)
-        ticket = self._get_mutable_ticket(session, ticket_id, expected_version)
+        ticket = self._get_mutable_ticket(session, ticket_id, data.expected_version)
         self._ensure_open(ticket)
         if actor.role == "ASESOR" and ticket.assigned_advisor_id != actor.user.id:
             raise HTTPException(
@@ -579,6 +592,7 @@ class TicketService:
         if ticket.assigned_advisor_id is None:
             raise HTTPException(status_code=409, detail="El ticket no está asignado")
         old = ticket.assigned_advisor_id
+        old_status = ticket.status
         assignment = self.repository.current_assignment(session, ticket.id)
         now = datetime.now(UTC)
         if assignment is not None:
@@ -586,8 +600,10 @@ class TicketService:
             session.add(assignment)
         ticket.assigned_advisor_id = None
         ticket.assigned_at = None
-        if ticket.status == TicketStatus.ASIGNADO:
-            ticket.status = TicketStatus.NUEVO
+        ticket.status = TicketStatus.NUEVO
+        ticket.resolved_at = None
+        ticket.closed_at = None
+        ticket.cancelled_at = None
         self._touch(ticket, now)
         self._history(
             session,
@@ -596,7 +612,16 @@ class TicketService:
             "RELEASED",
             old,
             None,
-            "Ticket liberado de la bandeja del asesor",
+            data.reason,
+        )
+        self._history(
+            session,
+            ticket.id,
+            actor,
+            "STATUS_CHANGED",
+            old_status,
+            TicketStatus.NUEVO,
+            f"Liberación: {data.reason}",
         )
         session.commit()
         session.refresh(ticket)
@@ -849,6 +874,15 @@ class TicketService:
             raise HTTPException(
                 status_code=403,
                 detail="Solo un supervisor puede cancelar tickets",
+            )
+        if (
+            new_status in REQUIRES_ASSIGNED_ADVISOR
+            and ticket.assigned_advisor_id is None
+        ):
+            raise AppError(
+                409,
+                "TICKET_ASSIGNMENT_REQUIRED",
+                "El ticket requiere un asesor asignado.",
             )
         if (
             ticket.status == TicketStatus.RESUELTO

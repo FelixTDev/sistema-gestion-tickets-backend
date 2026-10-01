@@ -13,6 +13,31 @@ Prototipo académico independiente para gestión de tickets. No se conecta a sis
 
 Swagger queda disponible en `http://localhost:8000/docs` y el health check en `/api/v1/health`.
 
+## Ejecución completa con Docker Compose
+
+`docker compose up -d` respeta el orden operativo
+`MySQL → migraciones → seed → API → readiness`. Los servicios `migrate` y
+`seed` deben terminar con código 0 antes de iniciar la API; no son procesos de
+larga duración. La API se considera saludable únicamente cuando
+`GET /api/v1/health/ready` puede ejecutar la consulta mínima a MySQL.
+
+```bash
+docker compose build --no-cache api
+docker compose up -d
+docker compose ps --all
+```
+
+Los datos de MySQL se conservan en el volumen nombrado `mysql_data` y los
+binarios de adjuntos en `attachments_data`, montado en `/app/var/uploads`.
+`docker compose down` elimina contenedores y red, pero conserva ambos volúmenes;
+no se debe usar `down -v` si se quieren preservar los datos.
+
+La imagen ejecuta la aplicación con el usuario no privilegiado `app` (UID/GID
+10001). Compose habilita raíz de solo lectura, `/tmp` como `tmpfs`,
+`no-new-privileges`, eliminación de todas las capacidades Linux e `init`. Estos
+controles no sustituyen TLS, firewall, límites de cuerpo ni rate limiting de un
+proxy de producción.
+
 ### CORS para el frontend
 
 Los orígenes permitidos se configuran mediante `CORS_ORIGINS` como una lista JSON.
@@ -25,9 +50,34 @@ CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
 
 Para varios orígenes utiliza, por ejemplo,
 `["http://localhost:5173","https://frontend.example"]`. La API permite los métodos
-`GET`, `POST`, `PATCH`, `DELETE` y `OPTIONS`, y los encabezados `Content-Type` y
-`Authorization`. CORS no habilita credenciales basadas en cookies; la autenticación
-continúa usando tokens Bearer en el encabezado `Authorization`.
+`GET`, `POST`, `PATCH`, `DELETE` y `OPTIONS`, y los encabezados `Content-Type`,
+`Authorization` y `X-Request-ID`. La respuesta expone `X-Request-ID` para que el
+frontend pueda correlacionar errores. CORS no habilita credenciales basadas en
+cookies; la autenticación continúa usando tokens Bearer en el encabezado
+`Authorization`.
+
+### Errores y correlación
+
+Cada respuesta incluye `X-Request-ID`. Un identificador enviado por el cliente
+solo se conserva si cumple `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`; de lo contrario
+se genera un UUID. Los errores públicos usan el contrato uniforme:
+
+```json
+{
+  "code": "VALIDATION_ERROR",
+  "message": "La solicitud contiene datos inválidos.",
+  "details": null,
+  "request_id": "frontend-2026.10:request_1"
+}
+```
+
+Los errores inesperados y de readiness no devuelven SQL, DSN, trazas, tokens ni
+credenciales. Las cabeceras HTTP necesarias, como `WWW-Authenticate`, se
+conservan.
+
+`GET /api/v1/health` es liveness y no consulta dependencias.
+`GET /api/v1/health/ready` ejecuta una consulta mínima con timeout y responde
+`503` con código `DATABASE_NOT_READY` si MySQL no está disponible.
 
 ## Autenticación
 
@@ -36,6 +86,10 @@ El registro crea únicamente usuarios con rol `CLIENTE`. El login devuelve un ac
 La recuperación de contraseña responde siempre con el mismo mensaje, exista o no la cuenta, para evitar enumeración de correos. Los tokens de recuperación y verificación se almacenan únicamente como hashes, tienen expiración y solo pueden utilizarse una vez. El registro prepara la verificación de correo sin bloquear el login existente. En desarrollo se utiliza un adaptador de correo `NoopEmailProvider`: no envía mensajes, no guarda tokens y no los escribe en logs; un proveedor real debe inyectarse fuera de este prototipo.
 
 Los JWT emitidos por versiones anteriores pueden no incluir `jti` y se aceptan por compatibilidad. El logout no puede revocar individualmente esos tokens legacy: permanecen válidos hasta su expiración, salvo que un cambio o recuperación de contraseña active la invalidación global del usuario. Los tokens nuevos sí quedan vinculados a una sesión persistente y son revocables individualmente.
+
+La API no emite refresh tokens. La renovación requiere un nuevo login; esta
+decisión evita introducir un segundo ciclo de vida de credenciales hasta que se
+aprueben su rotación, revocación y almacenamiento en el frontend.
 
 Endpoints de identidad y seguridad:
 
@@ -50,6 +104,32 @@ Las cuentas de acceso local usan las variables `DEMO_CLIENT_PASSWORD`,
 `DEMO_ADVISOR_PASSWORD` y `DEMO_SUPERVISOR_PASSWORD`. El archivo
 `.env.example` incluye `demo-password-local` como valor de desarrollo para las
 tres cuentas; el seed guarda únicamente hashes Argon2.
+
+### Proveedor de correo
+
+`EMAIL_PROVIDER=noop` solo es válido en `development`, `local` y `test`. En
+`staging` y `production` se debe seleccionar explícitamente `smtp`; además,
+`DEBUG` debe ser `false`, `SECRET_KEY` debe ser segura y la configuración SMTP
+debe superar la validación de arranque.
+
+Variables exactas:
+
+- `EMAIL_PROVIDER`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `SMTP_FROM_EMAIL`
+- `SMTP_USE_TLS`
+- `SMTP_STARTTLS`
+- `SMTP_TIMEOUT_SECONDS`
+
+`SMTP_USE_TLS` selecciona TLS implícito y `SMTP_STARTTLS` actualiza una conexión
+SMTP normal; no pueden activarse simultáneamente. En `staging` y `production`
+una de las dos opciones es obligatoria y el transporte verifica certificado y
+hostname con el contexto seguro del sistema. Usuario y contraseña deben
+configurarse juntos. Las credenciales se inyectan en runtime y no deben
+registrarse ni incorporarse a la imagen.
 
 ## Perfil y preferencias de usuario
 
@@ -239,6 +319,8 @@ Endpoints principales:
 - `POST /api/v1/tickets/{ticket_id}/comments`: agregar comentarios autorizados.
 - `GET /api/v1/tickets/{ticket_id}/comments`: recuperar los comentarios autorizados en orden ascendente por fecha.
 - `POST /api/v1/tickets/{ticket_id}/assignments`: asignación realizada por un supervisor.
+- `POST /api/v1/tickets/{ticket_id}/take`: toma de un ticket nuevo por un asesor.
+- `POST /api/v1/tickets/{ticket_id}/release`: liberación con motivo obligatorio.
 - `POST /api/v1/tickets/{ticket_id}/status`: transición de estado válida.
 - `POST /api/v1/tickets/{ticket_id}/close`, `/reopen` y `/cancel`: cierre, reapertura con motivo y cancelación con motivo.
 
@@ -276,7 +358,29 @@ curl http://localhost:8000/api/v1/tickets/<ticket_id>/comments \
 
 Las transiciones, asignaciones, comentarios, cancelaciones y motivos quedan
 registrados en `ticket_history` junto con el actor y los valores anterior y nuevo.
-Los tickets cerrados no admiten modificaciones directas.
+Los tickets cerrados no admiten modificaciones directas. `NUEVO` siempre queda
+sin asesor; `ASIGNADO`, `EN_PROCESO`, `PENDIENTE_CLIENTE` y `RESUELTO` requieren
+un asesor. `CERRADO` y `CANCELADO` son terminales.
+
+Release usa un cuerpo específico:
+
+```json
+{
+  "reason": "Cambio de turno operativo",
+  "expected_version": 3
+}
+```
+
+`reason` es obligatorio y `expected_version` es opcional. La liberación vuelve
+el ticket a `NUEVO`, limpia asignación y timestamps terminales, registra
+historial y auditoría, y no reinicia ni modifica el registro SLA existente.
+La migración defensiva aplica la misma normalización a datos inconsistentes,
+cierra sin borrar cualquier asignación activa asociada y deja historial y
+auditoría `SYSTEM` deduplicables antes de crear la restricción MySQL.
+
+No existe `PATCH /api/v1/tickets/{ticket_id}`. La edición general del ticket
+queda pendiente hasta que se aprueben una pantalla, matriz de permisos y reglas
+de negocio específicas; su ausencia no es una omisión del contrato actual.
 
 ### Paginación, búsqueda y filtros de tickets
 
@@ -524,3 +628,11 @@ SHA-256, nombre y cuotas por ticket. La configuración local permite PDF, PNG,
 JPG/JPEG, GIF y texto plano; ejecutables, scripts, HTML y SVG no forman parte
 de la lista permitida. Los archivos subidos se excluyen de Git mediante
 `var/uploads/` en `.gitignore`.
+
+Las cargas y eliminaciones se bloquean cuando el ticket está `CERRADO` o
+`CANCELADO`; el listado y la descarga se conservan según RBAC. En Docker, el
+almacenamiento local usa el volumen nombrado `attachments_data`, por lo que los
+binarios sobreviven a la recreación del contenedor de API. La mutación vuelve a
+validar el estado bajo bloqueo de fila antes de persistir metadatos, de modo que
+un cierre concurrente quede ordenado antes o después del adjunto, nunca entre la
+validación y el commit.

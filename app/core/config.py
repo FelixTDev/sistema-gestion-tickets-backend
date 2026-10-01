@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import EmailStr, SecretStr, TypeAdapter, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     debug: bool = False
     database_url: str = "mysql+pymysql://tickets:tickets@localhost:3306/tickets"
+    database_connect_timeout_seconds: int = 3
     secret_key: str = "change-this-development-secret-key-32-chars-min"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
@@ -18,6 +19,15 @@ class Settings(BaseSettings):
     password_require_digit: bool = True
     password_reset_token_expire_minutes: int = 30
     email_verification_token_expire_hours: int = 24
+    email_provider: str = "noop"
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from_email: str | None = None
+    smtp_use_tls: bool = False
+    smtp_starttls: bool = True
+    smtp_timeout_seconds: int = 10
     auth_rate_limit_max_attempts: int = 5
     auth_rate_limit_window_seconds: int = 900
     auth_rate_limit_block_seconds: int = 900
@@ -106,6 +116,8 @@ class Settings(BaseSettings):
             raise ValueError("La longitud mínima de contraseña debe ser 8")
         if self.access_token_expire_minutes < 1:
             raise ValueError("La expiración del token de acceso debe ser positiva")
+        if not 1 <= self.database_connect_timeout_seconds <= 60:
+            raise ValueError("El timeout de base de datos debe estar entre 1 y 60")
         if self.password_reset_token_expire_minutes < 1:
             raise ValueError(
                 "La expiración del token de recuperación debe ser positiva"
@@ -113,6 +125,47 @@ class Settings(BaseSettings):
         if self.email_verification_token_expire_hours < 1:
             raise ValueError(
                 "La expiración del token de verificación debe ser positiva"
+            )
+        self.email_provider = self.email_provider.strip().casefold()
+        if self.email_provider not in {"noop", "smtp"}:
+            raise ValueError("EMAIL_PROVIDER debe ser noop o smtp")
+        self.smtp_host = self.smtp_host.strip() if self.smtp_host else None
+        self.smtp_username = self.smtp_username.strip() if self.smtp_username else None
+        self.smtp_from_email = (
+            self.smtp_from_email.strip() if self.smtp_from_email else None
+        )
+        if self.smtp_password is not None and not self.smtp_password.get_secret_value():
+            self.smtp_password = None
+        if not 1 <= self.smtp_port <= 65_535:
+            raise ValueError("SMTP_PORT debe estar entre 1 y 65535")
+        if not 1 <= self.smtp_timeout_seconds <= 60:
+            raise ValueError("SMTP_TIMEOUT_SECONDS debe estar entre 1 y 60")
+        if self.smtp_use_tls and self.smtp_starttls:
+            raise ValueError("SMTP_USE_TLS y SMTP_STARTTLS son mutuamente excluyentes")
+        if bool(self.smtp_username) != bool(self.smtp_password):
+            raise ValueError("SMTP_USERNAME y SMTP_PASSWORD deben configurarse juntos")
+        environment = self.app_env.strip().casefold()
+        if environment in {"production", "staging"} and self.debug:
+            raise ValueError("DEBUG debe estar deshabilitado en staging/production")
+        if self.email_provider == "noop" and environment not in {
+            "development",
+            "local",
+            "test",
+        }:
+            raise ValueError("EMAIL_PROVIDER=smtp es obligatorio fuera de local/test")
+        if self.email_provider == "smtp":
+            if self.smtp_host is None or self.smtp_from_email is None:
+                raise ValueError(
+                    "SMTP_HOST y SMTP_FROM_EMAIL son obligatorios para SMTP"
+                )
+            if environment in {"production", "staging"} and not (
+                self.smtp_use_tls or self.smtp_starttls
+            ):
+                raise ValueError(
+                    "SMTP_USE_TLS o SMTP_STARTTLS es obligatorio en staging/production"
+                )
+            self.smtp_from_email = str(
+                TypeAdapter(EmailStr).validate_python(self.smtp_from_email)
             )
         if self.auth_rate_limit_max_attempts < 1:
             raise ValueError("El límite de intentos debe ser positivo")

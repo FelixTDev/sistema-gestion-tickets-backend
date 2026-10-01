@@ -15,8 +15,12 @@ from app.modules.adjuntos.services.attachment_service import (
     AttachmentService,
     AttachmentTooLargeError,
 )
+from app.shared.api_errors import error_responses
 
-router = APIRouter(tags=["attachments"])
+router = APIRouter(
+    tags=["attachments"],
+    responses=error_responses(401, 403, 404, 409, 413, 415, 422),
+)
 
 
 def get_attachment_service() -> AttachmentService:
@@ -68,7 +72,20 @@ def list_attachments(
     ]
 
 
-@router.get("/attachments/{attachment_id}/download")
+@router.get(
+    "/attachments/{attachment_id}/download",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Contenido binario privado del adjunto",
+            "content": {
+                "application/octet-stream": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            },
+        }
+    },
+)
 def download_attachment(
     attachment_id: str,
     session: SessionDependency,
@@ -84,7 +101,7 @@ def download_attachment(
     }
     return StreamingResponse(
         _stream_chunks(stream),
-        media_type=attachment.mime_type_detected,
+        media_type="application/octet-stream",
         headers=headers,
         background=BackgroundTask(stream.close),
     )

@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class OperationalQueue(StrEnum):
@@ -15,3 +15,15 @@ class OperationalQueue(StrEnum):
 
 class TicketActionRequest(BaseModel):
     expected_version: int | None = Field(default=None, ge=1)
+
+
+class TicketReleaseRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("El motivo no puede estar vacío")
+        return value.strip()

@@ -60,7 +60,7 @@ def test_rejects_duplicate_email(auth_client: TestClient):
     response = auth_client.post("/api/v1/auth/register", json=payload)
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "El correo electrónico ya está registrado"
+    assert response.json()["message"] == "El correo electrónico ya está registrado"
 
 
 @pytest.mark.parametrize(

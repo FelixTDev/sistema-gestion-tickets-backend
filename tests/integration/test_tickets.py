@@ -236,12 +236,25 @@ def test_all_allowed_transitions_and_invalid_transition(ticket_client):
     client, engine = ticket_client
     client_token = token(client, "cliente@demo.com")
     supervisor_token = token(client, "supervisor@demo.com")
+    advisor_login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "asesor@demo.com", "password": "demo-password-local"},
+    ).json()
     ticket = create_ticket(client, client_token, category_id(engine))
     ticket_id = ticket["id"]
     invalid = transition(client, ticket_id, supervisor_token, "EN_PROCESO")
+    assigned_without_advisor = transition(
+        client, ticket_id, supervisor_token, "ASIGNADO"
+    )
 
+    assert assigned_without_advisor.status_code == 409
     assert (
-        transition(client, ticket_id, supervisor_token, "ASIGNADO").status_code == 200
+        client.post(
+            f"/api/v1/tickets/{ticket_id}/assignments",
+            headers={"Authorization": f"Bearer {supervisor_token}"},
+            json={"advisor_id": advisor_login["user"]["id"]},
+        ).status_code
+        == 201
     )
     assert (
         transition(client, ticket_id, supervisor_token, "EN_PROCESO").status_code == 200
@@ -267,7 +280,8 @@ def test_all_allowed_transitions_and_invalid_transition(ticket_client):
     )
     assert transition(client, ticket_id, supervisor_token, "CERRADO").status_code == 200
     assert invalid.status_code == 409
-    assert "transición" in invalid.json()["detail"].lower()
+    assert invalid.json()["code"] == "TICKET_ASSIGNMENT_REQUIRED"
+    assert "asesor" in invalid.json()["message"].lower()
 
 
 @pytest.mark.parametrize(
@@ -283,8 +297,21 @@ def test_cancellation_is_allowed_from_open_states(ticket_client, initial_path):
     client, engine = ticket_client
     client_token = token(client, "cliente@demo.com")
     supervisor_token = token(client, "supervisor@demo.com")
+    advisor_login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "asesor@demo.com", "password": "demo-password-local"},
+    ).json()
     ticket = create_ticket(client, client_token, category_id(engine))
-    for next_status in initial_path:
+    remaining_path = initial_path
+    if initial_path:
+        assigned = client.post(
+            f"/api/v1/tickets/{ticket['id']}/assignments",
+            headers={"Authorization": f"Bearer {supervisor_token}"},
+            json={"advisor_id": advisor_login["user"]["id"]},
+        )
+        assert assigned.status_code == 201
+        remaining_path = initial_path[1:]
+    for next_status in remaining_path:
         assert (
             transition(client, ticket["id"], supervisor_token, next_status).status_code
             == 200
@@ -345,10 +372,19 @@ def test_reopen_resolved_ticket_requires_reason(ticket_client):
     client, engine = ticket_client
     client_token = token(client, "cliente@demo.com")
     supervisor_token = token(client, "supervisor@demo.com")
+    advisor_login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "asesor@demo.com", "password": "demo-password-local"},
+    ).json()
     ticket = create_ticket(client, client_token, category_id(engine))
     ticket_id = ticket["id"]
     assert (
-        transition(client, ticket_id, supervisor_token, "ASIGNADO").status_code == 200
+        client.post(
+            f"/api/v1/tickets/{ticket_id}/assignments",
+            headers={"Authorization": f"Bearer {supervisor_token}"},
+            json={"advisor_id": advisor_login["user"]["id"]},
+        ).status_code
+        == 201
     )
     assert (
         transition(client, ticket_id, supervisor_token, "EN_PROCESO").status_code == 200
@@ -371,9 +407,19 @@ def test_closed_ticket_cannot_be_modified_directly(ticket_client):
     client, engine = ticket_client
     client_token = token(client, "cliente@demo.com")
     supervisor_token = token(client, "supervisor@demo.com")
+    advisor_login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "asesor@demo.com", "password": "demo-password-local"},
+    ).json()
     ticket = create_ticket(client, client_token, category_id(engine))
     ticket_id = ticket["id"]
-    for status in ("ASIGNADO", "EN_PROCESO", "RESUELTO", "CERRADO"):
+    assigned = client.post(
+        f"/api/v1/tickets/{ticket_id}/assignments",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+        json={"advisor_id": advisor_login["user"]["id"]},
+    )
+    assert assigned.status_code == 201
+    for status in ("EN_PROCESO", "RESUELTO", "CERRADO"):
         assert (
             transition(client, ticket_id, supervisor_token, status).status_code == 200
         )

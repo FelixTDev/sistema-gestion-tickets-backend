@@ -373,10 +373,20 @@ def test_terminal_states_stop_and_reopen_continues_existing_clock(sla_client):
     client, engine = sla_client
     client_token = login(client, "cliente@demo.com")
     supervisor_token = login(client, "supervisor@demo.com")
+    advisor_login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "asesor@demo.com", "password": "demo-password-local"},
+    ).json()
     category = category_id(engine)
     ticket = create_ticket(client, client_token, category)
     ticket_id = ticket["id"]
-    for status in ("ASIGNADO", "EN_PROCESO", "RESUELTO"):
+    assigned = client.post(
+        f"/api/v1/tickets/{ticket_id}/assignments",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+        json={"advisor_id": advisor_login["user"]["id"]},
+    )
+    assert assigned.status_code == 201
+    for status in ("EN_PROCESO", "RESUELTO"):
         response = client.post(
             f"/api/v1/tickets/{ticket_id}/status",
             headers={"Authorization": f"Bearer {supervisor_token}"},

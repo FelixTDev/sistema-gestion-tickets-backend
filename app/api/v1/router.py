@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.v1.health_router import router as health_router
 from app.modules.adjuntos.api.router import router as attachments_router
 from app.modules.auditoria.api.router import router as audit_router
 from app.modules.chatbot.api.router import router as chatbot_router
@@ -13,6 +14,7 @@ from app.modules.usuarios.api.auth_router import router as auth_router
 from app.modules.usuarios.api.user_router import router as users_router
 
 router = APIRouter(prefix="/api/v1")
+router.include_router(health_router)
 router.include_router(auth_router)
 router.include_router(users_router)
 router.include_router(faq_router)
@@ -24,8 +26,3 @@ router.include_router(attachments_router)
 router.include_router(notifications_router)
 router.include_router(reports_router)
 router.include_router(audit_router)
-
-
-@router.get("/health", tags=["health"])
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "ticket-management-api"}

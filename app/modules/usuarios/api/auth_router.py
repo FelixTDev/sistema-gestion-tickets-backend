@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlmodel import Session
 
 from app.api.deps import CurrentUser
+from app.core.config import get_settings
 from app.db.session import get_session
 from app.modules.usuarios.schemas.auth import (
     ChangePasswordRequest,
@@ -26,14 +27,14 @@ from app.modules.usuarios.services.auth_service import (
 )
 from app.modules.usuarios.services.email_provider import (
     EmailProvider,
-    NoopEmailProvider,
+    build_email_provider,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def get_email_provider() -> EmailProvider:
-    return NoopEmailProvider()
+    return build_email_provider(get_settings())
 
 
 EmailProviderDependency = Annotated[EmailProvider, Depends(get_email_provider)]

@@ -24,7 +24,7 @@ from app.modules.usuarios.schemas.auth import (
 )
 from app.modules.usuarios.services.email_provider import (
     EmailProvider,
-    NoopEmailProvider,
+    build_email_provider,
 )
 from app.modules.usuarios.services.rate_limit_service import AuthRateLimiter
 from app.shared.datetime import as_utc
@@ -60,7 +60,11 @@ class AuthService:
     ) -> None:
         self.repository = repository or UserRepository()
         self.auth_repository = auth_repository or AuthRepository()
-        self.email_provider = email_provider or NoopEmailProvider()
+        self.email_provider = (
+            email_provider
+            if email_provider is not None
+            else build_email_provider(get_settings())
+        )
         self.rate_limiter = rate_limiter or AuthRateLimiter(self.auth_repository)
         self.notifications = notification_service or NotificationService()
         self.audit = audit_service or AuditService()

@@ -3,8 +3,9 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security.utils import get_authorization_scheme_param
 from sqlmodel import Session
 
 from app.core.config import get_settings
@@ -38,16 +39,20 @@ def get_current_user(
 
 
 def get_optional_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     session: Annotated[Session, Depends(get_session)],
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
 ) -> AuthenticatedUser | None:
-    if credentials is None:
+    if authorization is None:
         return None
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Credenciales de autenticación inválidas",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    scheme, token = get_authorization_scheme_param(authorization)
+    if scheme.casefold() != "bearer" or not token:
+        raise unauthorized
+    credentials = HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
     return _authenticate(credentials, session, unauthorized)
 
 

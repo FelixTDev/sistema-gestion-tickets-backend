@@ -11,6 +11,7 @@ from app.db.session import get_session
 from app.main import app
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.tickets.models.ticket import Ticket, TicketStatus
+from app.modules.usuarios.models.user import User
 from app.seed.demo_data import seed_demo_data
 
 
@@ -48,6 +49,14 @@ def category_id(engine: object) -> str:
         category = session.exec(select(TicketCategory)).first()
         assert category is not None
         return category.id
+
+
+def advisor_id(engine: object) -> str:
+    with Session(engine) as session:
+        advisor = session.exec(
+            select(User).where(User.email == "asesor@demo.com")
+        ).one()
+        return advisor.id
 
 
 def create_ticket(
@@ -223,7 +232,8 @@ def test_combined_filters_and_inclusive_date_boundaries(pagination_client):
         status=TicketStatus.ASIGNADO,
         source="MANUAL",
         created_at=boundary,
-        assigned_advisor_id=None,
+        assigned_advisor_id=advisor_id(engine),
+        assigned_at=boundary,
     )
     set_ticket_fields(
         engine,
@@ -352,7 +362,13 @@ def test_advisor_filter_returns_only_the_requested_assignment(pagination_client)
     category = category_id(engine)
     assigned = create_ticket(client, client_token, category, subject="Asignado")
     unassigned = create_ticket(client, client_token, category, subject="Sin asignar")
-    set_ticket_fields(engine, assigned["id"], assigned_advisor_id=advisor_id)
+    set_ticket_fields(
+        engine,
+        assigned["id"],
+        status=TicketStatus.ASIGNADO,
+        assigned_advisor_id=advisor_id,
+        assigned_at=datetime.now(UTC),
+    )
 
     response = client.get(
         "/api/v1/tickets",

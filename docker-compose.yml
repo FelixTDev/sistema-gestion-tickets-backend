@@ -1,3 +1,40 @@
+x-app-environment: &app-environment
+  DATABASE_URL: mysql+pymysql://${MYSQL_USER:-tickets}:${MYSQL_PASSWORD:-tickets}@db:3306/${MYSQL_DATABASE:-tickets}
+  DATABASE_CONNECT_TIMEOUT_SECONDS: ${DATABASE_CONNECT_TIMEOUT_SECONDS:-3}
+  APP_ENV: ${APP_ENV:-development}
+  DEBUG: ${DEBUG:-true}
+  SECRET_KEY: ${SECRET_KEY:-change-this-development-secret-key-32-chars-min}
+  TRUSTED_HOSTS: '${TRUSTED_HOSTS:-["localhost","127.0.0.1","testserver"]}'
+  CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}'
+  ATTACHMENT_STORAGE_DIR: /app/var/uploads
+  EMAIL_PROVIDER: ${EMAIL_PROVIDER:-noop}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+  SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+  SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+  SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-10}
+  DEMO_CLIENT_PASSWORD: ${DEMO_CLIENT_PASSWORD:-demo-password-local}
+  DEMO_ADVISOR_PASSWORD: ${DEMO_ADVISOR_PASSWORD:-demo-password-local}
+  DEMO_SUPERVISOR_PASSWORD: ${DEMO_SUPERVISOR_PASSWORD:-demo-password-local}
+
+x-app-service: &app-service
+  image: ticket-management-backend:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: *app-environment
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  init: true
+
 services:
   db:
     image: mysql:8.4
@@ -15,20 +52,44 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 10s
+    restart: unless-stopped
 
-  api:
-    build: .
-    environment:
-      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-tickets}:${MYSQL_PASSWORD:-tickets}@db:3306/${MYSQL_DATABASE:-tickets}
-      APP_ENV: development
-      DEBUG: "true"
-      SECRET_KEY: change-this-development-secret-key-32-chars-min
-      CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}'
-    ports:
-      - "8000:8000"
+  migrate:
+    <<: *app-service
+    command: ["python", "-m", "alembic", "upgrade", "head"]
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  seed:
+    <<: *app-service
+    command: ["python", "-m", "app.seed.demo_data"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  api:
+    <<: *app-service
+    ports:
+      - "8000:8000"
+    volumes:
+      - attachments_data:/app/var/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   mysql_data:
+  attachments_data:
