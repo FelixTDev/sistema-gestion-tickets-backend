@@ -9,6 +9,7 @@ from app.db import models  # noqa: F401
 from app.db.session import get_session
 from app.main import app
 from app.modules.conocimiento.models.faq import FAQ
+from app.modules.tickets.models.ticket import Ticket
 from app.seed.demo_data import seed_demo_data
 
 
@@ -80,6 +81,69 @@ def test_saves_user_and_bot_messages(chatbot_client):
     assert len(conversation.json()["messages"]) == 2
 
 
+@pytest.mark.parametrize(
+    "content",
+    ["hola", "HOLA!!!", " ¡Buenas! ", "Buenos   días.", "¿BUENAS tardes?"],
+)
+def test_greeting_gets_a_friendly_reply_without_escalating(chatbot_client, content):
+    client, engine = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": content},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["bot_message"]["content"] == (
+        "¡Hola! ¿En qué puedo ayudarte hoy? Puedo orientarte sobre preguntas "
+        "frecuentes o el seguimiento de una solicitud."
+    )
+    assert body["resolved"] is True
+    assert body["offers_ticket"] is False
+    assert body["fallback_reason"] is None
+    assert body["conversation_status"] == "ACTIVE"
+    assert body["faq_id"] is None
+    assert body["sources"] == []
+
+    conversation = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+    assert conversation["status"] == "ACTIVE"
+    assert conversation["escalation_reason"] is None
+    assert conversation["escalated_at"] is None
+    assert len(conversation["messages"]) == 2
+    with Session(engine) as session:
+        assert session.exec(select(Ticket)).all() == []
+
+    advisor_token = login(client, "asesor@demo.com")
+    denied = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        headers={"Authorization": f"Bearer {advisor_token}"},
+        json={"content": "hola"},
+    )
+    assert denied.status_code == 403
+
+
+def test_greeting_with_a_real_question_uses_the_normal_query_flow(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": "Hola, no puedo ingresar a mi cuenta"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["bot_message"]["content"] != (
+        "¡Hola! ¿En qué puedo ayudarte hoy? Puedo orientarte sobre preguntas "
+        "frecuentes o el seguimiento de una solicitud."
+    )
+    assert body["requires_clarification"] is True
+    assert body["conversation_status"] == "WAITING_CLARIFICATION"
+    assert body["offers_ticket"] is False
+
+
 def test_answers_active_faq_by_keyword_and_normalizes_accents(chatbot_client):
     client, _ = chatbot_client
     conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
@@ -95,7 +159,9 @@ def test_answers_active_faq_by_keyword_and_normalizes_accents(chatbot_client):
     assert response.json()["offers_ticket"] is False
 
 
-def test_ignores_inactive_faq_and_offers_ticket_without_creating_one(chatbot_client):
+def test_ignores_inactive_faq_and_asks_for_clarification_without_ticket(
+    chatbot_client,
+):
     client, engine = chatbot_client
     with Session(engine) as session:
         faq = session.exec(select(FAQ).where(FAQ.question.like("%requisitos%"))).first()
@@ -110,7 +176,9 @@ def test_ignores_inactive_faq_and_offers_ticket_without_creating_one(chatbot_cli
 
     assert response.status_code == 200
     assert response.json()["resolved"] is False
-    assert response.json()["offers_ticket"] is True
+    assert response.json()["requires_clarification"] is True
+    assert response.json()["offers_ticket"] is False
+    assert response.json()["conversation_status"] == "WAITING_CLARIFICATION"
     assert response.json()["bot_message"]["intent"] is None
 
 
@@ -125,7 +193,10 @@ def test_returns_unresolved_response_for_unknown_query(chatbot_client):
 
     assert response.status_code == 200
     assert response.json()["resolved"] is False
-    assert response.json()["offers_ticket"] is True
+    assert response.json()["requires_clarification"] is True
+    assert response.json()["offers_ticket"] is False
+    assert response.json()["fallback_reason"] is None
+    assert response.json()["conversation_status"] == "WAITING_CLARIFICATION"
 
 
 def test_authorizes_conversation_owner_and_rejects_other_client(chatbot_client):

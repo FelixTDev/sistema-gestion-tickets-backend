@@ -53,6 +53,21 @@ _STOP_WORDS = {
     "y",
 }
 _MARKUP_PATTERN = re.compile(r"<[^>]+>|javascript\s*:", re.IGNORECASE)
+_GREETING_PHRASES = frozenset(
+    {
+        "hola",
+        "buenas",
+        "buenos dias",
+        "buenas tardes",
+        "hola buenas",
+        "hola buenos dias",
+        "hola buenas tardes",
+    }
+)
+_GREETING_ANSWER = (
+    "¡Hola! ¿En qué puedo ayudarte hoy? Puedo orientarte sobre preguntas "
+    "frecuentes o el seguimiento de una solicitud."
+)
 
 
 @dataclass(frozen=True)
@@ -159,68 +174,76 @@ class ChatbotService:
                 content=clean_content,
             ),
         )
-        matches = self._find_matches(session, clean_content)
-        result = self._response_for_matches(conversation, matches)
+        is_greeting = self._is_pure_greeting(clean_content)
+        matches = [] if is_greeting else self._find_matches(session, clean_content)
+        result = (
+            self._greeting_response()
+            if is_greeting
+            else self._response_for_matches(conversation, matches)
+        )
         result["response_source"] = result.get("response_source", "DETERMINISTIC")
         result["sources"] = self._public_sources(matches[:1])
-        requests_last_minute = self.conversations.count_recent_ai_messages(
-            session,
-            conversation.id,
-            datetime.now(UTC) - timedelta(minutes=1),
-        )
-        ai_outcome = self.rag.generate(
-            conversation_id=conversation.id,
-            user_message=clean_content,
-            matches=matches,
-            requests_last_minute=requests_last_minute,
-            responses_in_conversation=self.conversations.count_ai_messages(
-                session, conversation.id
-            ),
-        )
-        result["ai_trace"] = ai_outcome.trace
-        if ai_outcome.accepted:
-            result["answer"] = ai_outcome.answer
-            result["resolved"] = True
-            result["offers_ticket"] = False
-            result["response_source"] = "AI"
-            result["sources"] = self._public_sources(ai_outcome.sources)
-        action = (
-            "AI_ACCEPTED"
-            if ai_outcome.accepted
-            else (
-                "AI_GUARDRAIL_REJECTED"
-                if ai_outcome.reason
-                in {
-                    "USER_INJECTION",
-                    "SENSITIVE_REQUEST",
-                    "CONTEXT_INJECTION",
-                    "UNSAFE_OUTPUT",
-                    "INVALID_SOURCES",
-                    "OUT_OF_CONTEXT",
-                    "OUTPUT_SIZE",
-                }
-                else "AI_FALLBACK"
+        if is_greeting:
+            result["ai_trace"] = None
+        else:
+            requests_last_minute = self.conversations.count_recent_ai_messages(
+                session,
+                conversation.id,
+                datetime.now(UTC) - timedelta(minutes=1),
             )
-        )
-        self.audit.record(
-            session,
-            event_type="CHATBOT_AI",
-            action=action,
-            actor_user_id=conversation.user_id,
-            actor_role=current_user.role if current_user else None,
-            resource_type="CONVERSATION",
-            resource_id=conversation.id,
-            target_user_id=conversation.user_id,
-            success=ai_outcome.accepted or action == "AI_FALLBACK",
-            error_code=None if ai_outcome.accepted else ai_outcome.reason,
-            metadata={
-                "provider": ai_outcome.trace.get("provider"),
-                "model": ai_outcome.trace.get("model"),
-                "source_count": len(ai_outcome.sources),
-                "fallback": not ai_outcome.accepted,
-            },
-            dedupe_key=f"ai:{conversation.id}:{user_message.id}",
-        )
+            ai_outcome = self.rag.generate(
+                conversation_id=conversation.id,
+                user_message=clean_content,
+                matches=matches,
+                requests_last_minute=requests_last_minute,
+                responses_in_conversation=self.conversations.count_ai_messages(
+                    session, conversation.id
+                ),
+            )
+            result["ai_trace"] = ai_outcome.trace
+            if ai_outcome.accepted:
+                result["answer"] = ai_outcome.answer
+                result["resolved"] = True
+                result["offers_ticket"] = False
+                result["response_source"] = "AI"
+                result["sources"] = self._public_sources(ai_outcome.sources)
+            action = (
+                "AI_ACCEPTED"
+                if ai_outcome.accepted
+                else (
+                    "AI_GUARDRAIL_REJECTED"
+                    if ai_outcome.reason
+                    in {
+                        "USER_INJECTION",
+                        "SENSITIVE_REQUEST",
+                        "CONTEXT_INJECTION",
+                        "UNSAFE_OUTPUT",
+                        "INVALID_SOURCES",
+                        "OUT_OF_CONTEXT",
+                        "OUTPUT_SIZE",
+                    }
+                    else "AI_FALLBACK"
+                )
+            )
+            self.audit.record(
+                session,
+                event_type="CHATBOT_AI",
+                action=action,
+                actor_user_id=conversation.user_id,
+                actor_role=current_user.role if current_user else None,
+                resource_type="CONVERSATION",
+                resource_id=conversation.id,
+                target_user_id=conversation.user_id,
+                success=ai_outcome.accepted or action == "AI_FALLBACK",
+                error_code=None if ai_outcome.accepted else ai_outcome.reason,
+                metadata={
+                    "provider": ai_outcome.trace.get("provider"),
+                    "model": ai_outcome.trace.get("model"),
+                    "source_count": len(ai_outcome.sources),
+                    "fallback": not ai_outcome.accepted,
+                },
+                dedupe_key=f"ai:{conversation.id}:{user_message.id}",
+            )
 
         conversation.turn_count += 1
         conversation.last_activity_at = datetime.now(UTC)
@@ -230,17 +253,19 @@ class ChatbotService:
             result["match"].faq.category_id if result["match"] else None
         )
         conversation.detected_intent = result["intent"]
-        conversation.pending_question = (
-            "Selecciona la opción que describe mejor tu consulta."
-            if result["requires_clarification"]
-            else None
-        )
+        conversation.pending_question = None
+        if result["requires_clarification"]:
+            conversation.pending_question = (
+                "Selecciona la opción que describe mejor tu consulta."
+                if result["options"]
+                else "Cuéntame un poco más sobre lo que necesitas."
+            )
         context = dict(conversation.context_json or {})
         if result["requires_clarification"]:
             context["clarification_attempts"] = (
                 int(context.get("clarification_attempts", 0)) + 1
             )
-        else:
+        elif result["resolved"]:
             context["clarification_attempts"] = 0
         context["last_terms"] = self._meaningful_tokens(clean_content)[:20]
         conversation.context_json = context
@@ -577,7 +602,7 @@ class ChatbotService:
                 "category_name": best.category_name,
                 "confidence": confidence,
                 "resolved": False,
-                "offers_ticket": True,
+                "offers_ticket": False,
                 "requires_clarification": True,
                 "options": options,
                 "fallback_reason": "MEDIUM_CONFIDENCE",
@@ -601,11 +626,30 @@ class ChatbotService:
                 "match": best,
                 "response_source": "DETERMINISTIC",
             }
+        if attempts < settings.chatbot_max_clarification_attempts:
+            return {
+                "answer": (
+                    "Para orientarte mejor, ¿puedes contarme un poco más sobre "
+                    "lo que necesitas o el inconveniente que tienes?"
+                ),
+                "intent": None,
+                "faq_id": None,
+                "category_name": None,
+                "confidence": confidence,
+                "resolved": False,
+                "offers_ticket": False,
+                "requires_clarification": True,
+                "options": [],
+                "fallback_reason": None,
+                "escalated": False,
+                "match": None,
+                "response_source": "DETERMINISTIC",
+            }
         return {
             "answer": (
-                "No encontré una respuesta confiable para esta consulta. "
-                "Puedes solicitar atención humana o convertir la conversación "
-                "en un ticket."
+                "Aún no logro identificar tu consulta. Puedes reformularla o, "
+                "si lo prefieres, solicitar atención humana o convertir la "
+                "conversación en un ticket."
             ),
             "intent": best.intent if best else None,
             "faq_id": best.faq.id if best else None,
@@ -616,9 +660,34 @@ class ChatbotService:
             "requires_clarification": False,
             "options": [],
             "fallback_reason": "LOW_CONFIDENCE",
-            "escalated": True,
+            "escalated": False,
             "match": best,
             "response_source": "FALLBACK",
+        }
+
+    @staticmethod
+    def _is_pure_greeting(content: str) -> bool:
+        normalized = normalize_text(content)
+        normalized = re.sub(r"^[^\w]+|[^\w]+$", "", normalized).strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized in _GREETING_PHRASES
+
+    @staticmethod
+    def _greeting_response() -> dict[str, object]:
+        return {
+            "answer": _GREETING_ANSWER,
+            "intent": None,
+            "faq_id": None,
+            "category_name": None,
+            "confidence": 1.0,
+            "resolved": True,
+            "offers_ticket": False,
+            "requires_clarification": False,
+            "options": [],
+            "fallback_reason": None,
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
         }
 
     @staticmethod

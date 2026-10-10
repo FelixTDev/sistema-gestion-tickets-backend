@@ -72,22 +72,44 @@ def test_high_confidence_includes_source_and_context(phase11_client) -> None:
     assert read.json()["last_faq_id"] == body["faq_id"]
 
 
-def test_low_confidence_is_safe_and_offers_escalation(phase11_client) -> None:
+def test_unknown_query_clarifies_before_offering_escalation(phase11_client) -> None:
     client, _ = phase11_client
     conversation = client.post("/api/v1/chat/conversations").json()
-    response = client.post(
-        f"/api/v1/chat/conversations/{conversation['id']}/messages",
-        json={"content": "Necesito algo que no existe en el catálogo"},
+
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    first = client.post(
+        endpoint, json={"content": "Necesito algo que no existe en el catálogo"}
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["resolved"] is False
-    assert body["confidence"] < 0.35
-    assert body["offers_ticket"] is True
-    assert body["fallback_reason"]
-    assert body["conversation_status"] == "ESCALATED"
-    assert "no encontré" in body["bot_message"]["content"].casefold()
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["resolved"] is False
+    assert first_body["confidence"] < 0.35
+    assert first_body["requires_clarification"] is True
+    assert first_body["offers_ticket"] is False
+    assert first_body["fallback_reason"] is None
+    assert first_body["conversation_status"] == "WAITING_CLARIFICATION"
+    assert "¿puedes contarme" in first_body["bot_message"]["content"].casefold()
+
+    second = client.post(
+        endpoint, json={"content": "Necesito algo que no existe en el catálogo"}
+    )
+    assert second.json()["requires_clarification"] is True
+    assert second.json()["offers_ticket"] is False
+    assert second.json()["conversation_status"] == "WAITING_CLARIFICATION"
+
+    third = client.post(
+        endpoint, json={"content": "Necesito algo que no existe en el catálogo"}
+    )
+    third_body = third.json()
+    assert third.status_code == 200
+    assert third_body["offers_ticket"] is True
+    assert third_body["fallback_reason"] == "LOW_CONFIDENCE"
+    assert third_body["conversation_status"] == "ACTIVE"
+
+    read = client.get(f"/api/v1/chat/conversations/{conversation['id']}").json()
+    assert read["escalation_reason"] is None
+    assert read["escalated_at"] is None
 
 
 def test_manual_escalation_and_reset_are_idempotent(phase11_client) -> None:
@@ -95,7 +117,7 @@ def test_manual_escalation_and_reset_are_idempotent(phase11_client) -> None:
     conversation = client.post("/api/v1/chat/conversations").json()
     escalation = client.post(
         f"/api/v1/chat/conversations/{conversation['id']}/escalate",
-        json={"reason": "Necesito atención humana"},
+        json={"reason": "Necesito hablar con una persona"},
     )
     assert escalation.status_code == 200
     assert escalation.json()["status"] == ConversationStatus.ESCALATED
