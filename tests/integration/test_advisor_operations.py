@@ -223,16 +223,48 @@ def test_take_release_and_duplicate_assignment_are_audited_and_notified(
         "RELEASED",
         "STATUS_CHANGED",
     }
-    assert any("Cambio de turno operativo" in row.description for row in history)
+    release_events = [row for row in history if row.action == "RELEASED"]
+    release_status_events = [
+        row
+        for row in history
+        if row.action == "STATUS_CHANGED"
+        and row.old_value == "ASIGNADO"
+        and row.new_value == "NUEVO"
+    ]
+    assert len(release_events) == len(release_status_events) == 1
+    assert release_events[0].description == "Cambio de turno operativo"
+    assert release_status_events[0].description == "Estado cambiado de ASIGNADO a NUEVO"
+    assert (
+        sum(
+            row.description.count("Cambio de turno operativo")
+            for row in [*release_events, *release_status_events]
+        )
+        == 1
+    )
     assert any(
         row.metadata_json
         and "Cambio de turno operativo" in str(row.metadata_json.get("description", ""))
         for row in audit_rows
     )
+    assert (
+        sum(
+            "Cambio de turno operativo" in str(row.metadata_json or {})
+            for row in audit_rows
+        )
+        == 1
+    )
     assert any(
         item.notification_type.value == "ticket_assigned" for item in notifications
     )
-    assert supervisor_token
+    released_history = client.get(
+        f"/api/v1/tickets/{ticket['id']}/history",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+    )
+    assert released_history.status_code == 200
+    assert (
+        len([item for item in released_history.json() if item["action"] == "RELEASED"])
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -309,6 +341,75 @@ def test_release_returns_every_operational_ticket_to_new_without_touching_sla(
             "paused_at": sla_after.paused_at,
             "total_paused_seconds": sla_after.total_paused_seconds,
         } == sla_snapshot
+
+
+@pytest.mark.parametrize("access_state", ["released", "assigned_elsewhere"])
+def test_advisor_loses_ticket_read_and_write_access_after_ownership_changes(
+    operations_client, access_state
+):
+    client, engine = operations_client
+    client_token = login(client, "cliente@demo.com")
+    advisor_token = login(client, "asesor@demo.com")
+    supervisor_token = login(client, "supervisor@demo.com")
+    ticket = create_ticket(
+        client, client_token, category_id(engine), "Control de acceso del asesor"
+    )
+
+    if access_state == "released":
+        taken = client.post(
+            f"/api/v1/tickets/{ticket['id']}/take",
+            headers={"Authorization": f"Bearer {advisor_token}"},
+        )
+        assert taken.status_code == 200
+        released = client.post(
+            f"/api/v1/tickets/{ticket['id']}/release",
+            headers={"Authorization": f"Bearer {advisor_token}"},
+            json={"reason": "Cambio de turno"},
+        )
+        assert released.status_code == 200
+    else:
+        other_advisor = add_advisor(engine, "otro.asesor@example.com")
+        reassigned = assign(client, supervisor_token, ticket["id"], other_advisor.id)
+        assert reassigned.status_code == 201
+
+    advisor_headers = {"Authorization": f"Bearer {advisor_token}"}
+    assert (
+        client.get(
+            f"/api/v1/tickets/{ticket['id']}", headers=advisor_headers
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            f"/api/v1/tickets/{ticket['id']}/comments", headers=advisor_headers
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/v1/tickets/{ticket['id']}/comments",
+            headers=advisor_headers,
+            json={"content": "No autorizado"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/v1/tickets/{ticket['id']}/status",
+            headers=advisor_headers,
+            json={"status": "EN_PROCESO"},
+        ).status_code
+        == 403
+    )
+    supervisor_read = client.get(
+        f"/api/v1/tickets/{ticket['id']}",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+    )
+    assert supervisor_read.status_code == 200
+    if access_state == "released":
+        assert supervisor_read.json()["status"] == "NUEVO"
+        assert supervisor_read.json()["assigned_advisor_id"] is None
+        assert supervisor_read.json()["assigned_advisor_name"] is None
 
 
 def test_supervisor_reassigns_and_rejects_invalid_assignees(operations_client):

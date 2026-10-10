@@ -11,6 +11,8 @@ from app.db.session import get_session
 from app.main import app
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.tickets.models.comment import TicketComment
+from app.modules.usuarios.models.role import Role
+from app.modules.usuarios.models.user import User
 from app.seed.demo_data import seed_demo_data
 
 
@@ -101,11 +103,142 @@ def test_owner_gets_comments_in_ascending_created_at_order(ticket_client):
         "id",
         "ticket_id",
         "author_id",
+        "author_name",
+        "author_role",
         "content",
         "created_at",
     }
     assert "password_hash" not in response.text
     assert "access_token" not in response.text
+
+
+def test_comments_and_history_include_visible_actor_identity(ticket_client):
+    client, engine = ticket_client
+    ticket, client_token = create_ticket(client, engine)
+    advisor_token = login(client, "asesor@demo.com")
+    supervisor_token = login(client, "supervisor@demo.com")
+    advisor_id = client.get(
+        "/api/v1/auth/me", headers={"Authorization": f"Bearer {advisor_token}"}
+    ).json()["id"]
+    assigned = client.post(
+        f"/api/v1/tickets/{ticket['id']}/assignments",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+        json={"advisor_id": advisor_id},
+    )
+    assert assigned.status_code == 201
+
+    client_comment = add_comment(
+        client, ticket["id"], client_token, "Comentario del cliente"
+    )
+    advisor_comment_response = client.post(
+        f"/api/v1/tickets/{ticket['id']}/comments",
+        headers={"Authorization": f"Bearer {advisor_token}"},
+        json={"content": "Comentario del asesor"},
+    )
+    supervisor_comment_response = client.post(
+        f"/api/v1/tickets/{ticket['id']}/comments",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+        json={"content": "Comentario del supervisor"},
+    )
+    assert advisor_comment_response.status_code == 201
+    assert supervisor_comment_response.status_code == 201
+
+    comments_response = client.get(
+        f"/api/v1/tickets/{ticket['id']}/comments",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+    )
+    history_response = client.get(
+        f"/api/v1/tickets/{ticket['id']}/history",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+    )
+    assert comments_response.status_code == history_response.status_code == 200
+
+    with Session(engine) as session:
+        identities = {
+            user.id: (user.full_name, session.get(Role, user.role_id).name)
+            for user in session.exec(select(User)).all()
+        }
+        client_id = ticket["client_id"]
+        supervisor_id = session.exec(
+            select(User.id)
+            .join(Role, User.role_id == Role.id)
+            .where(Role.name == "SUPERVISOR")
+        ).one()
+
+    expected_comment_roles = {
+        client_comment["id"]: "CLIENTE",
+        advisor_comment_response.json()["id"]: "ASESOR",
+        supervisor_comment_response.json()["id"]: "SUPERVISOR",
+    }
+    for comment in comments_response.json():
+        user_name, user_role = identities[comment["author_id"]]
+        assert comment["author_name"] == user_name
+        assert comment["author_role"] == user_role
+        assert user_role == expected_comment_roles[comment["id"]]
+
+    expected_history_roles = {
+        "CREATED": (client_id, "CLIENTE"),
+        "SLA_STARTED": (client_id, "CLIENTE"),
+        "ASSIGNED": (supervisor_id, "SUPERVISOR"),
+    }
+    for item in history_response.json():
+        if item["action"] in {"CREATED", "SLA_STARTED", "ASSIGNED"}:
+            expected_actor_id, expected_role = expected_history_roles[item["action"]]
+            assert item["actor_id"] == expected_actor_id
+            assert item["actor_name"] == identities[expected_actor_id][0]
+            assert item["actor_role"] == expected_role
+        elif item["action"] == "COMMENT_ADDED":
+            actor_name, actor_role = identities[item["actor_id"]]
+            assert item["actor_name"] == actor_name
+            assert item["actor_role"] == actor_role
+
+    combined_response = comments_response.text + history_response.text
+    assert "@demo.com" not in combined_response
+    assert "password_hash" not in combined_response
+    assert "access_token" not in combined_response
+
+
+def test_ticket_participant_names_and_openapi_contract(ticket_client):
+    client, engine = ticket_client
+    ticket, _ = create_ticket(client, engine)
+    supervisor_token = login(client, "supervisor@demo.com")
+    advisor_token = login(client, "asesor@demo.com")
+    advisor_id = client.get(
+        "/api/v1/auth/me", headers={"Authorization": f"Bearer {advisor_token}"}
+    ).json()["id"]
+
+    with Session(engine) as session:
+        client_name = session.get(User, ticket["client_id"]).full_name
+        advisor_name = session.get(User, advisor_id).full_name
+
+    assert ticket["client_name"] == client_name
+    assert ticket["assigned_advisor_name"] is None
+    assert "email" not in ticket
+    assert "password_hash" not in ticket
+    assigned = client.post(
+        f"/api/v1/tickets/{ticket['id']}/assignments",
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+        json={"advisor_id": advisor_id},
+    )
+    assert assigned.status_code == 201
+    assert assigned.json()["assigned_advisor_name"] == advisor_name
+
+    schema = client.get("/openapi.json").json()["components"]["schemas"]
+    assert "client_name" in schema["TicketRead"]["properties"]
+    assert "assigned_advisor_name" in schema["TicketRead"]["properties"]
+    assert "author_name" in schema["CommentRead"]["properties"]
+    assert "author_role" in schema["CommentRead"]["properties"]
+    assert "actor_name" in schema["HistoryRead"]["properties"]
+    assert "actor_role" in schema["HistoryRead"]["properties"]
+    assert (
+        "Nombre visible"
+        in schema["TicketRead"]["properties"]["client_name"]["description"]
+    )
+    assert (
+        "rol"
+        in schema["CommentRead"]["properties"]["author_role"]["description"].casefold()
+    )
+    assert "actor" in schema["HistoryRead"]["properties"]["actor_name"]["description"]
 
 
 def test_owner_gets_empty_list_when_ticket_has_no_comments(ticket_client):

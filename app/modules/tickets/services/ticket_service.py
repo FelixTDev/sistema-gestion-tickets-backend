@@ -28,9 +28,12 @@ from app.modules.tickets.schemas.operations import (
 from app.modules.tickets.schemas.ticket import (
     AssignmentCreate,
     CommentCreate,
+    CommentRead,
+    HistoryRead,
     ReasonRequest,
     StatusChange,
     TicketCreate,
+    TicketRead,
 )
 from app.modules.tickets.services.sla_service import SlaService
 from app.shared.exceptions import AppError
@@ -79,9 +82,10 @@ class TicketService:
 
     def create_manual(
         self, session: Session, data: TicketCreate, actor: AuthenticatedUser
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_client(actor)
-        return self._create(session, data, actor.user.id, actor, TicketSource.MANUAL)
+        ticket = self._create(session, data, actor.user.id, actor, TicketSource.MANUAL)
+        return self._ticket_read(session, ticket)
 
     def convert_conversation(
         self,
@@ -89,7 +93,7 @@ class TicketService:
         conversation_id: str,
         data: TicketCreate,
         actor: AuthenticatedUser,
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_client(actor)
         conversation = self.repository.conversation(session, conversation_id)
         if conversation is None:
@@ -151,7 +155,7 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return ticket
+        return self._ticket_read(session, ticket)
 
     def list_mine(
         self,
@@ -170,7 +174,7 @@ class TicketService:
         search: str | None = None,
         updated_from: datetime | None = None,
         updated_to: datetime | None = None,
-    ) -> list[Ticket] | PaginationResult[Ticket]:
+    ) -> list[TicketRead] | PaginationResult[TicketRead]:
         self._require_client(actor)
         return self._list(
             session,
@@ -207,7 +211,7 @@ class TicketService:
         search: str | None = None,
         updated_from: datetime | None = None,
         updated_to: datetime | None = None,
-    ) -> list[Ticket] | PaginationResult[Ticket]:
+    ) -> list[TicketRead] | PaginationResult[TicketRead]:
         self._require_staff(actor)
         if actor.role == "ASESOR":
             assigned_advisor_id = actor.user.id
@@ -247,7 +251,7 @@ class TicketService:
         search: str | None = None,
         advisor_id: str | None = None,
         recent_hours: int = 24,
-    ) -> PaginationResult[Ticket]:
+    ) -> PaginationResult[TicketRead]:
         self._require_staff(actor)
         if not 1 <= recent_hours <= 168:
             raise HTTPException(
@@ -309,7 +313,7 @@ class TicketService:
             page_size=page_size,
             total=total,
             total_pages=ceil(total / page_size) if total else 0,
-            items=items,
+            items=self._ticket_reads(session, items),
         )
 
     def _list(
@@ -329,11 +333,11 @@ class TicketService:
         search: str | None,
         updated_from: datetime | None,
         updated_to: datetime | None,
-    ) -> list[Ticket] | PaginationResult[Ticket]:
+    ) -> list[TicketRead] | PaginationResult[TicketRead]:
         self._validate_date_range(created_from, created_to)
         normalized_search = search.strip() if search else None
         if page is None and page_size is None:
-            return self.repository.list_tickets(
+            tickets = self.repository.list_tickets(
                 session,
                 client_id=client_id,
                 status=status,
@@ -347,6 +351,7 @@ class TicketService:
                 updated_from=updated_from,
                 updated_to=updated_to,
             )
+            return self._ticket_reads(session, tickets)
 
         current_page = page or 1
         current_page_size = page_size or 20
@@ -371,7 +376,7 @@ class TicketService:
             page_size=current_page_size,
             total=total,
             total_pages=ceil(total / current_page_size) if total else 0,
-            items=items,
+            items=self._ticket_reads(session, items),
         )
 
     @staticmethod
@@ -388,9 +393,11 @@ class TicketService:
                 detail="created_from debe ser menor o igual que created_to",
             )
 
-    def get(self, session: Session, ticket_id: str, actor: AuthenticatedUser) -> Ticket:
+    def get(
+        self, session: Session, ticket_id: str, actor: AuthenticatedUser
+    ) -> TicketRead:
         ticket = self._get_authorized(session, ticket_id, actor)
-        return ticket
+        return self._ticket_read(session, ticket)
 
     def add_comment(
         self,
@@ -398,7 +405,7 @@ class TicketService:
         ticket_id: str,
         data: CommentCreate,
         actor: AuthenticatedUser,
-    ) -> TicketComment:
+    ) -> CommentRead:
         ticket = self._get_authorized(
             session,
             ticket_id,
@@ -453,13 +460,14 @@ class TicketService:
             )
         session.commit()
         session.refresh(comment)
-        return comment
+        return self._comment_reads(session, [comment])[0]
 
     def comments(
         self, session: Session, ticket_id: str, actor: AuthenticatedUser
-    ) -> list[TicketComment]:
+    ) -> list[CommentRead]:
         self._get_authorized(session, ticket_id, actor)
-        return self.repository.list_comments(session, ticket_id)
+        comments = self.repository.list_comments(session, ticket_id)
+        return self._comment_reads(session, comments)
 
     def assign(
         self,
@@ -467,7 +475,7 @@ class TicketService:
         ticket_id: str,
         data: AssignmentCreate,
         actor: AuthenticatedUser,
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_supervisor(actor)
         ticket = self._get_mutable_ticket(session, ticket_id, data.expected_version)
         self._ensure_open(ticket)
@@ -520,7 +528,7 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return ticket
+        return self._ticket_read(session, ticket)
 
     def take(
         self,
@@ -528,7 +536,7 @@ class TicketService:
         ticket_id: str,
         actor: AuthenticatedUser,
         expected_version: int | None = None,
-    ) -> Ticket:
+    ) -> TicketRead:
         if actor.role != "ASESOR":
             raise HTTPException(
                 status_code=403, detail="Solo un asesor puede tomar tickets"
@@ -573,7 +581,7 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return ticket
+        return self._ticket_read(session, ticket)
 
     def release(
         self,
@@ -581,7 +589,7 @@ class TicketService:
         ticket_id: str,
         data: TicketReleaseRequest,
         actor: AuthenticatedUser,
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_staff(actor)
         ticket = self._get_mutable_ticket(session, ticket_id, data.expected_version)
         self._ensure_open(ticket)
@@ -621,11 +629,11 @@ class TicketService:
             "STATUS_CHANGED",
             old_status,
             TicketStatus.NUEVO,
-            f"Liberación: {data.reason}",
+            f"Estado cambiado de {old_status.value} a {TicketStatus.NUEVO.value}",
         )
         session.commit()
         session.refresh(ticket)
-        return ticket
+        return self._ticket_read(session, ticket)
 
     def change_status(
         self,
@@ -635,7 +643,7 @@ class TicketService:
         actor: AuthenticatedUser,
         *,
         notification_type: NotificationType = NotificationType.TICKET_STATUS_CHANGED,
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_staff(actor)
         ticket = self._get_mutable_ticket(session, ticket_id, data.expected_version)
         self._ensure_actor_can_manage(ticket, actor)
@@ -666,7 +674,7 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return ticket
+        return self._ticket_read(session, ticket)
 
     def cancel(
         self,
@@ -674,7 +682,7 @@ class TicketService:
         ticket_id: str,
         data: ReasonRequest,
         actor: AuthenticatedUser,
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_supervisor(actor)
         return self.change_status(
             session,
@@ -693,7 +701,7 @@ class TicketService:
         ticket_id: str,
         data: ReasonRequest,
         actor: AuthenticatedUser,
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_staff(actor)
         ticket = self._get_ticket(session, ticket_id)
         self._ensure_actor_can_manage(ticket, actor)
@@ -715,7 +723,7 @@ class TicketService:
 
     def close(
         self, session: Session, ticket_id: str, actor: AuthenticatedUser
-    ) -> Ticket:
+    ) -> TicketRead:
         self._require_staff(actor)
         return self.change_status(
             session,
@@ -727,9 +735,74 @@ class TicketService:
 
     def history(
         self, session: Session, ticket_id: str, actor: AuthenticatedUser
-    ) -> list[TicketHistory]:
+    ) -> list[HistoryRead]:
         self._get_authorized(session, ticket_id, actor)
-        return self.repository.history(session, ticket_id)
+        history = self.repository.history(session, ticket_id)
+        identities = self.repository.user_identities(
+            session, {item.actor_id for item in history if item.actor_id is not None}
+        )
+        return [
+            HistoryRead(
+                id=item.id,
+                ticket_id=item.ticket_id,
+                actor_id=item.actor_id,
+                actor_name=(
+                    identities[item.actor_id][0]
+                    if item.actor_id in identities
+                    else None
+                ),
+                actor_role=(
+                    identities[item.actor_id][1]
+                    if item.actor_id in identities
+                    else None
+                ),
+                action=item.action,
+                old_value=item.old_value,
+                new_value=item.new_value,
+                description=item.description,
+                created_at=item.created_at,
+            )
+            for item in history
+        ]
+
+    def _ticket_read(self, session: Session, ticket: Ticket) -> TicketRead:
+        return self._ticket_reads(session, [ticket])[0]
+
+    def _ticket_reads(
+        self, session: Session, tickets: list[Ticket]
+    ) -> list[TicketRead]:
+        participants = self.repository.ticket_participant_names(
+            session, [ticket.id for ticket in tickets]
+        )
+        return [
+            TicketRead.model_validate(
+                ticket.model_dump()
+                | {
+                    "client_name": participants[ticket.id][0],
+                    "assigned_advisor_name": participants[ticket.id][1],
+                }
+            )
+            for ticket in tickets
+        ]
+
+    def _comment_reads(
+        self, session: Session, comments: list[TicketComment]
+    ) -> list[CommentRead]:
+        identities = self.repository.user_identities(
+            session, {comment.author_id for comment in comments}
+        )
+        return [
+            CommentRead(
+                id=comment.id,
+                ticket_id=comment.ticket_id,
+                author_id=comment.author_id,
+                author_name=identities[comment.author_id][0],
+                author_role=identities[comment.author_id][1],
+                content=comment.content,
+                created_at=comment.created_at,
+            )
+            for comment in comments
+        ]
 
     def _create(
         self,
@@ -755,7 +828,6 @@ class TicketService:
             source=source,
         )
         self.repository.add(session, ticket)
-        self.sla.start_for_ticket(session, ticket, actor.user.id)
         self._history(
             session,
             ticket.id,
@@ -765,6 +837,7 @@ class TicketService:
             TicketStatus.NUEVO,
             "Ticket creado",
         )
+        self.sla.start_for_ticket(session, ticket, actor.user.id)
         self.notifications.create(
             session,
             recipient_user_id=client_id,

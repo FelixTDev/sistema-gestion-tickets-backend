@@ -18,6 +18,7 @@ class TicketRead(BaseModel):
     id: str
     tracking_code: str
     client_id: str
+    client_name: str = Field(description="Nombre visible del cliente propietario.")
     conversation_id: str | None
     category_id: str
     subject: str
@@ -26,6 +27,9 @@ class TicketRead(BaseModel):
     status: TicketStatus
     source: TicketSource
     assigned_advisor_id: str | None
+    assigned_advisor_name: str | None = Field(
+        description="Nombre visible del asesor asignado; nulo si no hay responsable."
+    )
     created_at: datetime
     updated_at: datetime
     version: int
@@ -61,6 +65,10 @@ class CommentRead(BaseModel):
     id: str
     ticket_id: str
     author_id: str
+    author_name: str = Field(
+        description="Nombre visible de quien escribió el comentario."
+    )
+    author_role: str = Field(description="Rol del autor del comentario.")
     content: str
     created_at: datetime
 
@@ -94,6 +102,12 @@ class HistoryRead(BaseModel):
     id: str
     ticket_id: str
     actor_id: str | None
+    actor_name: str | None = Field(
+        description="Nombre visible del actor, nulo si el actor no está disponible."
+    )
+    actor_role: str | None = Field(
+        description="Rol del actor, nulo si el actor no está disponible."
+    )
     action: str
     old_value: str | None
     new_value: str | None

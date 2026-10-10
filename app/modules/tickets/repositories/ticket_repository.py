@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_
+from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
 from app.modules.chatbot.models.conversation import Conversation
@@ -17,6 +18,7 @@ from app.modules.tickets.models.ticket import (
     TicketStatus,
 )
 from app.modules.tickets.schemas.operations import OperationalQueue
+from app.modules.usuarios.models.role import Role
 from app.modules.usuarios.models.user import User
 
 
@@ -28,6 +30,38 @@ class TicketRepository:
         return session.exec(
             select(Ticket).where(Ticket.id == ticket_id).with_for_update()
         ).first()
+
+    def ticket_participant_names(
+        self, session: Session, ticket_ids: list[str]
+    ) -> dict[str, tuple[str, str | None]]:
+        if not ticket_ids:
+            return {}
+        client = aliased(User, name="ticket_client")
+        advisor = aliased(User, name="ticket_advisor")
+        rows = session.exec(
+            select(Ticket.id, client.full_name, advisor.full_name)
+            .join(client, client.id == Ticket.client_id)
+            .outerjoin(advisor, advisor.id == Ticket.assigned_advisor_id)
+            .where(Ticket.id.in_(ticket_ids))
+        ).all()
+        return {
+            ticket_id: (client_name, advisor_name)
+            for ticket_id, client_name, advisor_name in rows
+        }
+
+    def user_identities(
+        self, session: Session, user_ids: set[str]
+    ) -> dict[str, tuple[str, str]]:
+        if not user_ids:
+            return {}
+        rows = session.exec(
+            select(User.id, User.full_name, Role.name)
+            .join(Role, Role.id == User.role_id)
+            .where(User.id.in_(user_ids))
+        ).all()
+        return {
+            user_id: (full_name, role_name) for user_id, full_name, role_name in rows
+        }
 
     def get_by_conversation(
         self, session: Session, conversation_id: str
@@ -382,9 +416,6 @@ class TicketRepository:
         return category is not None and category.is_active
 
     def advisor_exists(self, session: Session, advisor_id: str) -> bool:
-        from app.modules.usuarios.models.role import Role
-        from app.modules.usuarios.models.user import User
-
         return (
             session.exec(
                 select(User)

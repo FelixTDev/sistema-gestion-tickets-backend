@@ -104,6 +104,14 @@ def test_creates_ticket_from_authenticated_unresolved_conversation(ticket_client
     assert ticket["conversation_id"] == conversation_id
     assert ticket["tracking_code"].startswith("TCK-")
 
+    history = client.get(
+        f"/api/v1/tickets/{ticket['id']}/history",
+        headers={"Authorization": f"Bearer {client_token}"},
+    )
+    assert history.status_code == 200
+    actions = [item["action"] for item in history.json()]
+    assert actions.index("CREATED") < actions.index("SLA_STARTED")
+
 
 def test_rejects_ticket_creation_without_authentication(ticket_client):
     client, engine = ticket_client
