@@ -102,8 +102,10 @@ def test_greeting_gets_a_friendly_reply_without_escalating(chatbot_client, conte
     )
     assert body["resolved"] is True
     assert body["offers_ticket"] is False
+    assert body["requires_clarification"] is False
     assert body["fallback_reason"] is None
     assert body["conversation_status"] == "ACTIVE"
+    assert body["response_source"] == "DETERMINISTIC"
     assert body["faq_id"] is None
     assert body["sources"] == []
 
@@ -142,6 +144,7 @@ def test_greeting_with_a_real_question_uses_the_normal_query_flow(chatbot_client
     assert body["requires_clarification"] is True
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
     assert body["offers_ticket"] is False
+    assert body["response_source"] == "DETERMINISTIC"
 
 
 def test_answers_active_faq_by_keyword_and_normalizes_accents(chatbot_client):
@@ -157,6 +160,71 @@ def test_answers_active_faq_by_keyword_and_normalizes_accents(chatbot_client):
     assert response.json()["bot_message"]["intent"] == "TARJETAS_REQUISITOS"
     assert response.json()["resolved"] is True
     assert response.json()["offers_ticket"] is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Preguntas frecuentes",
+        "¿Qué preguntas me puedes dar?",
+        "¿Qué temas puedes responder?",
+    ],
+)
+def test_faq_discovery_lists_published_questions_and_selected_question_is_answered(
+    chatbot_client, content: str
+):
+    client, engine = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    discovery = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": content},
+    )
+
+    assert discovery.status_code == 200
+    body = discovery.json()
+    options = body["clarification_options"]
+    assert body["bot_message"]["intent"] == "FAQ_DISCOVERY"
+    assert body["resolved"] is False
+    assert body["requires_clarification"] is True
+    assert body["offers_ticket"] is False
+    assert body["fallback_reason"] is None
+    assert body["conversation_status"] == "WAITING_CLARIFICATION"
+    assert body["response_source"] == "DETERMINISTIC"
+    assert 1 <= len(options) <= 4
+
+    with Session(engine) as session:
+        public_questions = {
+            faq.title or faq.question
+            for faq in session.exec(
+                select(FAQ).where(
+                    FAQ.status == FAQ.Status.PUBLISHED,
+                    FAQ.is_active,
+                )
+            ).all()
+        }
+        assert set(options) <= public_questions
+    assert {source["title"] for source in body["sources"]} == set(options)
+
+    answer = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": options[0]},
+    )
+
+    assert answer.status_code == 200
+    answer_body = answer.json()
+    assert answer_body["resolved"] is True
+    assert answer_body["requires_clarification"] is False
+    assert answer_body["offers_ticket"] is False
+    assert answer_body["faq_id"] is not None
+    assert answer_body["conversation_status"] == "ACTIVE"
+    assert answer_body["response_source"] == "DETERMINISTIC"
+    assert answer_body["bot_message"]["content"] != (
+        "Para orientarte mejor, ¿puedes contarme un poco más sobre "
+        "lo que necesitas o el inconveniente que tienes?"
+    )
+    with Session(engine) as session:
+        assert session.exec(select(Ticket)).all() == []
 
 
 def test_ignores_inactive_faq_and_asks_for_clarification_without_ticket(
@@ -197,6 +265,7 @@ def test_returns_unresolved_response_for_unknown_query(chatbot_client):
     assert response.json()["offers_ticket"] is False
     assert response.json()["fallback_reason"] is None
     assert response.json()["conversation_status"] == "WAITING_CLARIFICATION"
+    assert response.json()["response_source"] == "DETERMINISTIC"
 
 
 def test_authorizes_conversation_owner_and_rejects_other_client(chatbot_client):

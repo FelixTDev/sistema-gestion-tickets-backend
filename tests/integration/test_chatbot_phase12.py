@@ -158,6 +158,32 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
         assert audit is not None
 
 
+def test_faq_discovery_is_deterministic_even_when_ai_provider_is_enabled(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="Respuesta generada para la consulta.",
+            source_ids=[faq_id(engine)],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "Preguntas frecuentes sobre tarjetas"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["bot_message"]["intent"] == "FAQ_DISCOVERY"
+    assert response.json()["response_source"] == "DETERMINISTIC"
+    assert len(provider.calls) == 0
+
+
 def test_prompt_injection_from_user_never_reaches_provider(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:

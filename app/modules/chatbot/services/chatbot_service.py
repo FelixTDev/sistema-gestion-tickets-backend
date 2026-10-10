@@ -68,6 +68,21 @@ _GREETING_ANSWER = (
     "¡Hola! ¿En qué puedo ayudarte hoy? Puedo orientarte sobre preguntas "
     "frecuentes o el seguimiento de una solicitud."
 )
+_FAQ_DISCOVERY_PHRASES = (
+    "preguntas frecuentes",
+    "que preguntas me puedes dar",
+    "que preguntas puedes responder",
+    "que preguntas puedo hacer",
+    "que puedo preguntar",
+    "que temas puedes responder",
+    "que temas puedes ayudar",
+    "sobre que temas me puedes ayudar",
+    "que consultas puedes resolver",
+    "que consultas puedes atender",
+    "que puedes hacer",
+    "como me puedes ayudar",
+)
+_FAQ_DISCOVERY_MAX_OPTIONS = 4
 
 
 @dataclass(frozen=True)
@@ -175,15 +190,21 @@ class ChatbotService:
             ),
         )
         is_greeting = self._is_pure_greeting(clean_content)
-        matches = [] if is_greeting else self._find_matches(session, clean_content)
-        result = (
-            self._greeting_response()
-            if is_greeting
-            else self._response_for_matches(conversation, matches)
+        is_faq_discovery = self._is_faq_discovery_request(clean_content)
+        matches = (
+            []
+            if is_greeting or is_faq_discovery
+            else self._find_matches(session, clean_content)
         )
-        result["response_source"] = result.get("response_source", "DETERMINISTIC")
-        result["sources"] = self._public_sources(matches[:1])
         if is_greeting:
+            result = self._greeting_response()
+        elif is_faq_discovery:
+            result, matches = self._faq_discovery_response(session)
+        else:
+            result = self._response_for_matches(conversation, matches)
+        result["response_source"] = result.get("response_source", "DETERMINISTIC")
+        result["sources"] = result.get("sources", self._public_sources(matches[:1]))
+        if is_greeting or is_faq_discovery:
             result["ai_trace"] = None
         else:
             requests_last_minute = self.conversations.count_recent_ai_messages(
@@ -261,7 +282,9 @@ class ChatbotService:
                 else "Cuéntame un poco más sobre lo que necesitas."
             )
         context = dict(conversation.context_json or {})
-        if result["requires_clarification"]:
+        if result["requires_clarification"] and result.get(
+            "counts_as_clarification", True
+        ):
             context["clarification_attempts"] = (
                 int(context.get("clarification_attempts", 0)) + 1
             )
@@ -665,12 +688,104 @@ class ChatbotService:
             "response_source": "FALLBACK",
         }
 
+    def _faq_discovery_response(
+        self, session: Session
+    ) -> tuple[dict[str, object], list[FAQMatch]]:
+        available_faqs = self.faqs.list_active(session)
+        selected: list[FAQMatch] = []
+        seen_categories: set[str] = set()
+
+        # Show a representative question from each available category first.
+        for faq in available_faqs:
+            if detect_prompt_injection(
+                f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
+            ):
+                continue
+            if faq.category_id in seen_categories:
+                continue
+            seen_categories.add(faq.category_id)
+            selected.append(
+                FAQMatch(
+                    faq=faq,
+                    score=1.0,
+                    intent=self._intent_for(faq),
+                    category_name=self._category_name(session, faq.category_id),
+                )
+            )
+            if len(selected) == _FAQ_DISCOVERY_MAX_OPTIONS:
+                break
+
+        if len(selected) < _FAQ_DISCOVERY_MAX_OPTIONS:
+            selected_ids = {match.faq.id for match in selected}
+            for faq in available_faqs:
+                if faq.id in selected_ids or detect_prompt_injection(
+                    f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
+                ):
+                    continue
+                selected.append(
+                    FAQMatch(
+                        faq=faq,
+                        score=1.0,
+                        intent=self._intent_for(faq),
+                        category_name=self._category_name(session, faq.category_id),
+                    )
+                )
+                if len(selected) == _FAQ_DISCOVERY_MAX_OPTIONS:
+                    break
+
+        options = [match.faq.title or match.faq.question for match in selected]
+        categories = list(
+            dict.fromkeys(
+                match.category_name for match in selected if match.category_name
+            )
+        )
+        if options:
+            category_text = ", ".join(categories)
+            answer = (
+                f"Puedo orientarte sobre {category_text}. Elige una de estas "
+                "preguntas frecuentes o cuéntame con tus palabras qué necesitas."
+            )
+        else:
+            answer = (
+                "En este momento no hay preguntas frecuentes publicadas para "
+                "mostrarte. Cuéntame qué necesitas y buscaré la mejor forma de "
+                "orientarte."
+            )
+
+        return (
+            {
+                "answer": answer,
+                "intent": "FAQ_DISCOVERY",
+                "faq_id": None,
+                "category_name": None,
+                "confidence": 1.0,
+                "resolved": False,
+                "offers_ticket": False,
+                "requires_clarification": True,
+                "options": options,
+                "fallback_reason": None,
+                "escalated": False,
+                "match": None,
+                "response_source": "DETERMINISTIC",
+                "sources": self._public_sources(selected),
+                "counts_as_clarification": False,
+            },
+            selected,
+        )
+
     @staticmethod
     def _is_pure_greeting(content: str) -> bool:
         normalized = normalize_text(content)
         normalized = re.sub(r"^[^\w]+|[^\w]+$", "", normalized).strip()
         normalized = re.sub(r"\s+", " ", normalized)
         return normalized in _GREETING_PHRASES
+
+    @staticmethod
+    def _is_faq_discovery_request(content: str) -> bool:
+        normalized = normalize_text(content).strip(" .!?¿¡")
+        if normalized in {"faq", "faqs", "ayuda", "temas de ayuda"}:
+            return True
+        return any(phrase in normalized for phrase in _FAQ_DISCOVERY_PHRASES)
 
     @staticmethod
     def _greeting_response() -> dict[str, object]:

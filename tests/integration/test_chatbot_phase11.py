@@ -96,7 +96,9 @@ def test_unknown_query_clarifies_before_offering_escalation(phase11_client) -> N
     )
     assert second.json()["requires_clarification"] is True
     assert second.json()["offers_ticket"] is False
+    assert second.json()["fallback_reason"] is None
     assert second.json()["conversation_status"] == "WAITING_CLARIFICATION"
+    assert second.json()["response_source"] == "DETERMINISTIC"
 
     third = client.post(
         endpoint, json={"content": "Necesito algo que no existe en el catálogo"}
@@ -104,12 +106,38 @@ def test_unknown_query_clarifies_before_offering_escalation(phase11_client) -> N
     third_body = third.json()
     assert third.status_code == 200
     assert third_body["offers_ticket"] is True
+    assert third_body["resolved"] is False
+    assert third_body["requires_clarification"] is False
     assert third_body["fallback_reason"] == "LOW_CONFIDENCE"
     assert third_body["conversation_status"] == "ACTIVE"
+    assert third_body["response_source"] == "FALLBACK"
 
     read = client.get(f"/api/v1/chat/conversations/{conversation['id']}").json()
     assert read["escalation_reason"] is None
     assert read["escalated_at"] is None
+
+
+def test_faq_discovery_does_not_consume_an_unknown_query_clarification_attempt(
+    phase11_client,
+) -> None:
+    client, _ = phase11_client
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    first_unknown = client.post(
+        endpoint, json={"content": "No encuentro una respuesta para esta situación"}
+    )
+    discovery = client.post(endpoint, json={"content": "Preguntas frecuentes"})
+    second_unknown = client.post(
+        endpoint, json={"content": "No encuentro una respuesta para esta situación"}
+    )
+
+    assert first_unknown.json()["requires_clarification"] is True
+    assert discovery.json()["bot_message"]["intent"] == "FAQ_DISCOVERY"
+    assert discovery.json()["offers_ticket"] is False
+    assert second_unknown.json()["requires_clarification"] is True
+    assert second_unknown.json()["offers_ticket"] is False
+    assert second_unknown.json()["conversation_status"] == "WAITING_CLARIFICATION"
 
 
 def test_manual_escalation_and_reset_are_idempotent(phase11_client) -> None:
