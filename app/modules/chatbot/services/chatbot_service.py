@@ -12,12 +12,17 @@ from app.api.deps import AuthenticatedUser
 from app.core.config import get_settings
 from app.modules.auditoria.services.audit_service import AuditService
 from app.modules.chatbot.models.conversation import Conversation, ConversationStatus
+from app.modules.chatbot.models.feedback import ChatbotFeedback
 from app.modules.chatbot.models.message import ChatMessage, SenderType
 from app.modules.chatbot.repositories.conversation_repository import (
     ConversationRepository,
 )
+from app.modules.chatbot.repositories.feedback_repository import (
+    ChatbotFeedbackRepository,
+)
 from app.modules.chatbot.schemas.chatbot import (
     BotMessageResponse,
+    ChatbotFeedbackMetrics,
     ChatFeedbackCreate,
     ChatFeedbackRead,
     ChatMessageRead,
@@ -37,6 +42,8 @@ _STOP_WORDS = {
     "al",
     "como",
     "con",
+    "consulta",
+    "consultar",
     "de",
     "del",
     "el",
@@ -46,6 +53,7 @@ _STOP_WORDS = {
     "los",
     "me",
     "necesito",
+    "no",
     "para",
     "por",
     "que",
@@ -82,7 +90,14 @@ _FAQ_DISCOVERY_PHRASES = (
     "que puedes hacer",
     "como me puedes ayudar",
 )
-_FAQ_DISCOVERY_MAX_OPTIONS = 4
+_FAQ_DISCOVERY_MAX_OPTIONS = 5
+_FAQ_DISCOVERY_CATEGORY_ORDER = (
+    "TARJETAS",
+    "CUENTAS",
+    "BANCA_DIGITAL",
+    "CREDITOS",
+    "RECLAMOS_SIMPLES",
+)
 
 
 @dataclass(frozen=True)
@@ -100,6 +115,7 @@ class ChatbotService:
         faq_repository: FAQRepository | None = None,
         notification_service: NotificationService | None = None,
         audit_service: AuditService | None = None,
+        feedback_repository: ChatbotFeedbackRepository | None = None,
         ai_provider: object | None = None,
         rag_service: RAGService | None = None,
     ) -> None:
@@ -107,6 +123,7 @@ class ChatbotService:
         self.faqs = faq_repository or FAQRepository()
         self.notifications = notification_service or NotificationService()
         self.audit = audit_service or AuditService()
+        self.chat_feedback = feedback_repository or ChatbotFeedbackRepository()
         self.rag = rag_service or RAGService(provider=ai_provider)
 
     @staticmethod
@@ -180,6 +197,9 @@ class ChatbotService:
         self._ensure_message_allowed(conversation)
         clean_content = self._clean_content(content)
         self._enforce_limits(session, conversation)
+        was_waiting_for_clarification = (
+            conversation.status == ConversationStatus.WAITING_CLARIFICATION
+        )
 
         user_message = self.conversations.add_message(
             session,
@@ -191,20 +211,48 @@ class ChatbotService:
         )
         is_greeting = self._is_pure_greeting(clean_content)
         is_faq_discovery = self._is_faq_discovery_request(clean_content)
-        matches = (
-            []
-            if is_greeting or is_faq_discovery
-            else self._find_matches(session, clean_content)
+        selected_match = (
+            self._resolve_pending_selection(session, conversation, clean_content)
+            if was_waiting_for_clarification and not is_greeting
+            else None
         )
+        search_content = clean_content
+        matches: list[FAQMatch] = []
+        if not (is_greeting or is_faq_discovery or selected_match):
+            matches = self._find_matches(session, clean_content)
+            previous_clarification = (conversation.context_json or {}).get(
+                "clarification_context", []
+            )
+            if (
+                was_waiting_for_clarification
+                and isinstance(previous_clarification, list)
+                and previous_clarification
+                and self._is_contextual_follow_up(clean_content)
+            ):
+                bounded_history = [
+                    item[:250]
+                    for item in previous_clarification[-2:]
+                    if isinstance(item, str)
+                ]
+                contextual_content = " ".join([*bounded_history, clean_content])
+                contextual_matches = self._find_matches(session, contextual_content)
+                if contextual_matches and (
+                    not matches or contextual_matches[0].score > matches[0].score
+                ):
+                    search_content = contextual_content
+                    matches = contextual_matches
         if is_greeting:
             result = self._greeting_response()
         elif is_faq_discovery:
             result, matches = self._faq_discovery_response(session)
+        elif selected_match is not None:
+            matches = [selected_match]
+            result = self._response_for_matches(conversation, matches)
         else:
             result = self._response_for_matches(conversation, matches)
         result["response_source"] = result.get("response_source", "DETERMINISTIC")
         result["sources"] = result.get("sources", self._public_sources(matches[:1]))
-        if is_greeting or is_faq_discovery:
+        if is_greeting or is_faq_discovery or selected_match is not None:
             result["ai_trace"] = None
         else:
             requests_last_minute = self.conversations.count_recent_ai_messages(
@@ -290,7 +338,27 @@ class ChatbotService:
             )
         elif result["resolved"]:
             context["clarification_attempts"] = 0
-        context["last_terms"] = self._meaningful_tokens(clean_content)[:20]
+        if result["requires_clarification"]:
+            context["pending_faq_ids"] = result.get("candidate_faq_ids", [])
+            if result.get("intent") == "FAQ_DISCOVERY":
+                context["clarification_context"] = []
+            else:
+                previous = context.get("clarification_context", [])
+                prior_context = (
+                    previous[-1:]
+                    if was_waiting_for_clarification
+                    and self._is_contextual_follow_up(clean_content)
+                    and isinstance(previous, list)
+                    else []
+                )
+                context["clarification_context"] = [
+                    *prior_context,
+                    clean_content[:250],
+                ][-2:]
+        else:
+            context.pop("pending_faq_ids", None)
+            context.pop("clarification_context", None)
+        context["last_terms"] = self._meaningful_tokens(search_content)[:20]
         conversation.context_json = context
         if result["escalated"]:
             conversation.status = ConversationStatus.ESCALATED
@@ -504,42 +572,90 @@ class ChatbotService:
         conversation = self._authorized_conversation(
             session, conversation_id, current_user
         )
-        if conversation.last_faq_id is None:
-            raise HTTPException(
-                status_code=422, detail="La conversación no tiene una FAQ evaluable"
-            )
-        feedback = FAQFeedback(
-            faq_id=conversation.last_faq_id,
-            user_id=current_user.user.id if current_user else None,
-            is_helpful=data.is_helpful,
-            escalation_accepted=data.escalation_accepted,
-            comment=data.reason,
+        bot_message = self.conversations.get_bot_message(
+            session, conversation.id, data.message_id
         )
-        session.add(feedback)
-        session.flush()
+        if bot_message is None:
+            raise HTTPException(
+                status_code=409, detail="No hay una respuesta evaluable"
+            )
+        feedback = self.chat_feedback.get_by_message(session, bot_message.id)
+        now = datetime.now(UTC)
+        faq_feedback: FAQFeedback | None = None
+        if feedback is None:
+            if bot_message.faq_id is not None:
+                faq_feedback = FAQFeedback(
+                    faq_id=bot_message.faq_id,
+                    user_id=current_user.user.id if current_user else None,
+                    is_helpful=data.is_helpful,
+                    escalation_accepted=data.escalation_accepted,
+                    comment=data.reason,
+                )
+                session.add(faq_feedback)
+                session.flush()
+            feedback = ChatbotFeedback(
+                conversation_id=conversation.id,
+                message_id=bot_message.id,
+                faq_id=bot_message.faq_id,
+                faq_feedback_id=faq_feedback.id if faq_feedback else None,
+                user_id=current_user.user.id if current_user else None,
+                is_helpful=data.is_helpful,
+                escalation_accepted=data.escalation_accepted,
+                created_at=now,
+                updated_at=now,
+            )
+            self.chat_feedback.add(session, feedback)
+        else:
+            feedback.is_helpful = data.is_helpful
+            feedback.escalation_accepted = data.escalation_accepted
+            feedback.updated_at = now
+            if feedback.faq_feedback_id:
+                faq_feedback = session.get(FAQFeedback, feedback.faq_feedback_id)
+                if faq_feedback is not None:
+                    faq_feedback.is_helpful = data.is_helpful
+                    faq_feedback.escalation_accepted = data.escalation_accepted
+                    faq_feedback.comment = data.reason
+                    session.add(faq_feedback)
+            session.add(feedback)
         self.audit.record(
             session,
             event_type="CHATBOT",
             action="FEEDBACK_RECEIVED",
             actor_user_id=current_user.user.id if current_user else None,
             actor_role=current_user.role if current_user else None,
-            resource_type="CONVERSATION",
-            resource_id=conversation.id,
+            resource_type="CHAT_MESSAGE",
+            resource_id=bot_message.id,
             target_user_id=conversation.user_id,
             success=True,
             metadata={
-                "faq_id": conversation.last_faq_id,
+                "conversation_id": conversation.id,
+                "faq_id": bot_message.faq_id,
                 "is_helpful": data.is_helpful,
                 "escalation_accepted": data.escalation_accepted,
             },
         )
         session.commit()
-        session.refresh(feedback)
         return ChatFeedbackRead(
             id=feedback.id,
+            message_id=feedback.message_id,
             is_helpful=feedback.is_helpful,
             escalation_accepted=feedback.escalation_accepted,
             created_at=feedback.created_at,
+        )
+
+    def feedback_metrics(
+        self, session: Session, actor: AuthenticatedUser
+    ) -> ChatbotFeedbackMetrics:
+        if actor.role != "SUPERVISOR":
+            raise HTTPException(status_code=403, detail="Métricas no autorizadas")
+        total, helpful, faq_backed = self.chat_feedback.metrics(session)
+        return ChatbotFeedbackMetrics(
+            total_feedback=total,
+            helpful=helpful,
+            not_helpful=total - helpful,
+            usefulness_rate=round(helpful / total * 100, 2) if total else 0.0,
+            faq_backed=faq_backed,
+            generic_replies=total - faq_backed,
         )
 
     def _find_matches(self, session: Session, content: str) -> list[FAQMatch]:
@@ -628,6 +744,7 @@ class ChatbotService:
                 "offers_ticket": False,
                 "requires_clarification": True,
                 "options": options,
+                "candidate_faq_ids": [item.faq.id for item in matches[:3]],
                 "fallback_reason": "MEDIUM_CONFIDENCE",
                 "escalated": False,
                 "match": best,
@@ -644,6 +761,7 @@ class ChatbotService:
                 "offers_ticket": False,
                 "requires_clarification": False,
                 "options": [],
+                "candidate_faq_ids": [],
                 "fallback_reason": None,
                 "escalated": False,
                 "match": best,
@@ -663,6 +781,7 @@ class ChatbotService:
                 "offers_ticket": False,
                 "requires_clarification": True,
                 "options": [],
+                "candidate_faq_ids": [],
                 "fallback_reason": None,
                 "escalated": False,
                 "match": None,
@@ -682,6 +801,7 @@ class ChatbotService:
             "offers_ticket": True,
             "requires_clarification": False,
             "options": [],
+            "candidate_faq_ids": [],
             "fallback_reason": "LOW_CONFIDENCE",
             "escalated": False,
             "match": best,
@@ -695,13 +815,25 @@ class ChatbotService:
         selected: list[FAQMatch] = []
         seen_categories: set[str] = set()
 
-        # Show a representative question from each available category first.
-        for faq in available_faqs:
-            if detect_prompt_injection(
-                f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
-            ):
-                continue
-            if faq.category_id in seen_categories:
+        # Keep a stable, broad menu rather than showing five questions from one topic.
+        category_names = {
+            faq.category_id: self._category_name(session, faq.category_id)
+            for faq in available_faqs
+        }
+        for category_name in _FAQ_DISCOVERY_CATEGORY_ORDER:
+            faq = next(
+                (
+                    candidate
+                    for candidate in available_faqs
+                    if category_names.get(candidate.category_id) == category_name
+                    and not detect_prompt_injection(
+                        f"{candidate.title} {candidate.question} "
+                        f"{candidate.summary} {candidate.answer}"
+                    )
+                ),
+                None,
+            )
+            if faq is None:
                 continue
             seen_categories.add(faq.category_id)
             selected.append(
@@ -709,11 +841,30 @@ class ChatbotService:
                     faq=faq,
                     score=1.0,
                     intent=self._intent_for(faq),
-                    category_name=self._category_name(session, faq.category_id),
+                    category_name=category_names[faq.category_id],
                 )
             )
             if len(selected) == _FAQ_DISCOVERY_MAX_OPTIONS:
                 break
+
+        # Include published FAQ categories not in the preferred menu if space remains.
+        if len(selected) < _FAQ_DISCOVERY_MAX_OPTIONS:
+            for faq in available_faqs:
+                if faq.category_id in seen_categories or detect_prompt_injection(
+                    f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
+                ):
+                    continue
+                seen_categories.add(faq.category_id)
+                selected.append(
+                    FAQMatch(
+                        faq=faq,
+                        score=1.0,
+                        intent=self._intent_for(faq),
+                        category_name=category_names.get(faq.category_id),
+                    )
+                )
+                if len(selected) == _FAQ_DISCOVERY_MAX_OPTIONS:
+                    break
 
         if len(selected) < _FAQ_DISCOVERY_MAX_OPTIONS:
             selected_ids = {match.faq.id for match in selected}
@@ -763,6 +914,7 @@ class ChatbotService:
                 "offers_ticket": False,
                 "requires_clarification": True,
                 "options": options,
+                "candidate_faq_ids": [match.faq.id for match in selected],
                 "fallback_reason": None,
                 "escalated": False,
                 "match": None,
@@ -787,6 +939,107 @@ class ChatbotService:
             return True
         return any(phrase in normalized for phrase in _FAQ_DISCOVERY_PHRASES)
 
+    def _resolve_pending_selection(
+        self, session: Session, conversation: Conversation, content: str
+    ) -> FAQMatch | None:
+        raw_ids = (conversation.context_json or {}).get("pending_faq_ids", [])
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return None
+        active = {
+            faq.id: faq
+            for faq in self.faqs.list_active(session)
+            if faq.id in {value for value in raw_ids if isinstance(value, str)}
+        }
+        if not active:
+            return None
+        candidates = [
+            active[faq_id]
+            for faq_id in raw_ids
+            if isinstance(faq_id, str) and faq_id in active
+        ]
+        normalized = self.normalize_text(content).strip(" .!?¿¡")
+        ordinal = re.fullmatch(
+            r"(?:(?:la|el|opcion|pregunta)\s+)*(primera|primer|1|uno|una|segunda|segundo|2|dos|tercera|tercer|3|tres|cuarta|cuarto|4|cuatro)(?:\s+(?:opcion|pregunta))?",
+            normalized,
+        )
+        if ordinal:
+            ordinal_index = {
+                "primera": 0,
+                "primer": 0,
+                "1": 0,
+                "uno": 0,
+                "una": 0,
+                "segunda": 1,
+                "segundo": 1,
+                "2": 1,
+                "dos": 1,
+                "tercera": 2,
+                "tercer": 2,
+                "3": 2,
+                "tres": 2,
+                "cuarta": 3,
+                "cuarto": 3,
+                "4": 3,
+                "cuatro": 3,
+            }[ordinal.group(1)]
+            if ordinal_index < len(candidates):
+                selected = candidates[ordinal_index]
+                return FAQMatch(
+                    faq=selected,
+                    score=1.0,
+                    intent=self._intent_for(selected),
+                    category_name=self._category_name(session, selected.category_id),
+                )
+        for faq in candidates:
+            labels = {self.normalize_text(faq.title), self.normalize_text(faq.question)}
+            if normalized in labels:
+                return FAQMatch(
+                    faq=faq,
+                    score=1.0,
+                    intent=self._intent_for(faq),
+                    category_name=self._category_name(session, faq.category_id),
+                )
+        query_tokens = set(self._meaningful_tokens(normalized))
+        if not query_tokens or len(query_tokens) > 5:
+            return None
+        scores: list[tuple[int, FAQ]] = []
+        for faq in candidates:
+            candidate_tokens = set(
+                self._meaningful_tokens(f"{faq.title} {faq.question}")
+            )
+            scores.append((len(query_tokens & candidate_tokens), faq))
+        best_score = max(score for score, _ in scores)
+        best = [faq for score, faq in scores if score == best_score and score > 0]
+        if len(best) != 1 or best_score / len(query_tokens) < 0.5:
+            return None
+        faq = best[0]
+        return FAQMatch(
+            faq=faq,
+            score=1.0,
+            intent=self._intent_for(faq),
+            category_name=self._category_name(session, faq.category_id),
+        )
+
+    @classmethod
+    def _is_contextual_follow_up(cls, content: str) -> bool:
+        normalized = cls.normalize_text(content)
+        terms = cls._meaningful_tokens(normalized)
+        referential_terms = {
+            "eso",
+            "esa",
+            "ese",
+            "tambien",
+            "ademas",
+            "entonces",
+            "mas",
+            "otro",
+            "otra",
+            "donde",
+            "cuando",
+            "cual",
+        }
+        return len(terms) <= 4 or bool(set(terms) & referential_terms)
+
     @staticmethod
     def _greeting_response() -> dict[str, object]:
         return {
@@ -808,18 +1061,27 @@ class ChatbotService:
     @staticmethod
     def _public_sources(
         matches: list[FAQMatch] | tuple[object, ...],
-    ) -> list[dict[str, str | None]]:
-        sources: list[dict[str, str | None]] = []
+    ) -> list[dict[str, object]]:
+        sources: list[dict[str, object]] = []
         for item in matches:
             if isinstance(item, FAQMatch):
                 sources.append(
                     {
                         "title": item.faq.title or item.faq.question,
                         "category": item.category_name,
+                        "url": item.faq.source_url,
+                        "verified_at": item.faq.source_verified_at,
                     }
                 )
             else:
-                sources.append({"title": item.title, "category": item.category})
+                sources.append(
+                    {
+                        "title": item.title,
+                        "category": item.category,
+                        "url": getattr(item, "source_url", None),
+                        "verified_at": getattr(item, "source_verified_at", None),
+                    }
+                )
         return sources
 
     def _enforce_limits(self, session: Session, conversation: Conversation) -> None:

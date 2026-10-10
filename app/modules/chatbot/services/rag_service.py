@@ -183,6 +183,12 @@ class RAGService:
                     status=status,
                     valid_from=published_at.isoformat() if published_at else None,
                     valid_to=unpublished_at.isoformat() if unpublished_at else None,
+                    source_url=getattr(faq, "source_url", None),
+                    source_verified_at=(
+                        self._utc(faq.source_verified_at).isoformat()
+                        if getattr(faq, "source_verified_at", None)
+                        else None
+                    ),
                 )
             )
             remaining -= len(content)

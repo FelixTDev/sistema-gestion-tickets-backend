@@ -1,6 +1,7 @@
 from app.modules.adjuntos.models.attachment import Attachment
 from app.modules.auditoria.models.audit_log import AuditLog
 from app.modules.chatbot.models.conversation import Conversation
+from app.modules.chatbot.models.feedback import ChatbotFeedback
 from app.modules.chatbot.models.message import ChatMessage
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.conocimiento.models.faq import FAQ
@@ -31,6 +32,7 @@ __all__ = [
     "AuthToken",
     "FAQ",
     "FAQFeedback",
+    "ChatbotFeedback",
     "FAQVersion",
     "Role",
     "Ticket",

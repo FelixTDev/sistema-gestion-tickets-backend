@@ -17,6 +17,8 @@ class KnowledgeContext:
     status: str
     valid_from: str | None
     valid_to: str | None
+    source_url: str | None = None
+    source_verified_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,8 @@ class HttpJsonAIProvider:
                     "status": chunk.status,
                     "valid_from": chunk.valid_from,
                     "valid_to": chunk.valid_to,
+                    "source_url": chunk.source_url,
+                    "source_verified_at": chunk.source_verified_at,
                 }
                 for chunk in request.context
             ],

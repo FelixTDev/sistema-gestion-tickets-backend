@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -48,6 +49,8 @@ class FAQRead(BaseModel):
     tags: list[str]
     synonyms: list[str]
     intent: str | None
+    source_url: str | None = None
+    source_verified_at: datetime | None = None
     status: FAQStatus
     priority: int
     display_order: int
@@ -97,6 +100,8 @@ class FAQCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     synonyms: list[str] = Field(default_factory=list)
     intent: str | None = Field(default=None, max_length=100)
+    source_url: str | None = Field(default=None, max_length=2048)
+    source_verified_at: datetime | None = None
     priority: int = Field(default=0, ge=0, le=100)
     display_order: int = Field(default=0, ge=0, le=100000)
 
@@ -105,10 +110,18 @@ class FAQCreate(BaseModel):
     def validate_terms(cls, value: list[str]) -> list[str]:
         return _terms(value) or []
 
+    @field_validator("source_url")
+    @classmethod
+    def validate_source_url(cls, value: str | None) -> str | None:
+        return _official_source_url(value)
+
     @model_validator(mode="after")
     def validate_content(self) -> "FAQCreate":
         if not self.question.strip() or not self.answer.strip():
             raise ValueError("La pregunta y la respuesta no pueden estar vacías")
+        if self.source_verified_at is not None and self.source_url is None:
+            raise ValueError("La fecha de verificación requiere una fuente oficial")
+        _validate_source_date(self.source_verified_at)
         return self
 
 
@@ -124,6 +137,8 @@ class FAQUpdate(BaseModel):
     tags: list[str] | None = None
     synonyms: list[str] | None = None
     intent: str | None = Field(default=None, max_length=100)
+    source_url: str | None = Field(default=None, max_length=2048)
+    source_verified_at: datetime | None = None
     priority: int | None = Field(default=None, ge=0, le=100)
     display_order: int | None = Field(default=None, ge=0, le=100000)
 
@@ -132,10 +147,22 @@ class FAQUpdate(BaseModel):
     def validate_terms(cls, value: list[str] | None) -> list[str] | None:
         return _terms(value, allow_none=True)
 
+    @field_validator("source_url")
+    @classmethod
+    def validate_source_url(cls, value: str | None) -> str | None:
+        return _official_source_url(value)
+
     @model_validator(mode="after")
     def require_changes(self) -> "FAQUpdate":
         if not self.model_fields_set:
             raise ValueError("Debe enviarse al menos un campo para actualizar")
+        if (
+            "source_url" in self.model_fields_set
+            and self.source_url is None
+            and self.source_verified_at is not None
+        ):
+            raise ValueError("La fecha de verificación requiere una fuente oficial")
+        _validate_source_date(self.source_verified_at)
         return self
 
 
@@ -162,6 +189,8 @@ class FAQVersionRead(BaseModel):
     tags: list[str]
     synonyms: list[str]
     intent: str | None
+    source_url: str | None = None
+    source_verified_at: datetime | None = None
     status: FAQStatus
     priority: int
     display_order: int
@@ -204,3 +233,31 @@ class FAQUtilityMetrics(BaseModel):
     helpful: int
     not_helpful: int
     usefulness_rate: float
+
+
+def _official_source_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(
+            "La fuente debe ser una URL HTTPS oficial de Banco GNB"
+        ) from error
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"www.bancognb.com.pe", "bancognb.com.pe"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or not parsed.path.startswith("/")
+        or any(character.isspace() for character in value)
+    ):
+        raise ValueError("La fuente debe ser una URL HTTPS oficial de Banco GNB")
+    return value
+
+
+def _validate_source_date(value: datetime | None) -> None:
+    if value is not None and value.tzinfo is None:
+        raise ValueError("La fecha de verificación debe incluir zona horaria")

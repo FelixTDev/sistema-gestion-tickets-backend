@@ -56,6 +56,12 @@ class FAQ(SQLModel, table=True):
         default="", sa_column=Column(Text, nullable=False, server_default="")
     )
     intent: str | None = Field(default=None, max_length=100)
+    source_url: str | None = Field(
+        default=None, sa_column=Column(String(2048), nullable=True)
+    )
+    source_verified_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     status: Status = Field(
         default=Status.PUBLISHED,
         sa_column=Column(Enum(Status), nullable=False, server_default="PUBLISHED"),

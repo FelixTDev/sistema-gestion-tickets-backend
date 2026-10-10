@@ -191,7 +191,7 @@ def test_faq_discovery_lists_published_questions_and_selected_question_is_answer
     assert body["fallback_reason"] is None
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
     assert body["response_source"] == "DETERMINISTIC"
-    assert 1 <= len(options) <= 4
+    assert 1 <= len(options) <= 5
 
     with Session(engine) as session:
         public_questions = {
@@ -225,6 +225,41 @@ def test_faq_discovery_lists_published_questions_and_selected_question_is_answer
     )
     with Session(engine) as session:
         assert session.exec(select(Ticket)).all() == []
+
+
+def test_faq_discovery_accepts_ordinal_follow_up(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+
+    discovery = client.post(endpoint, json={"content": "¿Qué preguntas me puedes dar?"})
+    first_option = discovery.json()["clarification_options"][0]
+    answer = client.post(endpoint, json={"content": "la primera"})
+
+    assert answer.status_code == 200
+    body = answer.json()
+    assert body["resolved"] is True
+    assert body["requires_clarification"] is False
+    assert body["faq_id"] is not None
+    assert body["bot_message"]["content"]
+    assert any(source["title"] == first_option for source in body["sources"])
+
+
+def test_generic_unmatched_query_does_not_resolve_from_common_words(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": "consulta que no existe"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["resolved"] is False
+    assert body["faq_id"] is None
+    assert body["requires_clarification"] is True
+    assert body["offers_ticket"] is False
 
 
 def test_ignores_inactive_faq_and_asks_for_clarification_without_ticket(

@@ -7,6 +7,7 @@ from app.api.deps import CurrentUser, OptionalCurrentUser
 from app.db.session import get_session
 from app.modules.chatbot.schemas.chatbot import (
     BotMessageResponse,
+    ChatbotFeedbackMetrics,
     ChatFeedbackCreate,
     ChatFeedbackRead,
     ConversationActionRequest,
@@ -37,6 +38,15 @@ def get_ticket_service() -> TicketService:
 
 ChatbotServiceDependency = Annotated[ChatbotService, Depends(get_chatbot_service)]
 TicketServiceDependency = Annotated[TicketService, Depends(get_ticket_service)]
+
+
+@router.get("/admin/feedback/metrics", response_model=ChatbotFeedbackMetrics)
+def chatbot_feedback_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    current_user: CurrentUser,
+    service: ChatbotServiceDependency,
+) -> ChatbotFeedbackMetrics:
+    return service.feedback_metrics(session, current_user)
 
 
 @router.post(

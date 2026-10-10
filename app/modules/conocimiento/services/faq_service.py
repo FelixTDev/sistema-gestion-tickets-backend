@@ -202,10 +202,19 @@ class FAQService:
                 "intent",
                 "priority",
                 "display_order",
+                "source_url",
+                "source_verified_at",
             }
         )
+        source_changed = (
+            "source_url" in values and values["source_url"] != current["source_url"]
+        )
+        if source_changed and "source_verified_at" not in values:
+            merged["source_verified_at"] = None
         for field, value in merged_values.items():
             setattr(faq, field, value)
+        faq.source_url = merged.get("source_url")
+        faq.source_verified_at = merged.get("source_verified_at")
         faq.category_id = category.id
         now = datetime.now(UTC)
         if faq.status == FAQStatus.PUBLISHED and content_changed:
@@ -395,7 +404,10 @@ class FAQService:
     def _content_values(data: FAQCreate, category: TicketCategory) -> dict[str, object]:
         values = data.model_dump()
         values["category_name"] = category.name
-        return FAQService._content_values_from_values(values)
+        content = FAQService._content_values_from_values(values)
+        content["source_url"] = data.source_url
+        content["source_verified_at"] = data.source_verified_at
+        return content
 
     @staticmethod
     def _content_values_from_values(values: dict[str, object]) -> dict[str, object]:
@@ -461,6 +473,8 @@ class FAQService:
             "tags": faq.tags,
             "synonyms": faq.synonyms,
             "intent": faq.intent,
+            "source_url": faq.source_url,
+            "source_verified_at": faq.source_verified_at,
             "priority": faq.priority,
             "display_order": faq.display_order,
         }
@@ -515,6 +529,8 @@ class FAQService:
             synonyms=faq.synonyms,
             normalized_content=faq.normalized_content,
             intent=faq.intent,
+            source_url=faq.source_url,
+            source_verified_at=faq.source_verified_at,
             status=faq.status,
             priority=faq.priority,
             display_order=faq.display_order,

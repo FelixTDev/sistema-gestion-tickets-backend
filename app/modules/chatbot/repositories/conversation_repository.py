@@ -33,6 +33,24 @@ class ConversationRepository:
             ).all()
         )
 
+    def get_bot_message(
+        self,
+        session: Session,
+        conversation_id: str,
+        message_id: str | None = None,
+    ) -> ChatMessage | None:
+        query = select(ChatMessage).where(
+            ChatMessage.conversation_id == conversation_id,
+            ChatMessage.sender_type == SenderType.BOT,
+        )
+        if message_id is not None:
+            query = query.where(ChatMessage.id == message_id)
+        return session.exec(
+            query.order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(
+                1
+            )
+        ).first()
+
     def add_message(self, session: Session, message: ChatMessage) -> ChatMessage:
         session.add(message)
         session.commit()

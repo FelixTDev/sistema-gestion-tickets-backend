@@ -39,6 +39,12 @@ class FAQVersion(SQLModel, table=True):
     synonyms: str = Field(sa_column=Column(Text, nullable=False))
     normalized_content: str = Field(sa_column=Column(Text, nullable=False))
     intent: str | None = Field(default=None, max_length=100)
+    source_url: str | None = Field(
+        default=None, sa_column=Column(String(2048), nullable=True)
+    )
+    source_verified_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     status: FAQ.Status = Field(sa_column=Column(Enum(FAQ.Status), nullable=False))
     priority: int = Field(sa_column=Column(Integer, nullable=False))
     display_order: int = Field(sa_column=Column(Integer, nullable=False))

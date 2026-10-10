@@ -44,6 +44,13 @@ class MessageCreate(BaseModel):
         return value
 
 
+class ChatbotSource(BaseModel):
+    title: str
+    category: str | None = None
+    url: str | None = None
+    verified_at: datetime | None = None
+
+
 class BotMessageResponse(BaseModel):
     user_message: ChatMessageRead
     bot_message: ChatMessageRead
@@ -57,7 +64,7 @@ class BotMessageResponse(BaseModel):
     fallback_reason: str | None = None
     conversation_status: str = "ACTIVE"
     response_source: str = "DETERMINISTIC"
-    sources: list[dict[str, str | None]] = Field(default_factory=list)
+    sources: list["ChatbotSource"] = Field(default_factory=list)
 
 
 class ConversationActionRequest(BaseModel):
@@ -70,6 +77,7 @@ class ConversationActionRequest(BaseModel):
 
 
 class ChatFeedbackCreate(BaseModel):
+    message_id: str | None = Field(default=None, max_length=36)
     is_helpful: bool
     escalation_accepted: bool | None = None
     reason: str | None = Field(default=None, max_length=500)
@@ -82,9 +90,19 @@ class ChatFeedbackCreate(BaseModel):
 
 class ChatFeedbackRead(BaseModel):
     id: str
+    message_id: str
     is_helpful: bool
     escalation_accepted: bool | None = None
     created_at: datetime
+
+
+class ChatbotFeedbackMetrics(BaseModel):
+    total_feedback: int
+    helpful: int
+    not_helpful: int
+    usefulness_rate: float
+    faq_backed: int
+    generic_replies: int
 
 
 class LinkConversationResponse(BaseModel):

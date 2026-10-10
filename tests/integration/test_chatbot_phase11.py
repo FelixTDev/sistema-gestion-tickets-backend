@@ -63,6 +63,10 @@ def test_high_confidence_includes_source_and_context(phase11_client) -> None:
     assert body["confidence"] >= 0.7
     assert body["faq_id"]
     assert body["source_category"]
+    assert body["sources"][0]["url"] == (
+        "https://www.bancognb.com.pe/inicio/banca-personas/tarjetas"
+    )
+    assert body["sources"][0]["verified_at"].startswith("2026-10-10")
     assert body["requires_clarification"] is False
     assert body["conversation_status"] == "ACTIVE"
 
@@ -234,6 +238,74 @@ def test_feedback_is_persisted_without_unnecessary_personal_data(
         assert row.user_id is None
 
 
+def test_chat_feedback_accepts_and_updates_a_non_faq_bot_reply(phase11_client) -> None:
+    client, _ = phase11_client
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}"
+    greeting = client.post(f"{endpoint}/messages", json={"content": "hola"})
+    assert greeting.status_code == 200
+    bot_message_id = greeting.json()["bot_message"]["id"]
+
+    first = client.post(
+        f"{endpoint}/feedback",
+        json={"message_id": bot_message_id, "is_helpful": True},
+    )
+    second = client.post(
+        f"{endpoint}/feedback",
+        json={"message_id": bot_message_id, "is_helpful": False},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] == second.json()["id"]
+    assert second.json()["message_id"] == bot_message_id
+    assert second.json()["is_helpful"] is False
+
+
+def test_chat_feedback_requires_a_bot_message_and_supervisor_metrics_are_private(
+    phase11_client,
+) -> None:
+    client, _ = phase11_client
+    conversation = client.post("/api/v1/chat/conversations").json()
+    no_message = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/feedback",
+        json={"is_helpful": True},
+    )
+    assert no_message.status_code == 409
+
+    client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "hola"},
+    )
+    rated = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/feedback",
+        json={"is_helpful": True},
+    )
+    assert rated.status_code == 201
+
+    supervisor = login(client, "supervisor@demo.com")
+    metrics = client.get(
+        "/api/v1/chat/admin/feedback/metrics",
+        headers={"Authorization": f"Bearer {supervisor}"},
+    )
+    customer = login(client, "cliente@demo.com")
+    forbidden = client.get(
+        "/api/v1/chat/admin/feedback/metrics",
+        headers={"Authorization": f"Bearer {customer}"},
+    )
+
+    assert metrics.status_code == 200
+    assert metrics.json() == {
+        "total_feedback": 1,
+        "helpful": 1,
+        "not_helpful": 0,
+        "usefulness_rate": 100.0,
+        "faq_backed": 0,
+        "generic_replies": 1,
+    }
+    assert forbidden.status_code == 403
+
+
 def test_expired_and_inactive_faqs_are_never_used(phase11_client) -> None:
     client, engine = phase11_client
     with Session(engine) as session:
@@ -318,7 +390,7 @@ def test_daily_chatbot_conversion_limit_is_enforced(
         conversation = client.post("/api/v1/chat/conversations").json()
         client.post(
             f"/api/v1/chat/conversations/{conversation['id']}/messages",
-            json={"content": "consulta que no existe"},
+            json={"content": "zxqv-orfelio-91347"},
         )
         client.post(
             f"/api/v1/chat/conversations/{conversation['id']}/link-user",

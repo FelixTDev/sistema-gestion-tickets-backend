@@ -65,92 +65,230 @@ DEMO_USERS = (
     ),
 )
 
+KNOWLEDGE_VERIFIED_AT = datetime(2026, 10, 10, tzinfo=UTC)
+
 DEMO_FAQS = (
     (
         "TARJETAS",
         "¿Qué requisitos necesito para solicitar una tarjeta?",
         (
-            "Para solicitar una tarjeta necesitas identificarte, presentar información "
-            "de contacto actualizada y cumplir la evaluación correspondiente. "
-            "Un asesor "
-            "puede orientarte sobre los requisitos aplicables a tu solicitud."
+            "Los requisitos dependen del tipo de tarjeta y de la evaluación del Banco. "
+            "Revisa la información vigente de cada producto en el sitio oficial. "
+            "Este asistente no evalúa solicitudes ni garantiza aprobaciones."
         ),
-        "tarjeta,requisitos,solicitud",
+        "tarjeta,requisitos,solicitud,crédito,debito",
+        "https://www.bancognb.com.pe/inicio/banca-personas/tarjetas",
     ),
     (
         "BANCA_DIGITAL",
         "¿Cómo ingreso a la banca digital?",
         (
-            "Ingresa desde el canal digital autorizado con tus credenciales "
-            "personales. Si no puedes acceder, verifica tus datos, utiliza la opción "
-            "de recuperación "
-            "disponible y solicita orientación si el inconveniente continúa."
+            "Banco GNB ofrece Banca Móvil y Banca por Internet. Para afiliación, "
+            "acceso "
+            "o recuperación de contraseña, consulta las guías oficiales del canal. "
+            "Nunca compartas aquí tu contraseña, token ni código de verificación."
         ),
-        "banca,aplicacion,acceso,ingreso",
+        "banca,aplicacion,acceso,ingreso,clave,contraseña,afiliación",
+        "https://www.bancognb.com.pe/inicio/canales/canales-digitales/banca-movil-personas",
     ),
     (
         "CUENTAS",
         "¿Cómo consulto el saldo de mi cuenta?",
         (
-            "Puedes consultar el saldo desde el canal digital autorizado o solicitar "
-            "orientación en un canal de atención. Revisa siempre que la sesión "
-            "corresponda "
-            "a tu cuenta antes de confirmar cualquier operación."
+            "El Banco indica que puedes consultar saldos y movimientos mediante sus "
+            "canales digitales o Banca por Teléfono. Este asistente no accede a tus "
+            "cuentas ni puede mostrar saldos."
         ),
-        "cuenta,saldo,movimientos",
+        "cuenta,saldo,movimientos,consulta,ahorros",
+        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
     ),
     (
         "TARJETAS",
         "¿Qué hago si mi tarjeta está bloqueada?",
         (
-            "Verifica el motivo del bloqueo en el canal de atención disponible y sigue "
-            "las instrucciones de desbloqueo. Si no reconoces la causa, solicita la "
-            "revisión "
-            "de un asesor de inmediato."
+            "Si necesitas bloquear una tarjeta o canal digital, la página oficial "
+            "indica atención telefónica de bloqueos las 24 horas: Lima (01) 616-4722 "
+            "o provincias 0801-00088, opción 0; también señala la línea de emergencia "
+            "1820. Verifica los datos vigentes en la fuente oficial."
         ),
-        "bloqueada,bloqueo,desbloqueo",
+        "bloqueada,bloqueo,desbloqueo,perdida,robo,urgente",
+        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta-24hr",
     ),
     (
         "CREDITOS",
         "¿Cómo solicito información sobre un crédito?",
         (
-            "Indica el tipo de crédito y el propósito de tu consulta para recibir "
-            "orientación sobre requisitos, evaluación y próximos pasos. La aprobación "
-            "está sujeta a las "
-            "condiciones vigentes."
+            "Banco GNB publica información sobre sus préstamos personales y canales "
+            "de solicitud. Las condiciones, requisitos y cualquier oferta están "
+            "sujetos a evaluación y pueden cambiar; consulta la página oficial. Este "
+            "asistente no cotiza ni aprueba créditos."
         ),
-        "credito,crédito",
+        "credito,crédito,prestamo,préstamo,cuota,requisitos,tasa",
+        "https://www.bancognb.com.pe/inicio/banca-personas/prestamos/prestamo-personal",
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cómo consulto el estado de un reclamo?",
         (
-            "Ten a la mano el código de seguimiento de tu reclamo y consulta su estado "
-            "en el canal de atención. Un asesor puede revisar los avances y las "
-            "acciones pendientes."
+            "Para conocer el estado de un reclamo formal, utiliza los canales de "
+            "atención oficiales y ten a mano tu código de seguimiento. El ticket de "
+            "este portal no equivale a un reclamo formal ante el Banco."
         ),
-        "reclamo,estado,seguimiento,incidencia",
+        "reclamo,estado,seguimiento,incidencia,queja,código",
+        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta",
     ),
     (
         "CUENTAS",
         "¿Cómo solicito un estado de cuenta?",
         (
-            "Solicita el periodo que necesitas mediante el canal de atención "
-            "disponible. El asesor confirmará la información requerida y el medio "
-            "habilitado para entregarte "
-            "el documento."
+            "La Banca por Teléfono incluye la solicitud de duplicado de estado de "
+            "cuenta. Comunícate con el Banco para confirmar requisitos y canales "
+            "vigentes; no compartas aquí números de cuenta ni documentos personales."
         ),
-        "estado,cuenta,documento,periodo",
+        "estado,cuenta,documento,periodo,duplicado,extracto",
+        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
     ),
     (
         "SOLICITUDES_INFORMACION",
         "¿Cómo puedo contactar a un asesor?",
         (
-            "Describe brevemente tu consulta y conserva el código de seguimiento. Un "
-            "asesor revisará la solicitud y te informará los siguientes pasos por el "
-            "canal habilitado."
+            "Para consultas, la página oficial publica Banca por Teléfono: (01) "
+            "616-4722 en Lima y 0801-00088 en provincias, con horarios regulares "
+            "indicados en el sitio. Los bloqueos tienen una ruta de atención distinta "
+            "y disponible 24 horas. Confirma la información actual en la fuente "
+            "oficial."
         ),
-        "asesor,atencion,ayuda",
+        "asesor,atencion,ayuda,telefono,contacto,horario",
+        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
+    ),
+    (
+        "TARJETAS",
+        "¿Puedo habilitar o deshabilitar compras por internet en mi tarjeta?",
+        (
+            "La página oficial indica que los servicios adicionales de tarjetas, como "
+            "compras por internet, pueden configurarse desde los canales digitales. "
+            "Si no tienes acceso, consulta las opciones de atención publicadas por el "
+            "Banco."
+        ),
+        "tarjeta,internet,compras,habilitar,deshabilitar,configurar,seguridad",
+        "https://www.bancognb.com.pe/inicio/banca-personas/tarjetas",
+    ),
+    (
+        "BANCA_DIGITAL",
+        "¿Cómo me afilio a Banca Móvil?",
+        (
+            "La página oficial de Banca Móvil enlaza la guía de afiliación y registro "
+            "para personas naturales. Sigue esa guía vigente; no compartas en este "
+            "chat "
+            "contraseñas, tokens, OTP ni códigos de seguridad."
+        ),
+        "banca movil,afiliar,afiliacion,registro,aplicacion,app,guia",
+        "https://www.bancognb.com.pe/inicio/canales/canales-digitales/banca-movil-personas",
+    ),
+    (
+        "BANCA_DIGITAL",
+        "¿Qué hago si olvidé mi contraseña de Banca Móvil?",
+        (
+            "La sección oficial de Banca Móvil publica una guía de recuperación de "
+            "contraseña. Utiliza esa guía o los canales oficiales; este asistente no "
+            "puede restablecer credenciales ni debe recibirlas."
+        ),
+        "olvide,olvidé,contraseña,clave,recuperar,restablecer,banca movil",
+        "https://www.bancognb.com.pe/inicio/canales/canales-digitales/banca-movil-personas",
+    ),
+    (
+        "CUENTAS",
+        "¿Qué necesito para abrir una Cuenta de Ahorro?",
+        (
+            "La página oficial de Cuenta de Ahorro publica los requisitos y documentos "
+            "aplicables. Revísala antes de iniciar, porque montos y condiciones del "
+            "producto pueden cambiar."
+        ),
+        "cuenta ahorro abrir requisitos documento dni soles dolares",
+        "https://www.bancognb.com.pe/inicio/banca-personas/cuentas/cuenta-ahorro",
+    ),
+    (
+        "CUENTAS",
+        "¿Qué tipos de cuentas ofrece Banco GNB?",
+        (
+            "El sitio oficial presenta varias opciones de cuentas para personas, con "
+            "características distintas. Compara sus condiciones vigentes directamente "
+            "en la página del Banco antes de elegir."
+        ),
+        "tipos cuenta corriente sueldo cts ahorro plazo opciones",
+        "https://www.bancognb.com.pe/inicio/banca-personas/cuentas",
+    ),
+    (
+        "CREDITOS",
+        "¿El asistente puede decirme si me aprobarán un préstamo?",
+        (
+            "No. La aprobación y las condiciones dependen de la evaluación que realiza "
+            "el Banco. Consulta la información oficial del producto o sus canales de "
+            "atención; no compartas datos financieros sensibles en este chat."
+        ),
+        "prestamo credito aprobacion evaluar oferta calificacion",
+        "https://www.bancognb.com.pe/inicio/banca-personas/prestamos/prestamo-personal",
+    ),
+    (
+        "RECLAMOS_SIMPLES",
+        "¿Cuál es la diferencia entre un reclamo y un requerimiento?",
+        (
+            "Banco GNB define un reclamo como una manifestación de insatisfacción "
+            "relacionada con un producto, servicio u operación; un requerimiento busca "
+            "una acción, consulta o información del Banco. El ticket de este portal "
+            "no reemplaza esos canales formales."
+        ),
+        "reclamo requerimiento diferencia consulta insatisfaccion solicitud",
+        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta",
+    ),
+    (
+        "RECLAMOS_SIMPLES",
+        "¿Cómo presento un reclamo formal a Banco GNB?",
+        (
+            "Utiliza el Libro de Reclamaciones y los canales publicados por Banco GNB. "
+            "El formulario oficial indica qué datos y medio de respuesta se solicitan. "
+            "No introduzcas documentos ni números de tarjeta en este portal."
+        ),
+        "presentar reclamo formal libro formulario queja canal",
+        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones",
+    ),
+    (
+        "RECLAMOS_SIMPLES",
+        "¿Cuánto tarda la respuesta de un reclamo formal?",
+        (
+            "La página oficial consultada indica un plazo de atención de hasta 15 días "
+            "hábiles para reclamos y requerimientos, con posibles extensiones "
+            "excepcionales comunicadas por el Banco. Verifica siempre la información "
+            "vigente en la fuente oficial."
+        ),
+        "plazo tiempo respuesta reclamo requerimiento dias habiles demora",
+        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta",
+    ),
+    (
+        "SOLICITUDES_INFORMACION",
+        "¿Cuál es el horario de Banca por Teléfono?",
+        (
+            "La página oficial consultada indica atención regular de lunes a viernes "
+            "de 9:00 a. m. a 6:30 p. m. y sábados de 9:00 a. m. a 1:00 p. m. Los "
+            "bloqueos tienen atención 24 horas. Confirma horarios vigentes en el sitio "
+            "oficial."
+        ),
+        "horario banca telefono lunes viernes sabado atencion",
+        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
+    ),
+    (
+        "TARJETAS",
+        "¿Qué hago si no reconozco una operación con mi tarjeta?",
+        (
+            "Comunícate de inmediato con los canales oficiales para recibir "
+            "orientación "
+            "y reportar el caso. Banco GNB informa que ciertos reclamos por "
+            "operaciones "
+            "no reconocidas pueden requerir documentación adicional. No compartas aquí "
+            "el número completo de tarjeta, claves ni códigos."
+        ),
+        "operacion no reconocida tarjeta fraude consumo desconocido reclamo",
+        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones",
     ),
 )
 
@@ -806,7 +944,53 @@ def seed_demo_data(session: Session, include_operational_data: bool = True) -> N
             session.add(UserPreference(user_id=user.id))
     session.flush()
 
-    for category_name, question, answer, keywords in DEMO_FAQS:
+    _seed_faq_catalog(session, categories, users["SUPERVISOR"])
+
+    session.flush()
+    _clean_existing_visible_text(session)
+    if include_operational_data:
+        _seed_operational_data(session, categories, users)
+    _ensure_existing_ticket_slas(session, users["SUPERVISOR"].id)
+    session.commit()
+
+
+def seed_chatbot_knowledge(session: Session) -> int:
+    """Upsert only FAQ content, leaving users, tickets and conversations untouched."""
+    required_categories = {item[0] for item in DEMO_FAQS}
+    categories = {
+        category.name: category
+        for category in session.exec(
+            select(TicketCategory).where(
+                TicketCategory.name.in_(required_categories),
+                TicketCategory.is_active.is_(True),
+            )
+        ).all()
+    }
+    if required_categories - categories.keys():
+        missing = ", ".join(sorted(required_categories - categories.keys()))
+        raise RuntimeError(
+            f"No se puede sembrar el conocimiento: faltan categorías activas: {missing}"
+        )
+    supervisor = session.exec(
+        select(User)
+        .join(Role, User.role_id == Role.id)
+        .where(Role.name == "SUPERVISOR", User.is_active.is_(True))
+    ).first()
+    if supervisor is None:
+        raise RuntimeError(
+            "No se puede sembrar el conocimiento: falta un usuario Supervisor activo"
+        )
+    count = _seed_faq_catalog(session, categories, supervisor)
+    session.commit()
+    return count
+
+
+def _seed_faq_catalog(
+    session: Session,
+    categories: dict[str, TicketCategory],
+    supervisor: User,
+) -> int:
+    for category_name, question, answer, keywords, source_url in DEMO_FAQS:
         faq = session.exec(select(FAQ).where(FAQ.question == question)).first()
         legacy_faq = None
         if question in LEGACY_FAQ_QUESTIONS:
@@ -834,25 +1018,41 @@ def seed_demo_data(session: Session, include_operational_data: bool = True) -> N
             ),
             "normalized_title": normalize_text(question),
             "normalized_question": normalize_text(question),
+            "source_url": source_url,
+            "source_verified_at": KNOWLEDGE_VERIFIED_AT,
             "status": FAQ.Status.PUBLISHED,
             "priority": 0,
             "display_order": 0,
             "is_active": True,
-            "created_by": users["SUPERVISOR"].id,
-            "updated_by": users["SUPERVISOR"].id,
+            "created_by": supervisor.id,
+            "updated_by": supervisor.id,
         }
+        created = faq is None
         if faq is None:
             faq = FAQ(**values)
             session.add(faq)
         else:
+            content_changed = any(
+                not _same_seed_value(getattr(faq, field), value)
+                for field, value in values.items()
+                if field not in {"created_by", "updated_by"}
+            )
             for field, value in values.items():
                 setattr(faq, field, value)
+            if content_changed:
+                faq.version += 1
+                faq.updated_at = datetime.now(UTC)
+                faq.updated_by = supervisor.id
+                session.add(faq)
         session.flush()
         faq.published_at = faq.published_at or faq.created_at
-        if (
-            session.exec(select(FAQVersion).where(FAQVersion.faq_id == faq.id)).first()
-            is None
-        ):
+        version_exists = session.exec(
+            select(FAQVersion).where(
+                FAQVersion.faq_id == faq.id,
+                FAQVersion.version == faq.version,
+            )
+        ).first()
+        if version_exists is None:
             session.add(
                 FAQVersion(
                     faq_id=faq.id,
@@ -867,24 +1067,36 @@ def seed_demo_data(session: Session, include_operational_data: bool = True) -> N
                     synonyms=faq.synonyms,
                     normalized_content=faq.normalized_content,
                     intent=faq.intent,
+                    source_url=faq.source_url,
+                    source_verified_at=faq.source_verified_at,
                     status=faq.status,
                     priority=faq.priority,
                     display_order=faq.display_order,
                     is_active=faq.is_active,
                     published_at=faq.published_at,
                     unpublished_at=faq.unpublished_at,
-                    changed_by=faq.updated_by or faq.created_by,
-                    action="SEEDED",
+                    changed_by=supervisor.id,
+                    action="SEEDED" if created else "SEEDED_UPDATE",
                     changed_at=faq.updated_at,
                 )
             )
+    return len(DEMO_FAQS)
 
-    session.flush()
-    _clean_existing_visible_text(session)
-    if include_operational_data:
-        _seed_operational_data(session, categories, users)
-    _ensure_existing_ticket_slas(session, users["SUPERVISOR"].id)
-    session.commit()
+
+def _same_seed_value(existing: object, expected: object) -> bool:
+    if isinstance(existing, datetime) and isinstance(expected, datetime):
+        normalized_existing = (
+            existing.replace(tzinfo=UTC)
+            if existing.tzinfo is None
+            else existing.astimezone(UTC)
+        )
+        normalized_expected = (
+            expected.replace(tzinfo=UTC)
+            if expected.tzinfo is None
+            else expected.astimezone(UTC)
+        )
+        return normalized_existing == normalized_expected
+    return existing == expected
 
 
 def main() -> None:

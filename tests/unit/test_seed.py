@@ -1,3 +1,5 @@
+import re
+
 from sqlmodel import Session, create_engine, select
 
 
@@ -44,7 +46,7 @@ def test_demo_seed_populates_operational_data_without_forbidden_text():
         TicketSource,
         TicketStatus,
     )
-    from app.seed.demo_data import seed_demo_data
+    from app.seed.demo_data import DEMO_FAQS, seed_demo_data
 
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
@@ -92,7 +94,7 @@ def test_demo_seed_populates_operational_data_without_forbidden_text():
         "roles": 3,
         "users": 3,
         "categories": 7,
-        "faqs": 8,
+        "faqs": len(DEMO_FAQS),
         "tickets": 7,
         "comments": 8,
         "history": 35,
@@ -109,7 +111,8 @@ def test_demo_seed_populates_operational_data_without_forbidden_text():
     assert all(
         not any(
             term in value.casefold()
-            for term in ("prototipo", "fictici", "simulad", "académic", "demo")
+            for term in ("prototipo", "fictici", "simulad", "académic")
         )
+        and re.search(r"\bdemo\b", value.casefold()) is None
         for value in visible_values
     )

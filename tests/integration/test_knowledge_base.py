@@ -303,6 +303,96 @@ def test_feedback_is_allowed_publicly_and_metrics_are_aggregated_for_supervisor(
     assert "user_id" not in metrics.json()
 
 
+def test_faq_accepts_only_verified_official_gnb_source_metadata(
+    knowledge_client,
+) -> None:
+    client, engine = knowledge_client
+    supervisor = login(client, "supervisor@demo.com")
+    category = category_id(engine)
+    create = client.post(
+        "/api/v1/faqs",
+        headers={"Authorization": f"Bearer {supervisor}"},
+        json={
+            "category_id": category,
+            "title": "Fuente oficial",
+            "question": "¿Cómo consulto información oficial?",
+            "answer": "Consulta el canal oficial de Banco GNB.",
+            "keywords": "fuente,oficial",
+            "source_url": "https://www.bancognb.com.pe/inicio/",
+            "source_verified_at": "2026-10-10T00:00:00Z",
+        },
+    )
+
+    assert create.status_code == 201
+    faq_id = create.json()["id"]
+    assert create.json()["source_url"] == "https://www.bancognb.com.pe/inicio/"
+    assert create.json()["source_verified_at"] is not None
+
+    changed_source = client.patch(
+        f"/api/v1/faqs/{faq_id}",
+        headers={"Authorization": f"Bearer {supervisor}"},
+        json={
+            "source_url": "https://www.bancognb.com.pe/inicio/banco-gnb-peru/quienes-somos"
+        },
+    )
+    assert changed_source.status_code == 200
+    assert changed_source.json()["source_url"].endswith("quienes-somos")
+    assert changed_source.json()["source_verified_at"] is None
+
+    rejected = client.post(
+        "/api/v1/faqs",
+        headers={"Authorization": f"Bearer {supervisor}"},
+        json={
+            "category_id": category,
+            "title": "Fuente externa",
+            "question": "¿Cómo consulto una fuente externa?",
+            "answer": "Respuesta.",
+            "keywords": "fuente,externa",
+            "source_url": "https://example.com/",
+            "source_verified_at": "2026-10-10T00:00:00Z",
+        },
+    )
+    assert rejected.status_code == 422
+
+    history = client.get(
+        f"/api/v1/faqs/{faq_id}/history",
+        headers={"Authorization": f"Bearer {supervisor}"},
+    )
+    assert history.status_code == 200
+    history_sources = {
+        (item["source_url"], item["source_verified_at"]) for item in history.json()
+    }
+    assert (
+        "https://www.bancognb.com.pe/inicio/",
+        "2026-10-10T00:00:00",
+    ) in history_sources
+    assert any(
+        source_url.endswith("quienes-somos") and verified_at is None
+        for source_url, verified_at in history_sources
+    )
+
+    invalid_urls = (
+        "http://www.bancognb.com.pe/inicio/",
+        "https://www.bancognb.com.pe.example.org/inicio/",
+        "https://www.bancognb.com.pe@evil.example/inicio/",
+    )
+    for index, source_url in enumerate(invalid_urls):
+        invalid = client.post(
+            "/api/v1/faqs",
+            headers={"Authorization": f"Bearer {supervisor}"},
+            json={
+                "category_id": category,
+                "title": f"Fuente inválida {index}",
+                "question": f"¿Cómo valido una fuente inválida {index}?",
+                "answer": "Respuesta.",
+                "keywords": "fuente,invalida",
+                "source_url": source_url,
+                "source_verified_at": "2026-10-10T00:00:00Z",
+            },
+        )
+        assert invalid.status_code == 422
+
+
 def test_chatbot_ignores_faqs_from_inactive_categories(knowledge_client):
     client, engine = knowledge_client
     faq = engine
