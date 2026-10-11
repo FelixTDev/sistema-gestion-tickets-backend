@@ -28,16 +28,18 @@ router = APIRouter(
 OPTIONAL_AUTH_OPENAPI = {"security": [{}, {"HTTPBearer": []}]}
 
 
-def get_chatbot_service() -> ChatbotService:
-    return ChatbotService()
-
-
 def get_ticket_service() -> TicketService:
     return TicketService()
 
 
-ChatbotServiceDependency = Annotated[ChatbotService, Depends(get_chatbot_service)]
 TicketServiceDependency = Annotated[TicketService, Depends(get_ticket_service)]
+
+
+def get_chatbot_service(ticket_service: TicketServiceDependency) -> ChatbotService:
+    return ChatbotService(ticket_service=ticket_service)
+
+
+ChatbotServiceDependency = Annotated[ChatbotService, Depends(get_chatbot_service)]
 
 
 @router.get("/admin/feedback/metrics", response_model=ChatbotFeedbackMetrics)

@@ -475,6 +475,14 @@ def test_openapi_exposes_typed_actions_and_existing_conversion_contract() -> Non
         "ASK_CLARIFICATION",
         "CONVERT_TO_TICKET",
         "CONTACT_ADVISOR",
+        "AUTHENTICATION_REQUIRED",
+        "LIST_MY_TICKETS",
+        "COUNT_MY_TICKETS",
+        "TICKET_STATUS",
+        "ADVISOR_RESPONSE_STATUS",
+        "LATEST_ADVISOR_RESPONSE",
+        "CLIENT_ACTION_REQUIRED",
+        "CLARIFY_TICKET_CODE",
     ]
     assert conversion_path in schema["paths"]
     assert (

@@ -181,6 +181,7 @@ class TicketService:
         page: int | None = None,
         page_size: int | None = None,
         status_filter: TicketStatus | None = None,
+        statuses: set[TicketStatus] | None = None,
         category_id: str | None = None,
         priority: TicketPriority | None = None,
         created_from: datetime | None = None,
@@ -198,6 +199,7 @@ class TicketService:
             page_size=page_size,
             client_id=actor.user.id,
             status=status_filter,
+            statuses=statuses,
             category_id=category_id,
             priority=priority,
             created_from=created_from,
@@ -237,6 +239,7 @@ class TicketService:
             page_size=page_size,
             client_id=client_id,
             status=status_filter,
+            statuses=None,
             category_id=category_id,
             priority=priority,
             created_from=created_from,
@@ -340,6 +343,7 @@ class TicketService:
         page_size: int | None,
         client_id: str | None,
         status: TicketStatus | None,
+        statuses: set[TicketStatus] | None,
         category_id: str | None,
         priority: TicketPriority | None,
         created_from: datetime | None,
@@ -357,6 +361,7 @@ class TicketService:
                 session,
                 client_id=client_id,
                 status=status,
+                statuses=statuses,
                 category_id=category_id,
                 priority=priority,
                 created_from=created_from,
@@ -377,6 +382,7 @@ class TicketService:
             page_size=current_page_size,
             client_id=client_id,
             status=status,
+            statuses=statuses,
             category_id=category_id,
             priority=priority,
             created_from=created_from,
@@ -414,6 +420,15 @@ class TicketService:
     ) -> TicketRead:
         ticket = self._get_authorized(session, ticket_id, actor)
         return self._ticket_read(session, ticket)
+
+    def get_by_tracking_code(
+        self, session: Session, tracking_code: str, actor: AuthenticatedUser
+    ) -> TicketRead:
+        ticket = self.repository.get_by_tracking_code(session, tracking_code)
+        if ticket is None:
+            raise HTTPException(status_code=404, detail="Ticket no encontrado")
+        authorized_ticket = self._get_authorized(session, ticket.id, actor)
+        return self._ticket_read(session, authorized_ticket)
 
     def add_comment(
         self,

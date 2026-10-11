@@ -26,6 +26,13 @@ class TicketRepository:
     def get(self, session: Session, ticket_id: str) -> Ticket | None:
         return session.get(Ticket, ticket_id)
 
+    def get_by_tracking_code(
+        self, session: Session, tracking_code: str
+    ) -> Ticket | None:
+        return session.exec(
+            select(Ticket).where(Ticket.tracking_code == tracking_code)
+        ).first()
+
     def get_for_update(self, session: Session, ticket_id: str) -> Ticket | None:
         return session.exec(
             select(Ticket).where(Ticket.id == ticket_id).with_for_update()
@@ -98,6 +105,7 @@ class TicketRepository:
         search: str | None = None,
         updated_from: datetime | None = None,
         updated_to: datetime | None = None,
+        statuses: set[TicketStatus] | None = None,
     ) -> list[Ticket]:
         statement, _ = self._ticket_statement(
             client_id=client_id,
@@ -111,6 +119,7 @@ class TicketRepository:
             search=search,
             updated_from=updated_from,
             updated_to=updated_to,
+            statuses=statuses,
         )
         return list(
             session.exec(
@@ -135,6 +144,7 @@ class TicketRepository:
         search: str | None = None,
         updated_from: datetime | None = None,
         updated_to: datetime | None = None,
+        statuses: set[TicketStatus] | None = None,
     ) -> tuple[int, list[Ticket]]:
         statement, joins_client = self._ticket_statement(
             client_id=client_id,
@@ -148,6 +158,7 @@ class TicketRepository:
             search=search,
             updated_from=updated_from,
             updated_to=updated_to,
+            statuses=statuses,
         )
         count_statement = select(func.count(Ticket.id)).select_from(Ticket)
         if joins_client:
@@ -165,6 +176,7 @@ class TicketRepository:
                 search=search,
                 updated_from=updated_from,
                 updated_to=updated_to,
+                statuses=statuses,
             )
         )
         total = session.exec(count_statement).one()
@@ -308,12 +320,15 @@ class TicketRepository:
         search: str | None,
         updated_from: datetime | None = None,
         updated_to: datetime | None = None,
+        statuses: set[TicketStatus] | None = None,
     ) -> list[object]:
         conditions: list[object] = []
         if client_id is not None:
             conditions.append(Ticket.client_id == client_id)
         if status is not None:
             conditions.append(Ticket.status == status)
+        if statuses is not None:
+            conditions.append(Ticket.status.in_(statuses))
         if category_id is not None:
             conditions.append(Ticket.category_id == category_id)
         if priority is not None:
