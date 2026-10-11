@@ -168,8 +168,11 @@ def link_conversation(
     summary="Confirma y convierte una conversación en ticket",
     description=(
         "La solicitud autenticada de un cliente propietario de la conversación, "
-        "con los campos TicketCreate completos, confirma la creación. La "
-        "confianza de la última respuesta del asistente no bloquea la conversión."
+        "con los campos TicketCreate completos, confirma la creación. Si la "
+        "conversación tiene un borrador, este debe estar listo y los datos deben "
+        "coincidir con el resumen revisado. Sin borrador se conserva la conversión "
+        "estructurada directa de la Fase 1. La confianza de la última respuesta "
+        "del asistente no bloquea la conversión."
     ),
 )
 def convert_conversation_to_ticket(

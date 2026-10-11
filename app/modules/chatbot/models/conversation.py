@@ -17,6 +17,9 @@ class ConversationStatus(StrEnum):
     EXPIRED = "EXPIRED"
 
 
+TICKET_DRAFT_CONTEXT_KEY = "ticket_creation_draft"
+
+
 class Conversation(SQLModel, table=True):
     __tablename__ = "conversations"
     __table_args__ = (

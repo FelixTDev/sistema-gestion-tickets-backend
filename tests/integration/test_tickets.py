@@ -57,7 +57,7 @@ def authenticated_conversation(client: TestClient, client_token: str) -> str:
     unknown = client.post(
         f"/api/v1/chat/conversations/{conversation.json()['id']}/messages",
         headers={"Authorization": f"Bearer {client_token}"},
-        json={"content": "consulta no resuelta para abrir ticket"},
+        json={"content": "necesito ayuda con este inconveniente particular"},
     )
     assert unknown.status_code == 200
     assert unknown.json()["resolved"] is False

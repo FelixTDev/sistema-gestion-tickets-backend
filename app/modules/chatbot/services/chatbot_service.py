@@ -11,7 +11,11 @@ from sqlmodel import Session
 from app.api.deps import AuthenticatedUser
 from app.core.config import get_settings
 from app.modules.auditoria.services.audit_service import AuditService
-from app.modules.chatbot.models.conversation import Conversation, ConversationStatus
+from app.modules.chatbot.models.conversation import (
+    TICKET_DRAFT_CONTEXT_KEY,
+    Conversation,
+    ConversationStatus,
+)
 from app.modules.chatbot.models.feedback import ChatbotFeedback
 from app.modules.chatbot.models.message import ChatMessage, SenderType
 from app.modules.chatbot.repositories.conversation_repository import (
@@ -27,6 +31,7 @@ from app.modules.chatbot.schemas.chatbot import (
     ChatbotFeedbackMetrics,
     ChatbotSuggestedAction,
     ChatbotTicketCard,
+    ChatbotTicketDraftStatus,
     ChatbotTicketPagination,
     ChatbotTicketQuery,
     ChatbotTicketQueryType,
@@ -40,6 +45,10 @@ from app.modules.chatbot.services.guardrails import (
     has_verified_official_source,
 )
 from app.modules.chatbot.services.rag_service import RAGService
+from app.modules.chatbot.services.ticket_draft_service import (
+    TicketDraftReply,
+    TicketDraftService,
+)
 from app.modules.conocimiento.models.faq import FAQ
 from app.modules.conocimiento.models.feedback import FAQFeedback
 from app.modules.conocimiento.repositories.faq_repository import FAQRepository
@@ -187,6 +196,7 @@ class ChatbotService:
         ai_provider: object | None = None,
         rag_service: RAGService | None = None,
         ticket_service: TicketService | None = None,
+        ticket_draft_service: TicketDraftService | None = None,
     ) -> None:
         self.conversations = conversation_repository or ConversationRepository()
         self.faqs = faq_repository or FAQRepository()
@@ -195,6 +205,7 @@ class ChatbotService:
         self.chat_feedback = feedback_repository or ChatbotFeedbackRepository()
         self.rag = rag_service or RAGService(provider=ai_provider)
         self.tickets = ticket_service or TicketService()
+        self.ticket_drafts = ticket_draft_service or TicketDraftService()
 
     @staticmethod
     def normalize_text(value: str) -> str:
@@ -300,6 +311,27 @@ class ChatbotService:
         )
         is_greeting = self._is_pure_greeting(clean_content)
         is_faq_discovery = self._is_faq_discovery_request(clean_content)
+        saved_draft = (conversation.context_json or {}).get(TICKET_DRAFT_CONTEXT_KEY)
+        current_draft = self.ticket_drafts.read(session, saved_draft)
+        resume_after_authentication = bool(
+            current_user is not None
+            and previous_bot_message is not None
+            and previous_bot_message.intent == "TICKET_CREATION_AUTHENTICATION_REQUIRED"
+            and self.ticket_drafts.is_resume_request(clean_content)
+        )
+        start_ticket_draft = is_ticket_request or resume_after_authentication
+        unrelated_special_message = not start_ticket_draft and (
+            is_greeting or is_faq_discovery or is_unhelpful_follow_up
+        )
+        ticket_draft_flow = (
+            not unrelated_special_message
+            and self.ticket_drafts.should_handle(
+                session,
+                clean_content,
+                current_draft,
+                start_requested=start_ticket_draft,
+            )
+        )
 
         user_message = self.conversations.add_message(
             session,
@@ -314,17 +346,28 @@ class ChatbotService:
         selected_match: FAQMatch | None = None
         matches: list[FAQMatch] = []
         retrieval_unavailable = False
+        ticket_draft_reply: TicketDraftReply | None = None
         try:
             if ticket_query_request is not None:
                 result = self._ticket_query_response(
                     session, current_user, ticket_query_request
                 )
+            elif ticket_draft_flow and current_user is None:
+                result = self._ticket_authentication_response(conversation)
             elif is_advisor_request and is_ticket_request:
                 result = self._action_clarification_response(conversation)
             elif is_advisor_request:
                 result = self._advisor_request_response(conversation)
-            elif is_ticket_request:
-                result = self._ticket_request_response(conversation)
+            elif ticket_draft_flow:
+                if conversation.user_id is None:
+                    self.link_user(session, conversation.id, current_user)
+                ticket_draft_reply = self.ticket_drafts.handle(
+                    session,
+                    clean_content,
+                    saved_draft,
+                    start_requested=start_ticket_draft,
+                )
+                result = self._ticket_draft_response(conversation, ticket_draft_reply)
             elif is_unhelpful_follow_up:
                 result = self._unhelpful_follow_up_response(conversation)
                 result["context_seed"] = (
@@ -414,6 +457,12 @@ class ChatbotService:
             or is_greeting
             or is_faq_discovery
             or selected_match is not None
+            or current_draft.status
+            in {
+                ChatbotTicketDraftStatus.COLLECTING,
+                ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+            }
+            or ticket_draft_reply is not None
         )
         if skip_ai:
             result["ai_trace"] = (
@@ -501,43 +550,59 @@ class ChatbotService:
                 else "Cuéntame un poco más sobre lo que necesitas."
             )
         context = dict(conversation.context_json or {})
+        if ticket_draft_reply is not None:
+            if ticket_draft_reply.draft.status in {
+                ChatbotTicketDraftStatus.COLLECTING,
+                ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                ChatbotTicketDraftStatus.CANCELLED,
+            }:
+                context[TICKET_DRAFT_CONTEXT_KEY] = self.ticket_drafts.persisted(
+                    ticket_draft_reply.draft
+                )
+            else:
+                context.pop(TICKET_DRAFT_CONTEXT_KEY, None)
         pending_ticket_query = result.get("pending_ticket_query")
         if isinstance(pending_ticket_query, dict):
             context["pending_ticket_query"] = pending_ticket_query
         else:
             context.pop("pending_ticket_query", None)
-        if result["requires_clarification"] and result.get(
-            "counts_as_clarification", True
-        ):
-            context["clarification_attempts"] = (
-                int(context.get("clarification_attempts", 0)) + 1
-            )
-        elif result["resolved"]:
-            context["clarification_attempts"] = 0
-        if result["requires_clarification"]:
-            context["pending_faq_ids"] = result.get("candidate_faq_ids", [])
-            if result.get("intent") == "FAQ_DISCOVERY":
-                context["clarification_context"] = []
-            else:
-                previous = context.get("clarification_context", [])
-                context_seed = result.get("context_seed")
-                if isinstance(context_seed, str) and context_seed:
-                    prior_context = [context_seed[:250]]
-                elif (
-                    was_waiting_for_clarification
-                    and self._is_contextual_follow_up(clean_content)
-                    and isinstance(previous, list)
-                ):
-                    prior_context = previous[-1:]
-                else:
-                    prior_context = []
-                context["clarification_context"] = [
-                    *prior_context,
-                    clean_content[:250],
-                ][-2:]
-        else:
+        if ticket_draft_reply is not None:
+            context.pop("clarification_attempts", None)
             context.pop("pending_faq_ids", None)
             context.pop("clarification_context", None)
+        else:
+            if result["requires_clarification"] and result.get(
+                "counts_as_clarification", True
+            ):
+                context["clarification_attempts"] = (
+                    int(context.get("clarification_attempts", 0)) + 1
+                )
+            elif result["resolved"]:
+                context["clarification_attempts"] = 0
+            if result["requires_clarification"]:
+                context["pending_faq_ids"] = result.get("candidate_faq_ids", [])
+                if result.get("intent") == "FAQ_DISCOVERY":
+                    context["clarification_context"] = []
+                else:
+                    previous = context.get("clarification_context", [])
+                    context_seed = result.get("context_seed")
+                    if isinstance(context_seed, str) and context_seed:
+                        prior_context = [context_seed[:250]]
+                    elif (
+                        was_waiting_for_clarification
+                        and self._is_contextual_follow_up(clean_content)
+                        and isinstance(previous, list)
+                    ):
+                        prior_context = previous[-1:]
+                    else:
+                        prior_context = []
+                    context["clarification_context"] = [
+                        *prior_context,
+                        clean_content[:250],
+                    ][-2:]
+            else:
+                context.pop("pending_faq_ids", None)
+                context.pop("clarification_context", None)
         if not result.get("preserve_context"):
             context["last_terms"] = self._meaningful_tokens(search_content)[:20]
         conversation.context_json = context
@@ -627,6 +692,9 @@ class ChatbotService:
             response_source=result["response_source"],
             sources=result["sources"],
             ticket_query=result.get("ticket_query"),
+            ticket_draft=self.ticket_drafts.read(
+                session, conversation.context_json.get(TICKET_DRAFT_CONTEXT_KEY)
+            ),
         )
 
     def link_user(
@@ -1802,21 +1870,21 @@ class ChatbotService:
         }
 
     @staticmethod
-    def _ticket_request_response(
+    def _ticket_authentication_response(
         conversation: Conversation,
     ) -> dict[str, object]:
         return {
             "answer": (
-                "Puedo ayudarte a preparar un ticket. Completa la categoría, el "
-                "asunto, la descripción y la prioridad; al enviar la solicitud "
-                "autenticada se confirmará su creación."
+                "Para preparar y confirmar un ticket, inicia sesión o regístrate. "
+                "Después podrás vincular y retomar esta conversación. No compartas "
+                "contraseñas, OTP, CVV, tokens ni códigos de seguridad."
             ),
-            "intent": "TICKET_REQUEST",
-            "faq_id": conversation.last_faq_id,
+            "intent": "TICKET_CREATION_AUTHENTICATION_REQUIRED",
+            "faq_id": None,
             "category_name": None,
-            "confidence": conversation.last_confidence or 0.0,
+            "confidence": 1.0,
             "resolved": False,
-            "offers_ticket": True,
+            "offers_ticket": False,
             "requires_clarification": False,
             "options": [],
             "candidate_faq_ids": [],
@@ -1825,7 +1893,49 @@ class ChatbotService:
             "match": None,
             "response_source": "DETERMINISTIC",
             "preserve_context": True,
-            "suggested_action": ChatbotSuggestedAction.CONVERT_TO_TICKET,
+            "suggested_action": ChatbotSuggestedAction.AUTHENTICATION_REQUIRED,
+            "ticket_query": ChatbotTicketQuery(
+                query_type=ChatbotTicketQueryType.AUTHENTICATION_REQUIRED,
+                authentication_required=True,
+                authentication_actions=[
+                    ChatbotAuthenticationAction.LOGIN,
+                    ChatbotAuthenticationAction.REGISTER,
+                ],
+            ),
+        }
+
+    @staticmethod
+    def _ticket_draft_response(
+        conversation: Conversation, reply: TicketDraftReply
+    ) -> dict[str, object]:
+        if reply.cancelled:
+            intent = "TICKET_DRAFT_CANCELLED"
+            action = ChatbotSuggestedAction.NONE
+        elif reply.ready:
+            intent = "TICKET_DRAFT_READY"
+            action = ChatbotSuggestedAction.CONVERT_TO_TICKET
+        else:
+            intent = "TICKET_DRAFT"
+            action = ChatbotSuggestedAction.ASK_CLARIFICATION
+        return {
+            "answer": reply.answer,
+            "intent": intent,
+            "faq_id": conversation.last_faq_id,
+            "category_name": None,
+            "confidence": 1.0,
+            "resolved": False,
+            "offers_ticket": reply.offers_ticket,
+            "requires_clarification": reply.requires_clarification,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": None,
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "preserve_context": True,
+            "suggested_action": action,
+            "ticket_query": None,
+            "counts_as_clarification": reply.requires_clarification,
         }
 
     @staticmethod
@@ -2037,6 +2147,10 @@ class ChatbotService:
             escalated_at=conversation.escalated_at,
             converted_at=conversation.converted_at,
             last_activity_at=conversation.last_activity_at,
+            ticket_draft=self.ticket_drafts.read(
+                session,
+                (conversation.context_json or {}).get(TICKET_DRAFT_CONTEXT_KEY),
+            ),
             messages=[
                 self._message_read(message)
                 for message in self.conversations.list_messages(

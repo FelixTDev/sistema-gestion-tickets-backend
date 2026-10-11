@@ -86,7 +86,7 @@ def test_unhelpful_follow_up_keeps_context_and_asks_for_clarification(
     assert body["offers_ticket"] is False
 
 
-def test_explicit_ticket_request_after_useful_answer_waits_for_confirmation(
+def test_anonymous_ticket_request_requires_login_then_structured_confirmation(
     phase13_client,
 ) -> None:
     client, engine = phase13_client
@@ -99,8 +99,10 @@ def test_explicit_ticket_request_after_useful_answer_waits_for_confirmation(
 
     assert request.status_code == 200
     body = request.json()
-    assert body["suggested_action"] == "CONVERT_TO_TICKET"
-    assert body["offers_ticket"] is True
+    assert body["suggested_action"] == "AUTHENTICATION_REQUIRED"
+    assert body["ticket_query"]["authentication_required"] is True
+    assert body["ticket_draft"]["status"] == "INACTIVE"
+    assert body["offers_ticket"] is False
     assert body["requires_clarification"] is False
     assert body["conversation_status"] == "ACTIVE"
     with Session(engine) as session:
@@ -350,6 +352,19 @@ def test_failed_conversion_audit_rolls_back_ticket_and_conversation(
     )
     with Session(engine) as session:
         category = session.exec(select(TicketCategory)).first()
+    draft = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        headers=headers,
+        json={
+            "content": (
+                f"Quiero crear ticket. Categoria: {category.name}. "
+                "Asunto: Consulta para validar atomicidad. "
+                "Descripcion: La conversión debe revertirse si falla la auditoría."
+            )
+        },
+    )
+    assert draft.status_code == 200
+    assert draft.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
     app.dependency_overrides[get_ticket_service] = lambda: TicketService(
         audit_service=FailingConversionAuditService()
     )
@@ -362,6 +377,7 @@ def test_failed_conversion_audit_rolls_back_ticket_and_conversation(
                 "category_id": category.id,
                 "subject": "Consulta para validar atomicidad",
                 "description": "La conversión debe revertirse si falla la auditoría.",
+                "priority": "MEDIA",
             },
         )
 
@@ -371,6 +387,9 @@ def test_failed_conversion_audit_rolls_back_ticket_and_conversation(
         saved = session.get(models.Conversation, conversation["id"])
         assert saved is not None
         assert saved.status.value == "ACTIVE"
+        assert saved.context_json["ticket_creation_draft"]["status"] == (
+            "READY_FOR_CONFIRMATION"
+        )
 
 
 class FailingAIProvider:

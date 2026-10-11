@@ -39,6 +39,52 @@ class ChatbotAuthenticationAction(StrEnum):
     REGISTER = "REGISTER"
 
 
+class ChatbotTicketDraftStatus(StrEnum):
+    INACTIVE = "INACTIVE"
+    COLLECTING = "COLLECTING"
+    READY_FOR_CONFIRMATION = "READY_FOR_CONFIRMATION"
+    CANCELLED = "CANCELLED"
+
+
+class ChatbotTicketDraftField(StrEnum):
+    CATEGORY_ID = "CATEGORY_ID"
+    SUBJECT = "SUBJECT"
+    DESCRIPTION = "DESCRIPTION"
+    PRIORITY = "PRIORITY"
+
+
+class ChatbotTicketDraftFields(BaseModel):
+    category_id: str | None = Field(default=None, max_length=36)
+    subject: str | None = Field(default=None, min_length=3, max_length=200)
+    description: str | None = Field(default=None, min_length=5, max_length=10000)
+    priority: TicketPriority | None = None
+
+
+class ChatbotTicketDraftValidationError(BaseModel):
+    field: ChatbotTicketDraftField
+    message: str = Field(max_length=300)
+
+
+class ChatbotTicketDraftCategoryOption(BaseModel):
+    id: str
+    name: str
+
+
+class ChatbotTicketDraft(BaseModel):
+    status: ChatbotTicketDraftStatus = ChatbotTicketDraftStatus.INACTIVE
+    fields: ChatbotTicketDraftFields = Field(default_factory=ChatbotTicketDraftFields)
+    missing_fields: list[ChatbotTicketDraftField] = Field(default_factory=list)
+    validation_errors: list[ChatbotTicketDraftValidationError] = Field(
+        default_factory=list
+    )
+    category_options: list[ChatbotTicketDraftCategoryOption] = Field(
+        default_factory=list,
+        description=(
+            "Categorías activas disponibles cuando falta seleccionar una categoría."
+        ),
+    )
+
+
 class ChatbotTicketCard(BaseModel):
     tracking_code: str = Field(description="Código de seguimiento del ticket.")
     subject: str
@@ -116,6 +162,10 @@ class ConversationRead(BaseModel):
     escalated_at: datetime | None = None
     converted_at: datetime | None = None
     last_activity_at: datetime | None = None
+    ticket_draft: ChatbotTicketDraft = Field(
+        default_factory=ChatbotTicketDraft,
+        description="Estado y campos permitidos del borrador conversacional de ticket.",
+    )
     messages: list[ChatMessageRead] = Field(default_factory=list)
 
 
@@ -271,7 +321,9 @@ class BotMessageResponse(BaseModel):
         description=(
             "Acción tipada que la interfaz puede presentar o ejecutar; "
             "nunca confirma por sí sola una conversión a ticket. Las acciones de "
-            "consulta usan ticket_query como payload tipado."
+            "consulta usan ticket_query como payload tipado. "
+            "CONVERT_TO_TICKET se emite para un borrador listo y pendiente de "
+            "confirmación explícita mediante el endpoint de conversión."
         ),
     )
     ticket_query: ChatbotTicketQuery | None = Field(
@@ -402,6 +454,13 @@ class BotMessageResponse(BaseModel):
                 "latest_advisor_response": None,
             },
         ],
+    )
+    ticket_draft: ChatbotTicketDraft = Field(
+        default_factory=ChatbotTicketDraft,
+        description=(
+            "Borrador estructurado del ticket. Solo READY_FOR_CONFIRMATION permite "
+            "que la interfaz solicite confirmación en el endpoint de conversión."
+        ),
     )
     fallback_reason: str | None = None
     conversation_status: ConversationStatus = ConversationStatus.ACTIVE

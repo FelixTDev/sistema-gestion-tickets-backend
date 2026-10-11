@@ -9,7 +9,15 @@ from sqlmodel import Session
 from app.api.deps import AuthenticatedUser
 from app.core.config import get_settings
 from app.modules.auditoria.services.audit_service import AuditService
-from app.modules.chatbot.models.conversation import ConversationStatus
+from app.modules.chatbot.models.conversation import (
+    TICKET_DRAFT_CONTEXT_KEY,
+    Conversation,
+    ConversationStatus,
+)
+from app.modules.chatbot.schemas.chatbot import (
+    ChatbotTicketDraft,
+    ChatbotTicketDraftStatus,
+)
 from app.modules.notificaciones.models.notification import NotificationType
 from app.modules.notificaciones.services.notification_service import NotificationService
 from app.modules.tickets.models.assignment import TicketAssignment
@@ -113,6 +121,7 @@ class TicketService:
             raise HTTPException(
                 status_code=409, detail="La conversación ya tiene un ticket"
             )
+        self._validate_conversation_draft(conversation, data)
         if (
             self.repository.count_chatbot_tickets_since(
                 session,
@@ -145,6 +154,9 @@ class TicketService:
         conversation.converted_at = now
         conversation.ended_at = now
         conversation.last_activity_at = now
+        context = dict(conversation.context_json or {})
+        context.pop(TICKET_DRAFT_CONTEXT_KEY, None)
+        conversation.context_json = context
         session.add(conversation)
         self.audit.record(
             session,
@@ -172,6 +184,42 @@ class TicketService:
             raise
         session.refresh(ticket)
         return self._ticket_read(session, ticket)
+
+    @staticmethod
+    def _validate_conversation_draft(
+        conversation: Conversation, data: TicketCreate
+    ) -> None:
+        raw_draft = (conversation.context_json or {}).get(TICKET_DRAFT_CONTEXT_KEY)
+        if not isinstance(raw_draft, dict):
+            return
+        try:
+            draft = ChatbotTicketDraft.model_validate(raw_draft)
+        except ValueError:
+            raise HTTPException(
+                status_code=409, detail="El borrador de ticket no es válido"
+            ) from None
+        if draft.status == ChatbotTicketDraftStatus.INACTIVE:
+            return
+        if draft.status != ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION:
+            raise HTTPException(
+                status_code=409,
+                detail="Completa o cancela el borrador antes de convertirlo",
+            )
+        fields = draft.fields
+        if draft.missing_fields or draft.validation_errors:
+            raise HTTPException(
+                status_code=409, detail="El borrador de ticket está incompleto"
+            )
+        if (
+            fields.category_id != data.category_id
+            or fields.subject != data.subject.strip()
+            or fields.description != data.description.strip()
+            or fields.priority != data.priority
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Los datos confirmados no coinciden con el resumen del ticket",
+            )
 
     def list_mine(
         self,

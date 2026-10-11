@@ -9,7 +9,10 @@ class TicketCreate(BaseModel):
     category_id: str
     subject: str = Field(min_length=3, max_length=200)
     description: str = Field(min_length=5, max_length=10000)
-    priority: TicketPriority = TicketPriority.MEDIA
+    priority: TicketPriority = Field(
+        default=TicketPriority.MEDIA,
+        description="Prioridad válida; si se omite, el sistema usa MEDIA.",
+    )
 
 
 class TicketRead(BaseModel):
