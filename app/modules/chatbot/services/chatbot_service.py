@@ -23,12 +23,16 @@ from app.modules.chatbot.repositories.feedback_repository import (
 from app.modules.chatbot.schemas.chatbot import (
     BotMessageResponse,
     ChatbotFeedbackMetrics,
+    ChatbotSuggestedAction,
     ChatFeedbackCreate,
     ChatFeedbackRead,
     ChatMessageRead,
     ConversationRead,
 )
-from app.modules.chatbot.services.guardrails import detect_prompt_injection
+from app.modules.chatbot.services.guardrails import (
+    detect_prompt_injection,
+    has_verified_official_source,
+)
 from app.modules.chatbot.services.rag_service import RAGService
 from app.modules.conocimiento.models.faq import FAQ
 from app.modules.conocimiento.models.feedback import FAQFeedback
@@ -61,6 +65,26 @@ _STOP_WORDS = {
     "y",
 }
 _MARKUP_PATTERN = re.compile(r"<[^>]+>|javascript\s*:", re.IGNORECASE)
+_TICKET_REQUEST_PATTERN = re.compile(
+    r"\b(?:quiero|necesito|mejor|genera|generar|crea|crear|abre|abrir|"
+    r"registra|registrar|levanta|solicito|solicitar|haz|hacer)\b"
+    r".{0,40}\b(?:ticket|caso|solicitud|reclamo)\b"
+)
+_ADVISOR_REQUEST_PATTERNS = (
+    re.compile(
+        r"\b(?:quiero|necesito|prefiero|solicito|deseo)\b"
+        r".{0,45}\b(?:asesor|persona|agente|representante)\b"
+    ),
+    re.compile(
+        r"\b(?:hablar|comunicarme|contactarme|conectarme)\b"
+        r".{0,35}\b(?:asesor|persona|agente|representante)\b"
+    ),
+    re.compile(r"\batencion\s+humana\b"),
+)
+_UNHELPFUL_FOLLOW_UP_PATTERN = re.compile(
+    r"\b(?:no\s+me\s+(?:ayudo|sirvio|resolvio|respondio)|"
+    r"no\s+fue\s+(?:util|suficiente)|no\s+me\s+ayuda)\b"
+)
 _GREETING_PHRASES = frozenset(
     {
         "hola",
@@ -197,9 +221,35 @@ class ChatbotService:
         self._ensure_message_allowed(conversation)
         clean_content = self._clean_content(content)
         self._enforce_limits(session, conversation)
+        recent_messages = self.conversations.list_recent_messages(
+            session, conversation.id
+        )
+        previous_user_message = next(
+            (
+                message
+                for message in reversed(recent_messages)
+                if message.sender_type == SenderType.USER
+            ),
+            None,
+        )
+        previous_bot_message = next(
+            (
+                message
+                for message in reversed(recent_messages)
+                if message.sender_type == SenderType.BOT
+            ),
+            None,
+        )
         was_waiting_for_clarification = (
             conversation.status == ConversationStatus.WAITING_CLARIFICATION
         )
+        is_ticket_request = self._is_ticket_request(clean_content)
+        is_advisor_request = self._is_advisor_request(clean_content)
+        is_unhelpful_follow_up = bool(
+            previous_bot_message and self._is_unhelpful_follow_up(clean_content)
+        )
+        is_greeting = self._is_pure_greeting(clean_content)
+        is_faq_discovery = self._is_faq_discovery_request(clean_content)
 
         user_message = self.conversations.add_message(
             session,
@@ -209,51 +259,110 @@ class ChatbotService:
                 content=clean_content,
             ),
         )
-        is_greeting = self._is_pure_greeting(clean_content)
-        is_faq_discovery = self._is_faq_discovery_request(clean_content)
-        selected_match = (
-            self._resolve_pending_selection(session, conversation, clean_content)
-            if was_waiting_for_clarification and not is_greeting
-            else None
-        )
         search_content = clean_content
+        ai_user_message = clean_content
+        selected_match: FAQMatch | None = None
         matches: list[FAQMatch] = []
-        if not (is_greeting or is_faq_discovery or selected_match):
-            matches = self._find_matches(session, clean_content)
-            previous_clarification = (conversation.context_json or {}).get(
-                "clarification_context", []
-            )
-            if (
-                was_waiting_for_clarification
-                and isinstance(previous_clarification, list)
-                and previous_clarification
-                and self._is_contextual_follow_up(clean_content)
-            ):
-                bounded_history = [
-                    item[:250]
-                    for item in previous_clarification[-2:]
-                    if isinstance(item, str)
-                ]
-                contextual_content = " ".join([*bounded_history, clean_content])
-                contextual_matches = self._find_matches(session, contextual_content)
-                if contextual_matches and (
-                    not matches or contextual_matches[0].score > matches[0].score
-                ):
-                    search_content = contextual_content
-                    matches = contextual_matches
-        if is_greeting:
-            result = self._greeting_response()
-        elif is_faq_discovery:
-            result, matches = self._faq_discovery_response(session)
-        elif selected_match is not None:
-            matches = [selected_match]
-            result = self._response_for_matches(conversation, matches)
-        else:
-            result = self._response_for_matches(conversation, matches)
+        retrieval_unavailable = False
+        try:
+            if is_advisor_request and is_ticket_request:
+                result = self._action_clarification_response(conversation)
+            elif is_advisor_request:
+                result = self._advisor_request_response(conversation)
+            elif is_ticket_request:
+                result = self._ticket_request_response(conversation)
+            elif is_unhelpful_follow_up:
+                result = self._unhelpful_follow_up_response(conversation)
+                result["context_seed"] = (
+                    previous_user_message.content
+                    if previous_user_message is not None
+                    else None
+                )
+            elif is_greeting:
+                result = self._greeting_response()
+            elif is_faq_discovery:
+                result, matches = self._faq_discovery_response(session)
+            else:
+                selected_match = (
+                    self._resolve_pending_selection(
+                        session, conversation, clean_content
+                    )
+                    if was_waiting_for_clarification
+                    else None
+                )
+                if selected_match is not None:
+                    matches = [selected_match]
+                else:
+                    matches = self._find_matches(session, clean_content)
+                    previous_clarification = (conversation.context_json or {}).get(
+                        "clarification_context", []
+                    )
+                    if (
+                        was_waiting_for_clarification
+                        and isinstance(previous_clarification, list)
+                        and previous_clarification
+                        and self._is_contextual_follow_up(clean_content)
+                    ):
+                        bounded_history = [
+                            item[:250]
+                            for item in previous_clarification[-2:]
+                            if isinstance(item, str)
+                        ]
+                        contextual_content = " ".join([*bounded_history, clean_content])
+                        contextual_matches = self._find_matches(
+                            session, contextual_content
+                        )
+                        if contextual_matches and (
+                            not matches
+                            or contextual_matches[0].score > matches[0].score
+                        ):
+                            search_content = contextual_content
+                            matches = contextual_matches
+                    elif (
+                        previous_bot_message is not None
+                        and previous_user_message is not None
+                        and self._is_referential_follow_up(clean_content)
+                    ):
+                        contextual_content = previous_user_message.content[:250]
+                        contextual_matches = self._find_matches(
+                            session, contextual_content
+                        )
+                        if contextual_matches and (
+                            not matches
+                            or contextual_matches[0].score > matches[0].score
+                        ):
+                            search_content = contextual_content
+                            matches = contextual_matches
+                        ai_user_message = self._contextual_provider_input(
+                            previous_user_message.content,
+                            previous_bot_message.content,
+                            clean_content,
+                        )
+                result = self._response_for_matches(conversation, matches)
+        except Exception:
+            retrieval_unavailable = True
+            matches = []
+            selected_match = None
+            result = self._knowledge_unavailable_response()
+
         result["response_source"] = result.get("response_source", "DETERMINISTIC")
         result["sources"] = result.get("sources", self._public_sources(matches[:1]))
-        if is_greeting or is_faq_discovery or selected_match is not None:
-            result["ai_trace"] = None
+        skip_ai = bool(
+            retrieval_unavailable
+            or is_ticket_request
+            or is_advisor_request
+            or is_unhelpful_follow_up
+            or (is_advisor_request and is_ticket_request)
+            or is_greeting
+            or is_faq_discovery
+            or selected_match is not None
+        )
+        if skip_ai:
+            result["ai_trace"] = (
+                {"fallback": True, "fallback_reason": "KNOWLEDGE_UNAVAILABLE"}
+                if retrieval_unavailable
+                else None
+            )
         else:
             requests_last_minute = self.conversations.count_recent_ai_messages(
                 session,
@@ -262,7 +371,7 @@ class ChatbotService:
             )
             ai_outcome = self.rag.generate(
                 conversation_id=conversation.id,
-                user_message=clean_content,
+                user_message=ai_user_message,
                 matches=matches,
                 requests_last_minute=requests_last_minute,
                 responses_in_conversation=self.conversations.count_ai_messages(
@@ -274,6 +383,9 @@ class ChatbotService:
                 result["answer"] = ai_outcome.answer
                 result["resolved"] = True
                 result["offers_ticket"] = False
+                result["requires_clarification"] = False
+                result["options"] = []
+                result["candidate_faq_ids"] = []
                 result["response_source"] = "AI"
                 result["sources"] = self._public_sources(ai_outcome.sources)
             action = (
@@ -318,9 +430,10 @@ class ChatbotService:
         conversation.last_activity_at = datetime.now(UTC)
         conversation.last_confidence = result["confidence"]
         conversation.last_faq_id = result["faq_id"]
-        conversation.category_id = (
-            result["match"].faq.category_id if result["match"] else None
-        )
+        if result["match"] is not None:
+            conversation.category_id = result["match"].faq.category_id
+        elif not result.get("preserve_context"):
+            conversation.category_id = None
         conversation.detected_intent = result["intent"]
         conversation.pending_question = None
         if result["requires_clarification"]:
@@ -344,13 +457,17 @@ class ChatbotService:
                 context["clarification_context"] = []
             else:
                 previous = context.get("clarification_context", [])
-                prior_context = (
-                    previous[-1:]
-                    if was_waiting_for_clarification
+                context_seed = result.get("context_seed")
+                if isinstance(context_seed, str) and context_seed:
+                    prior_context = [context_seed[:250]]
+                elif (
+                    was_waiting_for_clarification
                     and self._is_contextual_follow_up(clean_content)
                     and isinstance(previous, list)
-                    else []
-                )
+                ):
+                    prior_context = previous[-1:]
+                else:
+                    prior_context = []
                 context["clarification_context"] = [
                     *prior_context,
                     clean_content[:250],
@@ -358,12 +475,25 @@ class ChatbotService:
         else:
             context.pop("pending_faq_ids", None)
             context.pop("clarification_context", None)
-        context["last_terms"] = self._meaningful_tokens(search_content)[:20]
+        if not result.get("preserve_context"):
+            context["last_terms"] = self._meaningful_tokens(search_content)[:20]
         conversation.context_json = context
         if result["escalated"]:
             conversation.status = ConversationStatus.ESCALATED
             conversation.escalation_reason = result["fallback_reason"]
             conversation.escalated_at = conversation.last_activity_at
+            self.audit.record(
+                session,
+                event_type="CHATBOT",
+                action="CONVERSATION_ESCALATED",
+                actor_user_id=conversation.user_id,
+                actor_role=current_user.role if current_user else None,
+                resource_type="CONVERSATION",
+                resource_id=conversation.id,
+                target_user_id=conversation.user_id,
+                success=True,
+                metadata={"reason": conversation.escalation_reason},
+            )
         else:
             conversation.status = (
                 ConversationStatus.WAITING_CLARIFICATION
@@ -426,8 +556,11 @@ class ChatbotService:
             source_category=result["category_name"],
             requires_clarification=result["requires_clarification"],
             clarification_options=result["options"],
+            suggested_action=result.get(
+                "suggested_action", self._suggested_action(result)
+            ),
             fallback_reason=result["fallback_reason"],
-            conversation_status=conversation.status.value,
+            conversation_status=conversation.status,
             response_source=result["response_source"],
             sources=result["sources"],
         )
@@ -665,6 +798,8 @@ class ChatbotService:
             return []
         matches: list[FAQMatch] = []
         for faq in self.faqs.list_active(session):
+            if not has_verified_official_source(faq.source_url, faq.source_verified_at):
+                continue
             question = self.normalize_text(faq.question)
             title = self.normalize_text(faq.title)
             fields = [
@@ -811,7 +946,11 @@ class ChatbotService:
     def _faq_discovery_response(
         self, session: Session
     ) -> tuple[dict[str, object], list[FAQMatch]]:
-        available_faqs = self.faqs.list_active(session)
+        available_faqs = [
+            faq
+            for faq in self.faqs.list_active(session)
+            if has_verified_official_source(faq.source_url, faq.source_verified_at)
+        ]
         selected: list[FAQMatch] = []
         seen_categories: set[str] = set()
 
@@ -949,6 +1088,7 @@ class ChatbotService:
             faq.id: faq
             for faq in self.faqs.list_active(session)
             if faq.id in {value for value in raw_ids if isinstance(value, str)}
+            and has_verified_official_source(faq.source_url, faq.source_verified_at)
         }
         if not active:
             return None
@@ -999,26 +1139,7 @@ class ChatbotService:
                     intent=self._intent_for(faq),
                     category_name=self._category_name(session, faq.category_id),
                 )
-        query_tokens = set(self._meaningful_tokens(normalized))
-        if not query_tokens or len(query_tokens) > 5:
-            return None
-        scores: list[tuple[int, FAQ]] = []
-        for faq in candidates:
-            candidate_tokens = set(
-                self._meaningful_tokens(f"{faq.title} {faq.question}")
-            )
-            scores.append((len(query_tokens & candidate_tokens), faq))
-        best_score = max(score for score, _ in scores)
-        best = [faq for score, faq in scores if score == best_score and score > 0]
-        if len(best) != 1 or best_score / len(query_tokens) < 0.5:
-            return None
-        faq = best[0]
-        return FAQMatch(
-            faq=faq,
-            score=1.0,
-            intent=self._intent_for(faq),
-            category_name=self._category_name(session, faq.category_id),
-        )
+        return None
 
     @classmethod
     def _is_contextual_follow_up(cls, content: str) -> bool:
@@ -1039,6 +1160,200 @@ class ChatbotService:
             "cual",
         }
         return len(terms) <= 4 or bool(set(terms) & referential_terms)
+
+    @classmethod
+    def _is_referential_follow_up(cls, content: str) -> bool:
+        normalized = cls.normalize_text(content).strip()
+        terms = set(cls._meaningful_tokens(normalized))
+        referential_terms = {
+            "eso",
+            "esa",
+            "ese",
+            "esto",
+            "estos",
+            "estas",
+            "aquello",
+            "anterior",
+            "tambien",
+            "ademas",
+            "entonces",
+            "otro",
+            "otra",
+        }
+        if terms & referential_terms:
+            return True
+        return bool(
+            re.search(
+                r"\b(?:y|tambien|ademas|entonces)\b.{0,35}\b"
+                r"(?:lo|la|ahi|alli|asi)\b",
+                normalized,
+            )
+        )
+
+    @classmethod
+    def _is_ticket_request(cls, content: str) -> bool:
+        return bool(_TICKET_REQUEST_PATTERN.search(cls.normalize_text(content)))
+
+    @classmethod
+    def _is_advisor_request(cls, content: str) -> bool:
+        normalized = cls.normalize_text(content)
+        return any(pattern.search(normalized) for pattern in _ADVISOR_REQUEST_PATTERNS)
+
+    @classmethod
+    def _is_unhelpful_follow_up(cls, content: str) -> bool:
+        return bool(_UNHELPFUL_FOLLOW_UP_PATTERN.search(cls.normalize_text(content)))
+
+    @staticmethod
+    def _action_clarification_response(
+        conversation: Conversation,
+    ) -> dict[str, object]:
+        return {
+            "answer": (
+                "¿Prefieres que solicite atención de un asesor o que preparemos "
+                "un ticket?"
+            ),
+            "intent": "ACTION_CLARIFICATION",
+            "faq_id": conversation.last_faq_id,
+            "category_name": None,
+            "confidence": conversation.last_confidence or 0.0,
+            "resolved": False,
+            "offers_ticket": False,
+            "requires_clarification": True,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": None,
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "preserve_context": True,
+        }
+
+    @staticmethod
+    def _advisor_request_response(
+        conversation: Conversation,
+    ) -> dict[str, object]:
+        return {
+            "answer": (
+                "Entiendo. Solicitaré atención de un asesor para esta conversación. "
+                "No compartas contraseñas, PIN, CVV, OTP ni códigos de seguridad."
+            ),
+            "intent": "ADVISOR_REQUEST",
+            "faq_id": conversation.last_faq_id,
+            "category_name": None,
+            "confidence": conversation.last_confidence or 0.0,
+            "resolved": False,
+            "offers_ticket": False,
+            "requires_clarification": False,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": "USER_REQUESTED",
+            "escalated": True,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "preserve_context": True,
+            "suggested_action": ChatbotSuggestedAction.CONTACT_ADVISOR,
+        }
+
+    @staticmethod
+    def _ticket_request_response(
+        conversation: Conversation,
+    ) -> dict[str, object]:
+        return {
+            "answer": (
+                "Puedo ayudarte a preparar un ticket. Completa la categoría, el "
+                "asunto, la descripción y la prioridad; al enviar la solicitud "
+                "autenticada se confirmará su creación."
+            ),
+            "intent": "TICKET_REQUEST",
+            "faq_id": conversation.last_faq_id,
+            "category_name": None,
+            "confidence": conversation.last_confidence or 0.0,
+            "resolved": False,
+            "offers_ticket": True,
+            "requires_clarification": False,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": None,
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "preserve_context": True,
+            "suggested_action": ChatbotSuggestedAction.CONVERT_TO_TICKET,
+        }
+
+    @staticmethod
+    def _unhelpful_follow_up_response(
+        conversation: Conversation,
+    ) -> dict[str, object]:
+        return {
+            "answer": (
+                "Entiendo. Mi respuesta anterior no resolvió lo que necesitas. "
+                "¿Qué parte sigue pendiente o qué resultado esperabas?"
+            ),
+            "intent": "FOLLOW_UP_UNRESOLVED",
+            "faq_id": conversation.last_faq_id,
+            "category_name": None,
+            "confidence": conversation.last_confidence or 0.0,
+            "resolved": False,
+            "offers_ticket": False,
+            "requires_clarification": True,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": None,
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "preserve_context": True,
+            "suggested_action": ChatbotSuggestedAction.ASK_CLARIFICATION,
+        }
+
+    @staticmethod
+    def _knowledge_unavailable_response() -> dict[str, object]:
+        return {
+            "answer": (
+                "No puedo consultar la información de ayuda en este momento. "
+                "Inténtalo de nuevo más tarde."
+            ),
+            "intent": "KNOWLEDGE_UNAVAILABLE",
+            "faq_id": None,
+            "category_name": None,
+            "confidence": 0.0,
+            "resolved": False,
+            "offers_ticket": False,
+            "requires_clarification": False,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": "KNOWLEDGE_UNAVAILABLE",
+            "escalated": False,
+            "match": None,
+            "response_source": "FALLBACK",
+            "suggested_action": ChatbotSuggestedAction.NONE,
+        }
+
+    @staticmethod
+    def _contextual_provider_input(
+        previous_user_message: str,
+        previous_bot_message: str,
+        current_message: str,
+    ) -> str:
+        return (
+            "Usa este diálogo reciente solo para entender la referencia de la "
+            "consulta actual. Basa cualquier dato del producto únicamente en las "
+            "fuentes autorizadas que acompañan la solicitud.\n"
+            f"Mensaje previo del cliente: {previous_user_message[:250]}\n"
+            f"Respuesta previa del asistente: {previous_bot_message[:1000]}\n"
+            f"Consulta actual: {current_message}"
+        )
+
+    @staticmethod
+    def _suggested_action(result: dict[str, object]) -> ChatbotSuggestedAction:
+        if result.get("escalated"):
+            return ChatbotSuggestedAction.CONTACT_ADVISOR
+        if result.get("requires_clarification"):
+            return ChatbotSuggestedAction.ASK_CLARIFICATION
+        if result.get("offers_ticket"):
+            return ChatbotSuggestedAction.CONVERT_TO_TICKET
+        return ChatbotSuggestedAction.NONE
 
     @staticmethod
     def _greeting_response() -> dict[str, object]:

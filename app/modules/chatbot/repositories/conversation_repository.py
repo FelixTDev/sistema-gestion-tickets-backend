@@ -33,6 +33,17 @@ class ConversationRepository:
             ).all()
         )
 
+    def list_recent_messages(
+        self, session: Session, conversation_id: str, *, limit: int = 6
+    ) -> list[ChatMessage]:
+        messages = session.exec(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conversation_id)
+            .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+            .limit(limit)
+        ).all()
+        return list(reversed(messages))
+
     def get_bot_message(
         self,
         session: Session,

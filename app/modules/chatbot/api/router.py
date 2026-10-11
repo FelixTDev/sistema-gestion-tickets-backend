@@ -163,6 +163,12 @@ def link_conversation(
     "/conversations/{conversation_id}/convert-to-ticket",
     response_model=TicketRead,
     status_code=status.HTTP_201_CREATED,
+    summary="Confirma y convierte una conversación en ticket",
+    description=(
+        "La solicitud autenticada de un cliente propietario de la conversación, "
+        "con los campos TicketCreate completos, confirma la creación. La "
+        "confianza de la última respuesta del asistente no bloquea la conversión."
+    ),
 )
 def convert_conversation_to_ticket(
     conversation_id: str,

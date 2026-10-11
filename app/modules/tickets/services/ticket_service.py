@@ -3,6 +3,7 @@ from math import ceil
 from uuid import uuid4
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from app.api.deps import AuthenticatedUser
@@ -95,7 +96,7 @@ class TicketService:
         actor: AuthenticatedUser,
     ) -> TicketRead:
         self._require_client(actor)
-        conversation = self.repository.conversation(session, conversation_id)
+        conversation = self.repository.conversation_for_update(session, conversation_id)
         if conversation is None:
             raise HTTPException(status_code=404, detail="Conversación no encontrada")
         if conversation.user_id != actor.user.id:
@@ -125,15 +126,19 @@ class TicketService:
                 detail="Se alcanzó el límite diario de conversiones",
             )
         bot_message = self.repository.last_bot_message(session, conversation_id)
-        if bot_message is None or (
-            bot_message.confidence is not None and float(bot_message.confidence) > 0.35
-        ):
+        if bot_message is None:
             raise HTTPException(
                 status_code=409,
-                detail="Solo una conversación no resuelta puede convertirse en ticket",
+                detail="La conversación aún no tiene una respuesta para convertir",
             )
         ticket = self._create(
-            session, data, actor.user.id, actor, TicketSource.CHATBOT, conversation_id
+            session,
+            data,
+            actor.user.id,
+            actor,
+            TicketSource.CHATBOT,
+            conversation_id,
+            commit=False,
         )
         now = datetime.now(UTC)
         conversation.status = ConversationStatus.CONVERTED_TO_TICKET
@@ -153,7 +158,18 @@ class TicketService:
             success=True,
             metadata={"ticket_id": ticket.id, "source": TicketSource.CHATBOT.value},
         )
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            if (
+                self.repository.get_by_conversation(session, conversation_id)
+                is not None
+            ):
+                raise HTTPException(
+                    status_code=409, detail="La conversación ya tiene un ticket"
+                ) from None
+            raise
         session.refresh(ticket)
         return self._ticket_read(session, ticket)
 
@@ -812,6 +828,8 @@ class TicketService:
         actor: AuthenticatedUser,
         source: TicketSource,
         conversation_id: str | None = None,
+        *,
+        commit: bool = True,
     ) -> Ticket:
         if not self.repository.category_exists(session, data.category_id):
             raise HTTPException(
@@ -849,8 +867,9 @@ class TicketService:
             metadata={"source": source.value},
             dedupe_key=f"ticket_created:{ticket.id}",
         )
-        session.commit()
-        session.refresh(ticket)
+        if commit:
+            session.commit()
+            session.refresh(ticket)
         return ticket
 
     def _get_authorized(

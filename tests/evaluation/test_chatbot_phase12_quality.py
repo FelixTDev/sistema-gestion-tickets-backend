@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,8 @@ def _match() -> Match:
         question="¿Cómo solicito una tarjeta?",
         summary="Requisitos para solicitar una tarjeta.",
         answer="Puedes solicitarla presentando tu documento vigente.",
+        source_url="https://www.bancognb.com.pe/inicio/banca-personas/tarjetas",
+        source_verified_at=datetime.now(UTC),
     )
     return Match(faq=faq)
 

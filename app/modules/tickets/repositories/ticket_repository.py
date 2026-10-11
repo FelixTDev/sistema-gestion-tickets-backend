@@ -430,6 +430,15 @@ class TicketRepository:
     ) -> Conversation | None:
         return session.get(Conversation, conversation_id)
 
+    def conversation_for_update(
+        self, session: Session, conversation_id: str
+    ) -> Conversation | None:
+        return session.exec(
+            select(Conversation)
+            .where(Conversation.id == conversation_id)
+            .with_for_update()
+        ).first()
+
     def last_bot_message(
         self, session: Session, conversation_id: str
     ) -> ChatMessage | None:

@@ -17,6 +17,7 @@ from app.modules.chatbot.services.guardrails import (
     GUARDRAIL_POLICY,
     detect_prompt_injection,
     detect_sensitive_request,
+    has_verified_official_source,
     minimize_provider_input,
     validate_context,
     validate_output,
@@ -161,6 +162,10 @@ class RAGService:
                 or (published_at is not None and published_at > now)
                 or (unpublished_at is not None and unpublished_at <= now)
                 or detect_prompt_injection(f"{faq.title} {faq.answer}")
+                or not has_verified_official_source(
+                    getattr(faq, "source_url", None),
+                    getattr(faq, "source_verified_at", None),
+                )
                 or match.score < settings.chatbot_ai_min_confidence
             ):
                 continue

@@ -1,6 +1,22 @@
 from datetime import datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.modules.chatbot.models.conversation import ConversationStatus
+
+
+class ChatbotSuggestedAction(StrEnum):
+    NONE = "NONE"
+    ASK_CLARIFICATION = "ASK_CLARIFICATION"
+    CONVERT_TO_TICKET = "CONVERT_TO_TICKET"
+    CONTACT_ADVISOR = "CONTACT_ADVISOR"
+
+
+class ChatbotResponseSource(StrEnum):
+    DETERMINISTIC = "DETERMINISTIC"
+    AI = "AI"
+    FALLBACK = "FALLBACK"
 
 
 class ChatMessageRead(BaseModel):
@@ -10,14 +26,14 @@ class ChatMessageRead(BaseModel):
     intent: str | None
     confidence: float | None
     faq_id: str | None = None
-    response_source: str | None = None
+    response_source: ChatbotResponseSource | None = None
     created_at: datetime
 
 
 class ConversationRead(BaseModel):
     id: str
     user_id: str | None
-    status: str
+    status: ConversationStatus
     started_at: datetime
     ended_at: datetime | None
     detected_intent: str | None = None
@@ -61,9 +77,16 @@ class BotMessageResponse(BaseModel):
     source_category: str | None = None
     requires_clarification: bool = False
     clarification_options: list[str] = Field(default_factory=list)
+    suggested_action: ChatbotSuggestedAction = Field(
+        default=ChatbotSuggestedAction.NONE,
+        description=(
+            "Acción tipada que la interfaz puede presentar o ejecutar; "
+            "nunca confirma por sí sola una conversión a ticket."
+        ),
+    )
     fallback_reason: str | None = None
-    conversation_status: str = "ACTIVE"
-    response_source: str = "DETERMINISTIC"
+    conversation_status: ConversationStatus = ConversationStatus.ACTIVE
+    response_source: ChatbotResponseSource = ChatbotResponseSource.DETERMINISTIC
     sources: list["ChatbotSource"] = Field(default_factory=list)
 
 

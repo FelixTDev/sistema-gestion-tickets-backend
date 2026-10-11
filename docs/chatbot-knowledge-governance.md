@@ -18,22 +18,43 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
 
 - Los saludos simples obtienen una respuesta cordial determinística; no se
   clasifican como baja confianza ni ofrecen un ticket por sí solos.
-- Las consultas coincidentes con una FAQ activa publicada reciben esa respuesta
-  y la fuente oficial asociada cuando exista.
+- Las respuestas sobre productos y procesos solo usan FAQs publicadas, activas y
+  vigentes con URL HTTPS de `bancognb.com.pe` o `www.bancognb.com.pe` y fecha de
+  verificación. La fuente usada se devuelve en `sources[]`.
 - Las coincidencias medias o ambiguas piden aclaración sin abrir un ticket ni
-  escalar automáticamente. La conversación conserva, de forma acotada, hasta
-  dos turnos breves para interpretar seguimientos como “¿y eso cómo se hace?”.
+  escalar automáticamente. La conversación conserva hasta dos mensajes breves
+  de aclaración y, ante una referencia clara, usa el último mensaje del cliente
+  y la respuesta anterior del asistente para recuperar el tema.
 - Las listas de opciones guardan IDs de FAQ activos. El usuario puede seleccionar
   el título o decir “la primera”, “opción 2”, etc. Solo se resuelve contra las
   opciones pendientes de esa conversación; no se interpreta una opción fuera de
   contexto.
-- Una pregunta nueva explícita se evalúa por sí misma. No se debe concatenar
-  indiscriminadamente todo el historial: el contexto es temporal, acotado y se
-  elimina al resolver, reiniciar o abandonar la aclaración.
+- Una pregunta nueva se evalúa por sí misma salvo que contenga una referencia
+  clara al intercambio anterior. No se concatena todo el historial. La selección
+  de una opción pendiente requiere su título o un ordinal; una frase libre no se
+  fuerza a coincidir con una FAQ.
 - Un saludo, una coincidencia fallida o una baja confianza no cambia por sí solo
   la conversación a `ESCALATED`. La escalación requiere acción explícita. Cuando
   se agotan las aclaraciones se ofrece reformular, pedir atención humana o crear
   ticket, sin crear ninguno automáticamente.
+- “Eso no me ayudó” conserva la FAQ y pide una aclaración breve. Una solicitud
+  explícita de asesor usa la escalación existente. Una solicitud explícita de
+  ticket devuelve `suggested_action=CONVERT_TO_TICKET`; ese campo no crea el
+  ticket.
+- `BotMessageResponse.suggested_action` y `conversation_status` son campos
+  tipados. `requires_clarification`, `clarification_options`, `sources` y los
+  estados existentes siguen disponibles para clientes anteriores.
+- La conversión se confirma con el endpoint existente
+  `POST /api/v1/chat/conversations/{conversation_id}/convert-to-ticket`: requiere
+  autenticación de cliente, pertenencia de la conversación y el cuerpo completo
+  `TicketCreate`. Una respuesta útil o de alta confianza no impide la conversión.
+  La llamada no crea duplicados y conserva el límite diario y la auditoría.
+- `POST /api/v1/chat/conversations` crea una conversación nueva. El endpoint
+  `/reset` reinicia el estado operativo sin borrar mensajes; el frontend puede
+  iniciar una conversación nueva y cambiar su ID activo.
+- Si falla la recuperación, se devuelve un fallback controlado sin escalar ni
+  sugerir la creación de un ticket. Si falla el proveedor de IA, se conserva la
+  respuesta determinista; el proveedor no puede crear tickets ni decidir permisos.
 - El contenido de usuario y las FAQs se tratan como datos no confiables. Las
   defensas existentes de inyección, solicitud sensible, grounding y validación
   de salida siguen siendo obligatorias si se usa un proveedor de IA configurado.
