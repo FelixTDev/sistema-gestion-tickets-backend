@@ -28,6 +28,7 @@ from app.modules.chatbot.schemas.chatbot import (
     BotMessageResponse,
     ChatbotAdvisorResponse,
     ChatbotAuthenticationAction,
+    ChatbotConvertedTicketSummary,
     ChatbotFeedbackMetrics,
     ChatbotSuggestedAction,
     ChatbotTicketCard,
@@ -2131,6 +2132,7 @@ class ChatbotService:
     def _conversation_read(
         self, session: Session, conversation: Conversation
     ) -> ConversationRead:
+        ticket = self.tickets.repository.get_by_conversation(session, conversation.id)
         return ConversationRead(
             id=conversation.id,
             user_id=conversation.user_id,
@@ -2150,6 +2152,16 @@ class ChatbotService:
             ticket_draft=self.ticket_drafts.read(
                 session,
                 (conversation.context_json or {}).get(TICKET_DRAFT_CONTEXT_KEY),
+            ),
+            converted_ticket=(
+                ChatbotConvertedTicketSummary(
+                    id=ticket.id,
+                    tracking_code=ticket.tracking_code,
+                    subject=ticket.subject,
+                    status=ticket.status,
+                )
+                if ticket is not None
+                else None
             ),
             messages=[
                 self._message_read(message)

@@ -136,7 +136,8 @@ def test_anonymous_ticket_request_requires_login_then_structured_confirmation(
 
     assert converted.status_code == 201, converted.text
     assert converted.json()["source"] == "CHATBOT"
-    assert duplicate.status_code == 409
+    assert duplicate.status_code == 200
+    assert duplicate.json()["id"] == converted.json()["id"]
 
 
 def test_natural_language_advisor_request_uses_explicit_escalation(

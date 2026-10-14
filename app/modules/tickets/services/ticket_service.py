@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from uuid import uuid4
@@ -76,6 +77,12 @@ REQUIRES_ASSIGNED_ADVISOR = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class TicketConversionResult:
+    ticket: TicketRead
+    created: bool
+
+
 class TicketService:
     def __init__(
         self,
@@ -102,13 +109,18 @@ class TicketService:
         conversation_id: str,
         data: TicketCreate,
         actor: AuthenticatedUser,
-    ) -> TicketRead:
+    ) -> TicketConversionResult:
         self._require_client(actor)
         conversation = self.repository.conversation_for_update(session, conversation_id)
         if conversation is None:
             raise HTTPException(status_code=404, detail="Conversación no encontrada")
         if conversation.user_id != actor.user.id:
             raise HTTPException(status_code=403, detail="Conversación no autorizada")
+        existing_ticket = self.repository.get_by_conversation(session, conversation_id)
+        if existing_ticket is not None:
+            return self._recover_conversation_ticket(
+                session, existing_ticket, data, actor
+            )
         if conversation.status in {
             ConversationStatus.CONVERTED_TO_TICKET,
             ConversationStatus.CLOSED,
@@ -116,10 +128,6 @@ class TicketService:
         }:
             raise HTTPException(
                 status_code=409, detail="La conversación no está disponible"
-            )
-        if self.repository.get_by_conversation(session, conversation_id) is not None:
-            raise HTTPException(
-                status_code=409, detail="La conversación ya tiene un ticket"
             )
         self._validate_conversation_draft(conversation, data)
         if (
@@ -174,16 +182,58 @@ class TicketService:
             session.commit()
         except IntegrityError:
             session.rollback()
-            if (
-                self.repository.get_by_conversation(session, conversation_id)
-                is not None
-            ):
+            recovered_conversation = self.repository.conversation_for_update(
+                session, conversation_id
+            )
+            if recovered_conversation is None:
                 raise HTTPException(
-                    status_code=409, detail="La conversación ya tiene un ticket"
+                    status_code=404, detail="Conversación no encontrada"
                 ) from None
+            if recovered_conversation.user_id != actor.user.id:
+                raise HTTPException(
+                    status_code=403, detail="Conversación no autorizada"
+                ) from None
+            existing_ticket = self.repository.get_by_conversation(
+                session, conversation_id
+            )
+            if existing_ticket is not None:
+                return self._recover_conversation_ticket(
+                    session, existing_ticket, data, actor
+                )
             raise
         session.refresh(ticket)
-        return self._ticket_read(session, ticket)
+        return TicketConversionResult(
+            ticket=self._ticket_read(session, ticket), created=True
+        )
+
+    def _recover_conversation_ticket(
+        self,
+        session: Session,
+        ticket: Ticket,
+        data: TicketCreate,
+        actor: AuthenticatedUser,
+    ) -> TicketConversionResult:
+        if ticket.source != TicketSource.CHATBOT or ticket.client_id != actor.user.id:
+            raise HTTPException(
+                status_code=409,
+                detail="La conversación tiene un ticket no recuperable",
+            )
+        payload_matches = (
+            ticket.category_id == data.category_id
+            and ticket.subject == data.subject.strip()
+            and ticket.description == data.description.strip()
+            and ticket.priority == data.priority
+        )
+        if not payload_matches:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "El payload no coincide con el ticket creado para la conversación"
+                ),
+            )
+        return TicketConversionResult(
+            ticket=self._ticket_read(session, ticket), created=False
+        )
 
     @staticmethod
     def _validate_conversation_draft(

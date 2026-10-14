@@ -146,6 +146,13 @@ class ChatMessageRead(BaseModel):
     created_at: datetime
 
 
+class ChatbotConvertedTicketSummary(BaseModel):
+    id: str = Field(description="Identificador del ticket asociado.")
+    tracking_code: str = Field(description="Código de seguimiento del ticket.")
+    subject: str
+    status: TicketStatus
+
+
 class ConversationRead(BaseModel):
     id: str
     user_id: str | None
@@ -165,6 +172,12 @@ class ConversationRead(BaseModel):
     ticket_draft: ChatbotTicketDraft = Field(
         default_factory=ChatbotTicketDraft,
         description="Estado y campos permitidos del borrador conversacional de ticket.",
+    )
+    converted_ticket: ChatbotConvertedTicketSummary | None = Field(
+        default=None,
+        description=(
+            "Resumen del ticket asociado; nulo si la conversación no fue convertida."
+        ),
     )
     messages: list[ChatMessageRead] = Field(default_factory=list)
 

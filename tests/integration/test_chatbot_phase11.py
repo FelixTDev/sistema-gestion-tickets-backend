@@ -192,13 +192,15 @@ def test_authenticated_client_can_link_and_convert_once(phase11_client) -> None:
         headers={"Authorization": f"Bearer {token}"},
         json=payload,
     )
-    assert duplicate.status_code == 409
+    assert duplicate.status_code == 200
+    assert duplicate.json()["id"] == converted.json()["id"]
 
     read = client.get(
         f"/api/v1/chat/conversations/{conversation['id']}",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert read.json()["status"] == "CONVERTED_TO_TICKET"
+    assert read.json()["converted_ticket"]["id"] == converted.json()["id"]
 
 
 @pytest.mark.parametrize("email", ["asesor@demo.com", "supervisor@demo.com"])

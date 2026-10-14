@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.db import models  # noqa: F401
 from app.db.session import get_session
 from app.main import app
+from app.modules.auditoria.models.audit_log import AuditLog
 from app.modules.chatbot.api.router import get_chatbot_service
 from app.modules.chatbot.models.conversation import Conversation
 from app.modules.chatbot.services import rag_service as rag_service_module
@@ -18,7 +19,9 @@ from app.modules.chatbot.services.ai_provider import (
 )
 from app.modules.chatbot.services.chatbot_service import ChatbotService
 from app.modules.conocimiento.models.category import TicketCategory
+from app.modules.notificaciones.models.notification import Notification
 from app.modules.tickets.models.history import TicketHistory
+from app.modules.tickets.models.sla import TicketSla
 from app.modules.tickets.models.ticket import Ticket
 from app.modules.usuarios.api.auth_router import get_email_provider
 from app.modules.usuarios.services.email_provider import NoopEmailProvider
@@ -175,25 +178,64 @@ def test_progressive_draft_is_typed_persisted_and_only_conversion_creates_ticket
         headers=headers,
         json=payload,
     )
+    # A client may not receive the first response; the conversation read is the
+    # recovery path before it retries the same request.
+    restored = client.get(
+        f"/api/v1/chat/conversations/{conversation_id}", headers=headers
+    )
     duplicate = client.post(
         f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket",
         headers=headers,
         json=payload,
     )
+    changed_retry = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket",
+        headers=headers,
+        json={**payload, "subject": "Otro asunto tras convertir"},
+    )
 
     assert converted.status_code == 201, converted.text
     assert converted.json()["conversation_id"] == conversation_id
     assert converted.json()["source"] == "CHATBOT"
-    assert duplicate.status_code == 409
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["converted_ticket"] == {
+        "id": converted.json()["id"],
+        "tracking_code": converted.json()["tracking_code"],
+        "subject": converted.json()["subject"],
+        "status": converted.json()["status"],
+    }
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["id"] == converted.json()["id"]
+    assert duplicate.json()["tracking_code"] == converted.json()["tracking_code"]
+    assert changed_retry.status_code == 409
     with Session(engine) as session:
         ticket = session.exec(select(Ticket)).one()
         history = session.exec(
             select(TicketHistory).where(TicketHistory.ticket_id == ticket.id)
         ).all()
         saved = session.get(Conversation, conversation_id)
+        notifications = session.exec(
+            select(Notification).where(Notification.related_ticket_id == ticket.id)
+        ).all()
+        slas = session.exec(
+            select(TicketSla).where(TicketSla.ticket_id == ticket.id)
+        ).all()
+        conversion_audits = session.exec(
+            select(AuditLog).where(
+                AuditLog.resource_id == conversation_id,
+                AuditLog.action == "CONVERTED_TO_TICKET",
+            )
+        ).all()
         assert sum(item.action == "CREATED" for item in history) == 1
+        assert sum(item.action == "SLA_STARTED" for item in history) == 1
+        assert len(notifications) == 1
+        assert len(slas) == 1
+        assert len(conversion_audits) == 1
         assert saved.status.value == "CONVERTED_TO_TICKET"
         assert saved.user_id == converted.json()["client_id"]
+        assert ticket.subject == payload["subject"]
+        assert ticket.description == payload["description"]
+        assert ticket.priority.value == payload["priority"]
 
 
 def test_incomplete_draft_rejects_conversion_even_with_a_complete_request_body(
@@ -388,6 +430,14 @@ def test_openapi_exposes_ticket_draft_status_fields_and_real_enums() -> None:
 
     assert "ticket_draft" in bot_fields
     assert "ticket_draft" in conversation_fields
+    assert "converted_ticket" in conversation_fields
+    converted_ticket_fields = components["ChatbotConvertedTicketSummary"]["properties"]
+    assert set(converted_ticket_fields) == {
+        "id",
+        "tracking_code",
+        "subject",
+        "status",
+    }
     assert components["ChatbotTicketDraftStatus"]["enum"] == [
         "INACTIVE",
         "COLLECTING",
@@ -411,6 +461,25 @@ def test_openapi_exposes_ticket_draft_status_fields_and_real_enums() -> None:
         "DESCRIPTION",
         "PRIORITY",
     ]
+    conversion_responses = app.openapi()["paths"][
+        "/api/v1/chat/conversations/{conversation_id}/convert-to-ticket"
+    ]["post"]["responses"]
+    assert {"200", "201", "409"} <= set(conversion_responses)
+    assert "primera conversión" in conversion_responses["201"]["description"].lower()
+    assert "reintento" in conversion_responses["200"]["description"].lower()
+    assert "payload" in conversion_responses["409"]["description"].lower()
+    assert (
+        conversion_responses["200"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/TicketRead"
+    )
+    assert (
+        conversion_responses["201"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/TicketRead"
+    )
+    assert (
+        conversion_responses["409"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/ErrorResponse"
+    )
 
 
 def test_other_client_cannot_read_change_or_convert_a_private_draft(
@@ -444,6 +513,16 @@ def test_other_client_cannot_read_change_or_convert_a_private_draft(
         owner_headers,
     )
     assert draft.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
+    owner_conversion = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket",
+        headers=owner_headers,
+        json=draft.json()["ticket_draft"]["fields"],
+    )
+    assert owner_conversion.status_code == 201
+    owner_read = client.get(
+        f"/api/v1/chat/conversations/{conversation_id}", headers=owner_headers
+    )
+    assert owner_read.json()["converted_ticket"]["id"] == owner_conversion.json()["id"]
 
     other_token = login(
         client,
@@ -467,4 +546,5 @@ def test_other_client_cannot_read_change_or_convert_a_private_draft(
     assert "Información privada" not in inaccessible.text
     assert "Información privada" not in unmodifiable.text
     with Session(engine) as session:
-        assert session.exec(select(func.count(Ticket.id))).one() == 0
+        assert session.exec(select(func.count(Ticket.id))).one() == 1
+        assert session.get(Ticket, owner_conversion.json()["id"]) is not None

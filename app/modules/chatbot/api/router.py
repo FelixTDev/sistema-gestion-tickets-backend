@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlmodel import Session
 
 from app.api.deps import CurrentUser, OptionalCurrentUser
@@ -18,7 +18,7 @@ from app.modules.chatbot.schemas.chatbot import (
 from app.modules.chatbot.services.chatbot_service import ChatbotService
 from app.modules.tickets.schemas.ticket import TicketCreate, TicketRead
 from app.modules.tickets.services.ticket_service import TicketService
-from app.shared.api_errors import error_responses
+from app.shared.api_errors import ErrorResponse, error_responses
 
 router = APIRouter(
     prefix="/chat",
@@ -172,8 +172,34 @@ def link_conversation(
         "conversación tiene un borrador, este debe estar listo y los datos deben "
         "coincidir con el resumen revisado. Sin borrador se conserva la conversión "
         "estructurada directa de la Fase 1. La confianza de la última respuesta "
-        "del asistente no bloquea la conversión."
+        "del asistente no bloquea la conversión. La primera conversión responde "
+        "201 Created. Un reintento con el mismo payload devuelve el ticket original "
+        "con 200 OK y no repite efectos laterales. Un payload distinto después de "
+        "la conversión responde 409 Conflict."
     ),
+    responses={
+        201: {
+            "model": TicketRead,
+            "description": (
+                "Primera conversión: crea el ticket y registra sus efectos laterales "
+                "una sola vez."
+            ),
+        },
+        200: {
+            "model": TicketRead,
+            "description": (
+                "Reintento idéntico: devuelve el ticket original sin crear otro ni "
+                "repetir auditoría, historial, SLA o notificaciones."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "Conflicto si el payload difiere del ticket ya creado, o si la "
+                "conversación convertida no tiene un ticket recuperable."
+            ),
+        },
+    },
 )
 def convert_conversation_to_ticket(
     conversation_id: str,
@@ -181,7 +207,11 @@ def convert_conversation_to_ticket(
     session: Annotated[Session, Depends(get_session)],
     current_user: CurrentUser,
     ticket_service: TicketServiceDependency,
+    response: Response,
 ) -> TicketRead:
-    return ticket_service.convert_conversation(
+    result = ticket_service.convert_conversation(
         session, conversation_id, data, current_user
     )
+    if not result.created:
+        response.status_code = status.HTTP_200_OK
+    return result.ticket
