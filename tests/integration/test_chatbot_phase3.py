@@ -293,6 +293,116 @@ def test_ambiguous_values_are_not_guessed_and_active_options_are_typed(
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
 
+@pytest.mark.parametrize(
+    "category_text",
+    [
+        "BANCA_DIGITAL",
+        "Banca Digital",
+        "banca-digital",
+        "Banca_Digital",
+        "BANCA DIGITAL",
+    ],
+)
+def test_category_text_matches_active_catalog_name_across_separators(
+    phase3_client, category_text: str
+) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "BANCA_DIGITAL")
+        ).one()
+
+    response = send(client, conversation_id, f"Categoría: {category_text}", headers)
+
+    draft = response.json()["ticket_draft"]
+    assert response.status_code == 200
+    assert draft["fields"]["category_id"] == category.id
+    assert "CATEGORY_ID" not in draft["missing_fields"]
+
+
+def test_unknown_category_requests_selection_without_assigning_category(
+    phase3_client,
+) -> None:
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+
+    response = send(client, conversation_id, "Categoría: inexistente", headers)
+
+    draft = response.json()["ticket_draft"]
+    assert response.status_code == 200
+    assert draft["fields"]["category_id"] is None
+    assert "CATEGORY_ID" in draft["missing_fields"]
+    assert "CATEGORY_ID" in [item["field"] for item in draft["validation_errors"]]
+    assert "Selecciona" in response.json()["bot_message"]["content"]
+    assert draft["category_options"]
+
+
+def test_ambiguous_category_text_requests_selection_without_guessing(
+    phase3_client,
+) -> None:
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+
+    response = send(client, conversation_id, "Categoría: TARJETAS y CUENTAS", headers)
+
+    draft = response.json()["ticket_draft"]
+    assert response.status_code == 200
+    assert draft["fields"]["category_id"] is None
+    assert "CATEGORY_ID" in draft["missing_fields"]
+    assert "una sola categoría" in response.json()["bot_message"]["content"]
+    assert draft["category_options"]
+
+
+def test_inactive_category_cannot_be_selected_by_name(phase3_client) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "BANCA_DIGITAL")
+        ).one()
+        category.is_active = False
+        session.add(category)
+        session.commit()
+
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+    response = send(client, conversation_id, "Categoría: BANCA_DIGITAL", headers)
+
+    draft = response.json()["ticket_draft"]
+    assert response.status_code == 200
+    assert draft["fields"]["category_id"] is None
+    assert "CATEGORY_ID" in draft["missing_fields"]
+    assert all(
+        option["name"] != "BANCA_DIGITAL" for option in draft["category_options"]
+    )
+
+
+def test_existing_category_option_selection_still_matches_catalog_name(
+    phase3_client,
+) -> None:
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    started = send(client, conversation_id, "Quiero crear un ticket", headers)
+    option = next(
+        item
+        for item in started.json()["ticket_draft"]["category_options"]
+        if item["name"] == "BANCA_DIGITAL"
+    )
+
+    response = send(
+        client,
+        conversation_id,
+        f"Selecciono la categoría Banca Digital ({option['id']}).",
+        headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ticket_draft"]["fields"]["category_id"] == option["id"]
+
+
 def test_start_message_reuses_incident_description_and_contract_default_priority(
     phase3_client,
 ) -> None:

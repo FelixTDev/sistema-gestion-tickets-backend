@@ -294,10 +294,10 @@ class TicketDraftService:
     def _matching_categories(
         content: str, categories: list[TicketCategory]
     ) -> list[TicketCategory]:
-        normalized_content = normalize_text(content)
+        normalized_content = re.sub(r"[\s_-]+", " ", normalize_text(content))
         matches: list[TicketCategory] = []
         for category in categories:
-            normalized_name = normalize_text(category.name.replace("_", " "))
+            normalized_name = re.sub(r"[\s_-]+", " ", normalize_text(category.name))
             variants = {normalized_name}
             if normalized_name.endswith("s"):
                 variants.add(normalized_name[:-1])
