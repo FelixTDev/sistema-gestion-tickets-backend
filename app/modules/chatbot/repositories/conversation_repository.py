@@ -93,29 +93,61 @@ class ConversationRepository:
             ).one()
         )
 
-    def count_recent_ai_messages(
+    def count_recent_ai_provider_attempts(
         self, session: Session, conversation_id: str, since: datetime
     ) -> int:
-        return int(
-            session.exec(
-                select(func.count(ChatMessage.id)).where(
-                    ChatMessage.conversation_id == conversation_id,
-                    ChatMessage.sender_type == SenderType.BOT,
-                    ChatMessage.response_source == "AI",
-                    ChatMessage.created_at >= since,
-                )
-            ).one()
-        )
+        traces = session.exec(
+            select(ChatMessage.ai_trace_json).where(
+                ChatMessage.conversation_id == conversation_id,
+                ChatMessage.sender_type == SenderType.BOT,
+                ChatMessage.created_at >= since,
+            )
+        ).all()
+        return self._count_provider_attempts(traces)
 
-    def count_ai_messages(self, session: Session, conversation_id: str) -> int:
-        return int(
-            session.exec(
-                select(func.count(ChatMessage.id)).where(
-                    ChatMessage.conversation_id == conversation_id,
-                    ChatMessage.sender_type == SenderType.BOT,
-                    ChatMessage.response_source == "AI",
-                )
-            ).one()
+    def count_ai_provider_attempts(self, session: Session, conversation_id: str) -> int:
+        traces = session.exec(
+            select(ChatMessage.ai_trace_json).where(
+                ChatMessage.conversation_id == conversation_id,
+                ChatMessage.sender_type == SenderType.BOT,
+            )
+        ).all()
+        return self._count_provider_attempts(traces)
+
+    def count_recent_ai_provider_attempts_for_actor(
+        self,
+        session: Session,
+        *,
+        user_id: str | None,
+        anonymous_key: str | None,
+        since: datetime,
+    ) -> int:
+        query = (
+            select(ChatMessage.ai_trace_json)
+            .join(Conversation, ChatMessage.conversation_id == Conversation.id)
+            .where(
+                ChatMessage.sender_type == SenderType.BOT,
+                ChatMessage.created_at >= since,
+            )
+        )
+        if user_id is not None:
+            query = query.where(Conversation.user_id == user_id)
+        elif anonymous_key is not None:
+            query = query.where(
+                Conversation.user_id.is_(None),
+                Conversation.anonymous_key == anonymous_key,
+            )
+        else:
+            return 0
+        traces = session.exec(query).all()
+        return self._count_provider_attempts(traces)
+
+    @staticmethod
+    def _count_provider_attempts(traces: list[object]) -> int:
+        return sum(
+            1
+            for trace in traces
+            if isinstance(trace, dict) and trace.get("provider_called") is True
         )
 
     def category_name(self, session: Session, category_id: str | None) -> str | None:

@@ -22,6 +22,20 @@ class ChatbotSuggestedAction(StrEnum):
     CLARIFY_TICKET_CODE = "CLARIFY_TICKET_CODE"
 
 
+class ChatbotAvailableAction(StrEnum):
+    BROWSE_KNOWLEDGE = "BROWSE_KNOWLEDGE"
+    CREATE_TICKET = "CREATE_TICKET"
+    CONTACT_ADVISOR = "CONTACT_ADVISOR"
+    VIEW_MY_TICKETS = "VIEW_MY_TICKETS"
+    OFFICIAL_CHANNELS = "OFFICIAL_CHANNELS"
+    RETRY = "RETRY"
+
+
+class ChatbotTicketAssignmentStatus(StrEnum):
+    ASSIGNED = "ASSIGNED"
+    UNASSIGNED = "UNASSIGNED"
+
+
 class ChatbotTicketQueryType(StrEnum):
     AUTHENTICATION_REQUIRED = "AUTHENTICATION_REQUIRED"
     TICKET_LIST = "TICKET_LIST"
@@ -94,6 +108,7 @@ class ChatbotTicketCard(BaseModel):
     priority_label: str = Field(description="Etiqueta en español de la prioridad.")
     updated_at: datetime
     assigned_advisor_name: str | None = None
+    assignment_status: ChatbotTicketAssignmentStatus
 
 
 class ChatbotTicketPagination(BaseModel):
@@ -337,6 +352,13 @@ class BotMessageResponse(BaseModel):
             "consulta usan ticket_query como payload tipado. "
             "CONVERT_TO_TICKET se emite para un borrador listo y pendiente de "
             "confirmación explícita mediante el endpoint de conversión."
+        ),
+    )
+    available_actions: list[ChatbotAvailableAction] = Field(
+        default_factory=list,
+        description=(
+            "Acciones alternativas que la interfaz puede ofrecer cuando la consulta "
+            "no tiene una respuesta confiable o requiere otro canal."
         ),
     )
     ticket_query: ChatbotTicketQuery | None = Field(

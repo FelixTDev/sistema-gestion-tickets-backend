@@ -42,9 +42,11 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "chatbot_ai_min_confidence": 0.7,
         "chatbot_ai_requests_per_minute": 5,
         "chatbot_ai_max_responses_per_conversation": 3,
+        "chatbot_ai_max_provider_calls_per_actor_per_hour": 20,
         "chatbot_ai_idempotency_window_seconds": 30,
         "chatbot_ai_timeout_seconds": 1,
         "chatbot_ai_max_output_chars": 1200,
+        "chatbot_ai_max_output_tokens": 384,
         "chatbot_ai_max_consecutive_failures": 3,
         "chatbot_ai_cooldown_seconds": 60,
     }

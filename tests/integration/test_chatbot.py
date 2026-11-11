@@ -167,6 +167,7 @@ def test_answers_active_faq_by_keyword_and_normalizes_accents(chatbot_client):
     [
         "Preguntas frecuentes",
         "¿Qué preguntas me puedes dar?",
+        "¿Qué preguntas te puedo hacer?",
         "¿Qué temas puedes responder?",
     ],
 )
@@ -301,6 +302,57 @@ def test_returns_unresolved_response_for_unknown_query(chatbot_client):
     assert response.json()["fallback_reason"] is None
     assert response.json()["conversation_status"] == "WAITING_CLARIFICATION"
     assert response.json()["response_source"] == "DETERMINISTIC"
+    assert response.json()["clarification_options"]
+    assert response.json()["available_actions"] == [
+        "BROWSE_KNOWLEDGE",
+        "CREATE_TICKET",
+        "CONTACT_ADVISOR",
+    ]
+
+
+def test_repeated_unknown_query_returns_verified_options_and_next_actions(
+    chatbot_client,
+):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+
+    for _ in range(3):
+        response = client.post(
+            endpoint,
+            json={"content": "necesito ayuda con un trámite que no aparece"},
+        )
+        assert response.status_code == 200
+
+    body = response.json()
+    assert body["resolved"] is False
+    assert body["fallback_reason"] == "LOW_CONFIDENCE"
+    assert body["clarification_options"]
+    assert body["available_actions"] == [
+        "BROWSE_KNOWLEDGE",
+        "CREATE_TICKET",
+        "CONTACT_ADVISOR",
+        "VIEW_MY_TICKETS",
+    ]
+    assert all(source["url"].startswith("https://") for source in body["sources"])
+
+
+def test_unhelpful_follow_up_accepts_fused_words_and_offers_real_next_steps(
+    chatbot_client,
+):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+    client.post(endpoint, json={"content": "requisitos tarjeta"})
+
+    response = client.post(endpoint, json={"content": "no resuelvesmi duda"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["bot_message"]["intent"] == "FOLLOW_UP_UNRESOLVED"
+    assert "no resolvió" in body["bot_message"]["content"].casefold()
+    assert "CONTACT_ADVISOR" in body["available_actions"]
+    assert "CREATE_TICKET" in body["available_actions"]
 
 
 def test_authorizes_conversation_owner_and_rejects_other_client(chatbot_client):

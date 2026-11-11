@@ -88,18 +88,21 @@ class Settings(BaseSettings):
     chatbot_ai_provider: str = "noop"
     chatbot_ai_endpoint: str | None = None
     chatbot_ai_api_key: str | None = None
-    chatbot_ai_model: str = "disabled"
+    chatbot_ai_model: str = "gpt-5.4-mini"
     chatbot_ai_prompt_version: str = "v1"
-    chatbot_ai_timeout_seconds: float = 3.0
+    chatbot_ai_timeout_seconds: float = 15.0
     chatbot_ai_max_output_chars: int = 1200
+    chatbot_ai_max_output_tokens: int = 384
     chatbot_ai_max_documents: int = 3
     chatbot_ai_max_context_chars: int = 6000
     chatbot_ai_min_confidence: float = 0.70
     chatbot_ai_requests_per_minute: int = 5
     chatbot_ai_max_responses_per_conversation: int = 3
+    chatbot_ai_max_provider_calls_per_actor_per_hour: int = 20
     chatbot_ai_max_consecutive_failures: int = 3
     chatbot_ai_cooldown_seconds: int = 60
     chatbot_ai_idempotency_window_seconds: int = 30
+    openai_api_key: SecretStr | None = None
     trusted_hosts: list[str] = ["localhost", "127.0.0.1", "testserver"]
     cors_origins: list[str] = [
         "http://localhost:5173",
@@ -209,12 +212,18 @@ class Settings(BaseSettings):
             raise ValueError("El proveedor IA no puede estar vacío")
         if not self.chatbot_ai_model.strip():
             raise ValueError("El modelo IA no puede estar vacío")
+        if self.openai_api_key is not None and not (
+            self.openai_api_key.get_secret_value().strip()
+        ):
+            self.openai_api_key = None
         if not self.chatbot_ai_prompt_version.strip():
             raise ValueError("La versión de prompt IA no puede estar vacía")
         if not 0.1 <= self.chatbot_ai_timeout_seconds <= 30:
             raise ValueError("El timeout IA debe estar entre 0.1 y 30 segundos")
         if not 1 <= self.chatbot_ai_max_output_chars <= 10_000:
             raise ValueError("La salida máxima IA debe estar entre 1 y 10000")
+        if not 32 <= self.chatbot_ai_max_output_tokens <= 4096:
+            raise ValueError("Los tokens máximos de salida IA no son válidos")
         if not 1 <= self.chatbot_ai_max_documents <= 10:
             raise ValueError("La cantidad de documentos IA debe estar entre 1 y 10")
         if not 100 <= self.chatbot_ai_max_context_chars <= 50_000:
@@ -225,6 +234,8 @@ class Settings(BaseSettings):
             raise ValueError("El límite de solicitudes IA debe ser positivo")
         if self.chatbot_ai_max_responses_per_conversation < 1:
             raise ValueError("El límite de respuestas IA debe ser positivo")
+        if self.chatbot_ai_max_provider_calls_per_actor_per_hour < 1:
+            raise ValueError("El límite horario de llamadas IA debe ser positivo")
         if self.chatbot_ai_max_consecutive_failures < 1:
             raise ValueError("El límite de fallos IA debe ser positivo")
         if self.chatbot_ai_cooldown_seconds < 1:

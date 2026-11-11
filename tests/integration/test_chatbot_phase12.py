@@ -116,6 +116,9 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
             source_ids=[faq_id(engine)],
             provider="fake",
             model="fake-test-model",
+            input_tokens=81,
+            output_tokens=24,
+            total_tokens=105,
         )
     )
     configure_fake(monkeypatch, provider)
@@ -147,6 +150,9 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
         ).first()
         assert message is not None
         assert message.ai_trace_json["provider"] == "fake"
+        assert message.ai_trace_json["input_tokens"] == 81
+        assert message.ai_trace_json["output_tokens"] == 24
+        assert message.ai_trace_json["total_tokens"] == 105
         assert "TARJÉTAS" not in str(message.ai_trace_json)
 
         audit = session.exec(
@@ -156,6 +162,59 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
             )
         ).first()
         assert audit is not None
+
+
+def test_arithmetic_embedded_in_a_banking_query_never_reaches_ai_provider(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="La información oficial indica requisitos para tarjetas.",
+            source_ids=[faq_id(engine)],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "TARJETAS REQUISITOS; además, ¿cuánto es 2 + 2?"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["response_source"] == "DETERMINISTIC"
+    assert len(provider.calls) == 0
+
+
+def test_off_topic_math_query_returns_guided_options_without_provider_call(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="La información oficial indica requisitos para tarjetas.",
+            source_ids=[faq_id(engine)],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "¿Cuánto es 2 + 2?"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["response_source"] == "DETERMINISTIC"
+    assert body["requires_clarification"] is True
+    assert "4" not in body["bot_message"]["content"]
+    assert len(provider.calls) == 0
 
 
 def test_faq_discovery_is_deterministic_even_when_ai_provider_is_enabled(
@@ -320,6 +379,128 @@ def test_ai_request_limit_uses_fallback_without_duplicate_call(
     assert len(provider.calls) == 1
 
 
+def test_failed_provider_attempt_counts_toward_minute_limit(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.failed(
+            status="ERROR",
+            provider="fake",
+            model="fake-test-model",
+            error_code="provider_failure",
+        )
+    )
+    configure_fake(monkeypatch, provider, chatbot_ai_requests_per_minute=1)
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    first = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS"})
+    second = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS otra"})
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["response_source"] == "DETERMINISTIC"
+    assert second.json()["response_source"] == "DETERMINISTIC"
+    assert len(provider.calls) == 1
+
+
+def test_ai_hourly_limit_is_shared_across_conversations_for_same_client(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="La información oficial indica requisitos para tarjetas.",
+            source_ids=[faq_id(engine)],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(
+        monkeypatch,
+        provider,
+        chatbot_ai_max_provider_calls_per_actor_per_hour=1,
+    )
+    token_response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "cliente@demo.com", "password": "demo-password-local"},
+    )
+    assert token_response.status_code == 200
+    token = token_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    first_conversation = client.post(
+        "/api/v1/chat/conversations", headers=headers
+    ).json()
+    first = client.post(
+        f"/api/v1/chat/conversations/{first_conversation['id']}/messages",
+        headers=headers,
+        json={"content": "TARJÉTAS y REQUISITOS"},
+    )
+    second_conversation = client.post(
+        "/api/v1/chat/conversations", headers=headers
+    ).json()
+    second = client.post(
+        f"/api/v1/chat/conversations/{second_conversation['id']}/messages",
+        headers=headers,
+        json={"content": "TARJÉTAS y REQUISITOS"},
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["response_source"] == "AI"
+    assert second.json()["response_source"] == "DETERMINISTIC"
+    assert len(provider.calls) == 1
+    with Session(engine) as session:
+        message = session.exec(
+            select(ChatMessage).where(
+                ChatMessage.conversation_id == second_conversation["id"],
+                ChatMessage.sender_type == SenderType.BOT,
+            )
+        ).one()
+        assert message.ai_trace_json["fallback_reason"] == "ACTOR_RATE_LIMIT"
+
+
+def test_ai_hourly_limit_is_shared_across_anonymous_conversations(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="La información oficial indica requisitos para tarjetas.",
+            source_ids=[faq_id(engine)],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(
+        monkeypatch,
+        provider,
+        chatbot_ai_max_provider_calls_per_actor_per_hour=1,
+    )
+    first_conversation = client.post("/api/v1/chat/conversations").json()
+    first = client.post(
+        f"/api/v1/chat/conversations/{first_conversation['id']}/messages",
+        json={"content": "TARJÉTAS y REQUISITOS"},
+    )
+    second_conversation = client.post("/api/v1/chat/conversations").json()
+    second = client.post(
+        f"/api/v1/chat/conversations/{second_conversation['id']}/messages",
+        json={"content": "TARJÉTAS y REQUISITOS"},
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["response_source"] == "AI"
+    assert second.json()["response_source"] == "DETERMINISTIC"
+    assert len(provider.calls) == 1
+    with Session(engine) as session:
+        message = session.exec(
+            select(ChatMessage).where(
+                ChatMessage.conversation_id == second_conversation["id"],
+                ChatMessage.sender_type == SenderType.BOT,
+            )
+        ).one()
+        assert message.ai_trace_json["fallback_reason"] == "ACTOR_RATE_LIMIT"
+
+
 def test_identical_retry_uses_cached_ai_result_without_duplicate_call(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -332,7 +513,12 @@ def test_identical_retry_uses_cached_ai_result_without_duplicate_call(
             model="fake-test-model",
         )
     )
-    configure_fake(monkeypatch, provider, chatbot_ai_requests_per_minute=10)
+    configure_fake(
+        monkeypatch,
+        provider,
+        chatbot_ai_requests_per_minute=10,
+        chatbot_ai_max_provider_calls_per_actor_per_hour=1,
+    )
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
 
@@ -346,6 +532,16 @@ def test_identical_retry_uses_cached_ai_result_without_duplicate_call(
         == first.json()["bot_message"]["content"]
     )
     assert len(provider.calls) == 1
+    with Session(engine) as session:
+        bot_messages = session.exec(
+            select(ChatMessage).where(
+                ChatMessage.conversation_id == conversation["id"],
+                ChatMessage.sender_type == SenderType.BOT,
+            )
+        ).all()
+        traces = [message.ai_trace_json for message in bot_messages]
+        assert sum(trace.get("provider_called") is True for trace in traces) == 1
+        assert any(trace.get("cache_hit") is True for trace in traces)
 
 
 def test_provider_timeout_is_bounded_and_keeps_fallback(

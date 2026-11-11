@@ -7,7 +7,12 @@ from app.modules.chatbot.services.ai_provider import KnowledgeContext
 from app.shared.text import normalize_text
 
 GUARDRAIL_POLICY = (
-    "Responde solo con el contexto autorizado. Reconoce cuando no sabes. "
+    "Eres un asistente de orientación para clientes del prototipo de atención "
+    "de Banco GNB Perú. Responde únicamente consultas de productos, canales y "
+    "procesos bancarios cubiertos por el contexto autorizado. No respondas "
+    "preguntas de cultura general, matemáticas, clima, programación u otros "
+    "temas ajenos; si el contexto no alcanza, reconoce el límite y orienta a "
+    "las opciones disponibles. Reconoce cuando no sabes. "
     "No inventes políticas, tarifas, horarios ni operaciones. No solicites "
     "contraseñas, PIN, CVV/CVC, tokens, OTP ni códigos de seguridad. "
     "No ejecutes acciones, no "
@@ -35,7 +40,43 @@ _SECRET_OUTPUT_PATTERNS = (
 )
 _EMAIL_PATTERN = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 _LONG_NUMBER_PATTERN = re.compile(r"\b\d{6,}\b")
+_WORD_PATTERN = re.compile(r"[a-z0-9]+")
+_NUMBER_PATTERN = re.compile(r"(?<!\w)\d+(?:[.,]\d+)?(?!\w)")
 _OFFICIAL_SOURCE_HOSTS = frozenset({"bancognb.com.pe", "www.bancognb.com.pe"})
+_GROUNDING_STOP_WORDS = frozenset(
+    {
+        "a",
+        "al",
+        "algun",
+        "algunos",
+        "como",
+        "con",
+        "cual",
+        "de",
+        "del",
+        "desde",
+        "el",
+        "ella",
+        "ellos",
+        "en",
+        "es",
+        "esta",
+        "este",
+        "la",
+        "las",
+        "lo",
+        "los",
+        "mi",
+        "para",
+        "por",
+        "que",
+        "se",
+        "su",
+        "un",
+        "una",
+        "y",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -118,13 +159,50 @@ def validate_output(
         for pattern in _SECRET_OUTPUT_PATTERNS
     ):
         return GuardrailDecision(False, "UNSAFE_OUTPUT")
-    context_terms = {
-        token
-        for chunk in context
-        for token in normalize_text(chunk.content).split()
-        if len(token) > 4
-    }
-    output_terms = set(normalize_text(text).split())
-    if not context_terms.intersection(output_terms):
+    context_text = " ".join(chunk.content for chunk in context)
+    answer_text = re.sub(r"(?m)^\s*\d+\s*[.)]\s*", "", text.strip())
+    context_terms = _grounding_terms(context_text)
+    output_numbers = _normalized_numbers(answer_text)
+    context_numbers = _normalized_numbers(context_text)
+    if not output_numbers.issubset(context_numbers):
         return GuardrailDecision(False, "OUT_OF_CONTEXT")
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", answer_text)
+        if sentence.strip()
+    ]
+    if not sentences:
+        return GuardrailDecision(False, "OUT_OF_CONTEXT")
+    for sentence in sentences:
+        sentence_terms = _grounding_terms(sentence)
+        if not sentence_terms:
+            return GuardrailDecision(False, "OUT_OF_CONTEXT")
+        # Require support for each sentence, rather than accepting one grounded
+        # phrase that would otherwise mask unrelated claims later in the answer.
+        minimum_overlap = min(2, len(sentence_terms))
+        if len(sentence_terms & context_terms) < minimum_overlap:
+            return GuardrailDecision(False, "OUT_OF_CONTEXT")
     return GuardrailDecision(True)
+
+
+def _grounding_terms(value: str) -> set[str]:
+    terms: set[str] = set()
+    for token in _WORD_PATTERN.findall(normalize_text(value)):
+        if len(token) < 4 or token.isdigit() or token in _GROUNDING_STOP_WORDS:
+            continue
+        terms.add(token)
+        if len(token) > 4 and token.endswith("es"):
+            terms.add(token[:-2])
+        elif len(token) > 4 and token.endswith("s"):
+            terms.add(token[:-1])
+    return terms
+
+
+def _normalized_numbers(value: str) -> set[str]:
+    numbers = set()
+    for number in _NUMBER_PATTERN.findall(value):
+        normalized = number.replace(",", ".")
+        normalized = re.sub(r"\.0+$", "", normalized)
+        numbers.add(normalized)
+    return numbers

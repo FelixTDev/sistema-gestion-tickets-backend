@@ -68,6 +68,7 @@ class RAGService:
         matches: list[MatchLike],
         requests_last_minute: int,
         responses_in_conversation: int,
+        requests_by_actor_last_hour: int = 0,
     ) -> AIOutcome:
         settings = get_settings()
         context = self.build_context(matches)
@@ -90,16 +91,30 @@ class RAGService:
         context_decision = validate_context(context)
         if not context_decision.allowed:
             return self._fallback(base_trace, context_decision.reason or "CONTEXT")
+        if len(context) > 1 and context[0].score - context[1].score < 0.15:
+            return self._fallback(base_trace, "AMBIGUOUS_CONTEXT")
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return replace(
+                cached,
+                trace={
+                    **cached.trace,
+                    "provider_called": False,
+                    "cache_hit": True,
+                },
+            )
         if (
             responses_in_conversation
             >= settings.chatbot_ai_max_responses_per_conversation
         ):
             return self._fallback(base_trace, "CONVERSATION_LIMIT")
-        cached = self._get_cached(cache_key)
-        if cached is not None:
-            return cached
         if requests_last_minute >= settings.chatbot_ai_requests_per_minute:
             return self._fallback(base_trace, "RATE_LIMIT")
+        if (
+            requests_by_actor_last_hour
+            >= settings.chatbot_ai_max_provider_calls_per_actor_per_hour
+        ):
+            return self._fallback(base_trace, "ACTOR_RATE_LIMIT")
         if self._circuit_open():
             return self._fallback(base_trace, "CIRCUIT_OPEN")
 
@@ -109,6 +124,7 @@ class RAGService:
             policy=GUARDRAIL_POLICY,
             prompt_version=settings.chatbot_ai_prompt_version,
             max_output_chars=settings.chatbot_ai_max_output_chars,
+            max_output_tokens=settings.chatbot_ai_max_output_tokens,
             timeout_seconds=settings.chatbot_ai_timeout_seconds,
         )
         result = self._call_provider(request)
@@ -119,6 +135,11 @@ class RAGService:
             "duration_ms": result.latency_ms,
             "provider_status": result.status,
             "error_code": result.error_code,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "total_tokens": result.total_tokens,
+            "provider_called": True,
+            "cache_hit": False,
             "fallback": result.status != "GENERATED",
         }
         if result.status != "GENERATED":

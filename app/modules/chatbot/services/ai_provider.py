@@ -28,6 +28,7 @@ class AIProviderRequest:
     policy: str
     prompt_version: str
     max_output_chars: int
+    max_output_tokens: int
     timeout_seconds: float
 
 
@@ -40,6 +41,9 @@ class AIGenerationResult:
     model: str | None
     latency_ms: int | None = None
     error_code: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
     @classmethod
     def generated(
@@ -50,6 +54,9 @@ class AIGenerationResult:
         provider: str,
         model: str | None,
         latency_ms: int | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        total_tokens: int | None = None,
     ) -> "AIGenerationResult":
         return cls(
             status="GENERATED",
@@ -58,6 +65,9 @@ class AIGenerationResult:
             provider=provider,
             model=model,
             latency_ms=latency_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
         )
 
     @classmethod
@@ -190,12 +200,30 @@ class HttpJsonAIProvider:
 
 
 def build_ai_provider() -> AIProvider:
-    """Return the safe local provider until an approved adapter is configured."""
+    """Return a configured provider, or the safe no-op provider by default."""
     from app.core.config import get_settings
 
     settings = get_settings()
     if not settings.chatbot_ai_enabled:
         return NoopAIProvider()
+    if settings.chatbot_ai_provider.casefold() == "openai":
+        api_key = (
+            settings.openai_api_key.get_secret_value().strip()
+            if settings.openai_api_key
+            else ""
+        )
+        if api_key:
+            from app.modules.chatbot.services.openai_provider import (
+                OpenAIResponsesProvider,
+            )
+
+            try:
+                return OpenAIResponsesProvider(
+                    api_key=api_key,
+                    model=settings.chatbot_ai_model,
+                )
+            except ValueError:
+                pass
     if (
         settings.chatbot_ai_provider.casefold() == "http_json"
         and settings.chatbot_ai_endpoint

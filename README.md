@@ -212,14 +212,26 @@ tags, sinónimos, título, pregunta, resumen y respuesta, y calcula un puntaje
 determinista de relevancia. Los umbrales, turnos máximos, longitud, conversaciones
 anónimas por hora y límites de mensajes se configuran mediante `CHATBOT_*`. Cada
 mensaje consume una solicitud de búsqueda y se limita por conversación y por
-minuto; las conversiones a ticket también tienen un límite diario por cliente.
+minuto; las llamadas al proveedor también se limitan por cliente durante una
+ventana móvil de una hora, compartida entre sus conversaciones. Las conversiones
+a ticket también tienen un límite diario por cliente.
 La cuota de conversaciones anónimas usa una huella HMAC de la dirección de
 conexión y nunca guarda la IP en claro.
 
 La IA generativa es opcional y está deshabilitada por defecto. Una confianza
 alta responde directamente; una confianza media solicita aclaración con opciones
-provenientes de FAQs reales; una confianza baja ofrece derivación y no inventa
-información. Sin proveedor habilitado, el flujo determinista funciona sin red.
+provenientes de FAQs reales. Si no hay una respuesta confiable, el contrato entrega
+preguntas verificadas como opciones y `available_actions` para explorar la ayuda,
+crear un ticket, pedir atención de un asesor o revisar tickets propios. Sin proveedor
+habilitado, el flujo determinista funciona sin red.
+
+Pedir un asesor inicia el borrador de un ticket con seguimiento. Si el visitante
+no inició sesión, primero se le pide autenticarse y se conserva la intención al
+vincular y retomar la conversación. El borrador reúne los datos y exige confirmación
+explícita antes de convertirlo. El ticket nace como `NUEVO` y sin responsable: la
+API no afirma que fue asignado. Las consultas de estado exponen
+`assignment_status` y el nombre del asesor solo cuando la asignación está presente
+en los datos del ticket.
 
 Las conversaciones conservan únicamente contexto operativo mínimo: intención,
 FAQ y categoría utilizadas, términos normalizados no sensibles, turnos,
@@ -231,11 +243,12 @@ La máquina de estados es:
 `ACTIVE → WAITING_CLARIFICATION → ESCALATED → CONVERTED_TO_TICKET`
 
 También contempla `CLOSED` y `EXPIRED`. Los estados terminales no aceptan nuevos
-mensajes. Las derivaciones pueden ser manuales o automáticas y son auditadas. El
-escalamiento repetido es idempotente; reset conserva el historial y limpia solo
-el contexto operativo. Convertir una conversación ya convertida devuelve 409 y
-no crea un segundo ticket. Los payloads inválidos devuelven 422 y los límites
-de abuso devuelven 429.
+mensajes. El endpoint legado `/escalate` marca la conversación como `ESCALATED`,
+pero no crea un ticket ni asigna a un asesor; el flujo de seguimiento recomendado
+es el borrador y la conversión confirmada descritos arriba. Reset conserva el
+historial y limpia solo el contexto operativo. Repetir la conversión con el mismo
+payload devuelve el ticket existente con 200; un payload distinto devuelve 409.
+Los payloads inválidos devuelven 422 y los límites de abuso devuelven 429.
 
 Endpoints disponibles:
 
@@ -245,7 +258,7 @@ Endpoints disponibles:
 - `POST /api/v1/chat/conversations/{conversation_id}/messages`: guardar el mensaje y obtener la respuesta FAQ del bot.
 - `POST /api/v1/chat/conversations/{conversation_id}/link-user`: asociar una conversación anónima al cliente autenticado.
 - `POST /api/v1/chat/conversations/{conversation_id}/reset`: reiniciar el contexto sin borrar el historial.
-- `POST /api/v1/chat/conversations/{conversation_id}/escalate`: derivar la conversación a atención humana.
+- `POST /api/v1/chat/conversations/{conversation_id}/escalate`: estado legado de escalamiento conversacional; no confirma asignación ni crea trabajo en la cola de tickets.
 - `POST /api/v1/chat/conversations/{conversation_id}/feedback`: registrar feedback útil/no útil de la FAQ utilizada.
 
 Ejemplo de uso:
@@ -269,11 +282,18 @@ curl -X POST http://localhost:8000/api/v1/chat/conversations/<conversation_id>/l
 
 ### RAG/IA con guardrails
 
-La Fase 12 usa la recuperación determinista existente como RAG local mínimo. No
+La Fase 12 usa la recuperación determinista existente como RAG local mínimo; no
 se agregan embeddings, almacén vectorial, FULLTEXT ni un servicio externo: el
 volumen y el modelo actual de FAQs no justifican esa infraestructura. Solo se
 recuperan FAQs publicadas, activas, vigentes y de categorías activas; el contexto
 se limita por cantidad de documentos y caracteres.
+
+Esto todavía no es una base RAG empresarial completa ni habilita un copiloto para
+Asesores o Supervisores. El chatbot público usa el corpus de FAQs de cliente y el
+backend rechaza el acceso de roles internos a sus conversaciones. Para separar el
+copiloto interno hacen falta fuentes operativas autorizadas, su clasificación por
+audiencia y permisos, y un proveedor/gateway de IA aprobado; no se debe reutilizar
+contenido interno como respuesta pública ni cargarlo sin esas fuentes.
 
 La generación está desacoplada mediante `AIProvider` y `NoopAIProvider`. El
 entorno incluye `CHATBOT_AI_*`, pero `CHATBOT_AI_ENABLED=false` y

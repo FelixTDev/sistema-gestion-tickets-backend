@@ -140,22 +140,132 @@ def test_anonymous_ticket_request_requires_login_then_structured_confirmation(
     assert duplicate.json()["id"] == converted.json()["id"]
 
 
-def test_natural_language_advisor_request_uses_explicit_escalation(
+def test_anonymous_advisor_request_requires_login_without_claiming_assignment(
     phase13_client,
 ) -> None:
     client, engine = phase13_client
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
-    client.post(endpoint, json={"content": "hola"})
 
     response = client.post(endpoint, json={"content": "quiero hablar con un asesor"})
 
     assert response.status_code == 200
-    assert response.json()["suggested_action"] == "CONTACT_ADVISOR"
-    assert response.json()["conversation_status"] == "ESCALATED"
+    assert response.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
+    assert response.json()["ticket_query"]["authentication_required"] is True
+    assert response.json()["conversation_status"] == "ACTIVE"
+    assert "no se ha creado una solicitud" in (
+        response.json()["bot_message"]["content"].casefold()
+    )
+    assert "ni se ha asignado un asesor" in (
+        response.json()["bot_message"]["content"].casefold()
+    )
     assert response.json()["offers_ticket"] is False
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    linked = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/link-user",
+        headers=headers,
+    )
+    resumed = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "continuar"},
+    )
+    assert linked.status_code == 200
+    assert resumed.status_code == 200
+    assert resumed.json()["ticket_draft"]["status"] == "COLLECTING"
+    assert "asesor asignado" in resumed.json()["bot_message"]["content"].casefold()
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+
+def test_authenticated_advisor_request_starts_confirmable_ticket_draft(
+    phase13_client,
+) -> None:
+    client, engine = phase13_client
+    token = login(client)
+    conversation = client.post(
+        "/api/v1/chat/conversations",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    response = client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": "quiero hablar con un asesor"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ticket_draft"]["status"] == "COLLECTING"
+    assert body["suggested_action"] == "ASK_CLARIFICATION"
+    assert body["conversation_status"] == "WAITING_CLARIFICATION"
+    assert (
+        "todavía no hay un asesor asignado" in body["bot_message"]["content"].casefold()
+    )
+    assert "confirmes" in body["bot_message"]["content"].casefold()
+
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+    category_reply = client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": f"Categoría: {category.name}"},
+    )
+    subject_reply = client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": "Asunto: Necesito orientación de un asesor"},
+    )
+    final_reply = client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": "Descripción: No puedo completar el trámite de mi tarjeta."},
+    )
+    assert category_reply.status_code == 200
+    assert subject_reply.status_code == 200
+    assert final_reply.status_code == 200
+    draft = final_reply.json()["ticket_draft"]
+    assert draft["status"] == "READY_FOR_CONFIRMATION"
+    assert final_reply.json()["suggested_action"] == "CONVERT_TO_TICKET"
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+    conversion = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/convert-to-ticket",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "category_id": draft["fields"]["category_id"],
+            "subject": draft["fields"]["subject"],
+            "description": draft["fields"]["description"],
+            "priority": draft["fields"]["priority"],
+        },
+    )
+    assert conversion.status_code == 201
+    assert conversion.json()["status"] == "NUEVO"
+    assert conversion.json()["assigned_advisor_id"] is None
+    assert conversion.json()["assigned_advisor_name"] is None
+
+    follow_up_conversation = client.post(
+        "/api/v1/chat/conversations",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    status_reply = client.post(
+        f"/api/v1/chat/conversations/{follow_up_conversation['id']}/messages",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "content": (
+                f"¿En qué estado está el ticket {conversion.json()['tracking_code']}?"
+            )
+        },
+    )
+    assert status_reply.status_code == 200
+    assert "pendiente de asignación" in (
+        status_reply.json()["bot_message"]["content"].casefold()
+    )
 
 
 class ContextCapturingAIProvider:
@@ -457,6 +567,12 @@ def test_retrieval_failure_returns_controlled_non_escalating_fallback(
     assert body["suggested_action"] == "NONE"
     assert body["offers_ticket"] is False
     assert body["conversation_status"] == "ACTIVE"
+    assert body["available_actions"] == [
+        "RETRY",
+        "CREATE_TICKET",
+        "CONTACT_ADVISOR",
+        "OFFICIAL_CHANNELS",
+    ]
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
@@ -490,6 +606,21 @@ def test_openapi_exposes_typed_actions_and_existing_conversion_contract() -> Non
     assert response_fields["suggested_action"]["$ref"].endswith(
         "/ChatbotSuggestedAction"
     )
+    assert response_fields["available_actions"]
+    assert "ChatbotAvailableAction" in str(response_fields["available_actions"])
+    assert components["ChatbotAvailableAction"]["enum"] == [
+        "BROWSE_KNOWLEDGE",
+        "CREATE_TICKET",
+        "CONTACT_ADVISOR",
+        "VIEW_MY_TICKETS",
+        "OFFICIAL_CHANNELS",
+        "RETRY",
+    ]
+    assert "assignment_status" in components["ChatbotTicketCard"]["properties"]
+    assert components["ChatbotTicketAssignmentStatus"]["enum"] == [
+        "ASSIGNED",
+        "UNASSIGNED",
+    ]
     assert components["ChatbotSuggestedAction"]["enum"] == [
         "NONE",
         "ASK_CLARIFICATION",

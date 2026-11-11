@@ -28,9 +28,11 @@ from app.modules.chatbot.schemas.chatbot import (
     BotMessageResponse,
     ChatbotAdvisorResponse,
     ChatbotAuthenticationAction,
+    ChatbotAvailableAction,
     ChatbotConvertedTicketSummary,
     ChatbotFeedbackMetrics,
     ChatbotSuggestedAction,
+    ChatbotTicketAssignmentStatus,
     ChatbotTicketCard,
     ChatbotTicketDraftStatus,
     ChatbotTicketPagination,
@@ -69,8 +71,10 @@ _STOP_WORDS = {
     "consultar",
     "de",
     "del",
+    "dime",
     "el",
     "en",
+    "es",
     "la",
     "las",
     "los",
@@ -80,10 +84,24 @@ _STOP_WORDS = {
     "para",
     "por",
     "que",
+    "cuanto",
+    "cuanta",
+    "cuantos",
+    "cuantas",
+    "son",
+    "un",
+    "una",
+    "unos",
+    "unas",
     "quiero",
     "y",
 }
 _MARKUP_PATTERN = re.compile(r"<[^>]+>|javascript\s*:", re.IGNORECASE)
+_ARITHMETIC_EXPRESSION_PATTERN = re.compile(
+    r"(?<![\w-])\d+\s*(?:\+|\*|/|×|x|−)\s*\d+(?![\w-])|"
+    r"(?<![\w-])\d+\s+-\s+\d+(?![\w-])",
+    re.IGNORECASE,
+)
 _TICKET_REQUEST_PATTERN = re.compile(
     r"\b(?:quiero|necesito|mejor|genera|generar|crea|crear|abre|abrir|"
     r"registra|registrar|levanta|solicito|solicitar|haz|hacer)\b"
@@ -102,7 +120,9 @@ _ADVISOR_REQUEST_PATTERNS = (
 )
 _UNHELPFUL_FOLLOW_UP_PATTERN = re.compile(
     r"\b(?:no\s+me\s+(?:ayudo|sirvio|resolvio|respondio)|"
-    r"no\s+fue\s+(?:util|suficiente)|no\s+me\s+ayuda)\b"
+    r"no\s+fue\s+(?:util|suficiente)|no\s+me\s+ayuda|"
+    r"no\s+(?:me\s+)?resuelves?\s*mi\s+duda|"
+    r"no\s+resolviste\s+mi\s+duda|sigo\s+sin\s+respuesta)\b"
 )
 _GREETING_PHRASES = frozenset(
     {
@@ -122,6 +142,10 @@ _GREETING_ANSWER = (
 _FAQ_DISCOVERY_PHRASES = (
     "preguntas frecuentes",
     "que preguntas me puedes dar",
+    "que preguntas te puedo hacer",
+    "que preguntas puedo preguntarte",
+    "que le puedo preguntar",
+    "que puedo preguntarte",
     "que preguntas puedes responder",
     "que preguntas puedo hacer",
     "que puedo preguntar",
@@ -312,15 +336,26 @@ class ChatbotService:
         )
         is_greeting = self._is_pure_greeting(clean_content)
         is_faq_discovery = self._is_faq_discovery_request(clean_content)
+        advisor_handoff_requested = is_advisor_request or (
+            (conversation.context_json or {}).get("advisor_handoff_requested") is True
+        )
         saved_draft = (conversation.context_json or {}).get(TICKET_DRAFT_CONTEXT_KEY)
         current_draft = self.ticket_drafts.read(session, saved_draft)
         resume_after_authentication = bool(
             current_user is not None
             and previous_bot_message is not None
-            and previous_bot_message.intent == "TICKET_CREATION_AUTHENTICATION_REQUIRED"
+            and previous_bot_message.intent
+            in {
+                "TICKET_CREATION_AUTHENTICATION_REQUIRED",
+                "ADVISOR_REQUEST_AUTHENTICATION_REQUIRED",
+            }
             and self.ticket_drafts.is_resume_request(clean_content)
         )
-        start_ticket_draft = is_ticket_request or resume_after_authentication
+        start_ticket_draft = (
+            is_ticket_request
+            or advisor_handoff_requested
+            or resume_after_authentication
+        )
         unrelated_special_message = not start_ticket_draft and (
             is_greeting or is_faq_discovery or is_unhelpful_follow_up
         )
@@ -354,11 +389,9 @@ class ChatbotService:
                     session, current_user, ticket_query_request
                 )
             elif ticket_draft_flow and current_user is None:
-                result = self._ticket_authentication_response(conversation)
-            elif is_advisor_request and is_ticket_request:
-                result = self._action_clarification_response(conversation)
-            elif is_advisor_request:
-                result = self._advisor_request_response(conversation)
+                result = self._ticket_authentication_response(
+                    conversation, for_advisor=advisor_handoff_requested
+                )
             elif ticket_draft_flow:
                 if conversation.user_id is None:
                     self.link_user(session, conversation.id, current_user)
@@ -368,7 +401,13 @@ class ChatbotService:
                     saved_draft,
                     start_requested=start_ticket_draft,
                 )
-                result = self._ticket_draft_response(conversation, ticket_draft_reply)
+                if ticket_draft_reply.cancelled:
+                    advisor_handoff_requested = False
+                result = self._ticket_draft_response(
+                    conversation,
+                    ticket_draft_reply,
+                    advisor_handoff=advisor_handoff_requested,
+                )
             elif is_unhelpful_follow_up:
                 result = self._unhelpful_follow_up_response(conversation)
                 result["context_seed"] = (
@@ -446,6 +485,60 @@ class ChatbotService:
             selected_match = None
             result = self._knowledge_unavailable_response()
 
+        if result.get("fallback_reason") == "LOW_CONFIDENCE":
+            try:
+                discovery, _ = self._faq_discovery_response(session)
+                result["options"] = discovery["options"]
+                result["candidate_faq_ids"] = discovery["candidate_faq_ids"]
+                result["sources"] = discovery["sources"]
+            except Exception:
+                result["options"] = []
+            result["available_actions"] = [
+                ChatbotAvailableAction.BROWSE_KNOWLEDGE,
+                ChatbotAvailableAction.CREATE_TICKET,
+                ChatbotAvailableAction.CONTACT_ADVISOR,
+                ChatbotAvailableAction.VIEW_MY_TICKETS,
+            ]
+        elif result.get("fallback_reason") == "KNOWLEDGE_UNAVAILABLE":
+            result["available_actions"] = [
+                ChatbotAvailableAction.RETRY,
+                ChatbotAvailableAction.CREATE_TICKET,
+                ChatbotAvailableAction.CONTACT_ADVISOR,
+                ChatbotAvailableAction.OFFICIAL_CHANNELS,
+            ]
+        elif result.get("intent") == "FOLLOW_UP_UNRESOLVED":
+            try:
+                discovery, _ = self._faq_discovery_response(session)
+                result["options"] = discovery["options"]
+                result["candidate_faq_ids"] = discovery["candidate_faq_ids"]
+                result["sources"] = discovery["sources"]
+            except Exception:
+                result["options"] = []
+            result["available_actions"] = [
+                ChatbotAvailableAction.BROWSE_KNOWLEDGE,
+                ChatbotAvailableAction.CREATE_TICKET,
+                ChatbotAvailableAction.CONTACT_ADVISOR,
+            ]
+        elif (
+            result.get("requires_clarification")
+            and not result.get("options")
+            and not ticket_draft_flow
+            and ticket_query_request is None
+            and not is_faq_discovery
+        ):
+            try:
+                discovery, _ = self._faq_discovery_response(session)
+                result["options"] = discovery["options"]
+                result["candidate_faq_ids"] = discovery["candidate_faq_ids"]
+                result["sources"] = discovery["sources"]
+            except Exception:
+                result["options"] = []
+            result["available_actions"] = [
+                ChatbotAvailableAction.BROWSE_KNOWLEDGE,
+                ChatbotAvailableAction.CREATE_TICKET,
+                ChatbotAvailableAction.CONTACT_ADVISOR,
+            ]
+
         result["response_source"] = result.get("response_source", "DETERMINISTIC")
         result["sources"] = result.get("sources", self._public_sources(matches[:1]))
         skip_ai = bool(
@@ -457,6 +550,7 @@ class ChatbotService:
             or (is_advisor_request and is_ticket_request)
             or is_greeting
             or is_faq_discovery
+            or self._contains_arithmetic_expression(clean_content)
             or selected_match is not None
             or current_draft.status
             in {
@@ -472,7 +566,15 @@ class ChatbotService:
                 else None
             )
         else:
-            requests_last_minute = self.conversations.count_recent_ai_messages(
+            provider_calls_by_actor_last_hour = (
+                self.conversations.count_recent_ai_provider_attempts_for_actor(
+                    session,
+                    user_id=conversation.user_id,
+                    anonymous_key=conversation.anonymous_key,
+                    since=datetime.now(UTC) - timedelta(hours=1),
+                )
+            )
+            requests_last_minute = self.conversations.count_recent_ai_provider_attempts(
                 session,
                 conversation.id,
                 datetime.now(UTC) - timedelta(minutes=1),
@@ -482,8 +584,11 @@ class ChatbotService:
                 user_message=ai_user_message,
                 matches=matches,
                 requests_last_minute=requests_last_minute,
-                responses_in_conversation=self.conversations.count_ai_messages(
-                    session, conversation.id
+                requests_by_actor_last_hour=provider_calls_by_actor_last_hour,
+                responses_in_conversation=(
+                    self.conversations.count_ai_provider_attempts(
+                        session, conversation.id
+                    )
                 ),
             )
             result["ai_trace"] = ai_outcome.trace
@@ -529,6 +634,9 @@ class ChatbotService:
                     "provider": ai_outcome.trace.get("provider"),
                     "model": ai_outcome.trace.get("model"),
                     "source_count": len(ai_outcome.sources),
+                    "input_tokens": ai_outcome.trace.get("input_tokens"),
+                    "output_tokens": ai_outcome.trace.get("output_tokens"),
+                    "total_tokens": ai_outcome.trace.get("total_tokens"),
                     "fallback": not ai_outcome.accepted,
                 },
                 dedupe_key=f"ai:{conversation.id}:{user_message.id}",
@@ -562,6 +670,10 @@ class ChatbotService:
                 )
             else:
                 context.pop(TICKET_DRAFT_CONTEXT_KEY, None)
+        if result.get("advisor_handoff_requested") is True:
+            context["advisor_handoff_requested"] = True
+        elif ticket_draft_reply is not None and ticket_draft_reply.cancelled:
+            context.pop("advisor_handoff_requested", None)
         pending_ticket_query = result.get("pending_ticket_query")
         if isinstance(pending_ticket_query, dict):
             context["pending_ticket_query"] = pending_ticket_query
@@ -693,6 +805,7 @@ class ChatbotService:
             response_source=result["response_source"],
             sources=result["sources"],
             ticket_query=result.get("ticket_query"),
+            available_actions=result.get("available_actions", []),
             ticket_draft=self.ticket_drafts.read(
                 session, conversation.context_json.get(TICKET_DRAFT_CONTEXT_KEY)
             ),
@@ -927,7 +1040,10 @@ class ChatbotService:
     def _find_matches(self, session: Session, content: str) -> list[FAQMatch]:
         query = self.normalize_text(content)
         query_terms = self._meaningful_tokens(query)
-        if not query_terms:
+        query_forms = self._token_forms(" ".join(query_terms))
+        # Avoid treating one shared product word (for example, “tarjeta”) as
+        # evidence that a FAQ answers an otherwise unrelated question.
+        if len(query_forms) < 2:
             return []
         matches: list[FAQMatch] = []
         for faq in self.faqs.list_active(session):
@@ -953,7 +1069,6 @@ class ChatbotService:
                     ]
                 )
             )
-            query_forms = self._token_forms(" ".join(query_terms))
             overlap = len(query_forms & field_tokens) / len(query_forms)
             keyword_overlap = len(query_forms & keyword_tokens) / len(query_forms)
             score = min(1.0, 0.55 * overlap + 0.45 * keyword_overlap)
@@ -1703,7 +1818,8 @@ class ChatbotService:
                 ticket=card,
             )
             answer = (
-                f"El ticket {ticket.tracking_code} está en estado {card.status_label}."
+                f"El ticket {ticket.tracking_code} está en estado "
+                f"{card.status_label}. {self._ticket_assignment_message(ticket)}"
             )
             return self._ticket_query_result(
                 answer, request.action, payload, resolved=True
@@ -1788,7 +1904,25 @@ class ChatbotService:
             priority_label=_TICKET_PRIORITY_LABELS[ticket.priority],
             updated_at=ticket.updated_at,
             assigned_advisor_name=ticket.assigned_advisor_name,
+            assignment_status=(
+                ChatbotTicketAssignmentStatus.ASSIGNED
+                if ticket.assigned_advisor_id is not None
+                else ChatbotTicketAssignmentStatus.UNASSIGNED
+            ),
         )
+
+    @staticmethod
+    def _ticket_assignment_message(ticket: TicketRead) -> str:
+        if ticket.assigned_advisor_id is not None:
+            if ticket.assigned_advisor_name:
+                return f"Está asignado a {ticket.assigned_advisor_name}."
+            return (
+                "El sistema confirma que ya tiene un asesor asignado, aunque no "
+                "puedo mostrar su nombre en este momento."
+            )
+        if ticket.status == TicketStatus.NUEVO:
+            return "Todavía está pendiente de asignación; ningún asesor lo ha tomado."
+        return "El sistema no reporta un asesor asignado actualmente."
 
     @staticmethod
     def _ticket_query_result(
@@ -1820,67 +1954,30 @@ class ChatbotService:
         }
 
     @staticmethod
-    def _action_clarification_response(
-        conversation: Conversation,
-    ) -> dict[str, object]:
-        return {
-            "answer": (
-                "¿Prefieres que solicite atención de un asesor o que preparemos "
-                "un ticket?"
-            ),
-            "intent": "ACTION_CLARIFICATION",
-            "faq_id": conversation.last_faq_id,
-            "category_name": None,
-            "confidence": conversation.last_confidence or 0.0,
-            "resolved": False,
-            "offers_ticket": False,
-            "requires_clarification": True,
-            "options": [],
-            "candidate_faq_ids": [],
-            "fallback_reason": None,
-            "escalated": False,
-            "match": None,
-            "response_source": "DETERMINISTIC",
-            "preserve_context": True,
-        }
-
-    @staticmethod
-    def _advisor_request_response(
-        conversation: Conversation,
-    ) -> dict[str, object]:
-        return {
-            "answer": (
-                "Entiendo. Solicitaré atención de un asesor para esta conversación. "
-                "No compartas contraseñas, PIN, CVV, OTP ni códigos de seguridad."
-            ),
-            "intent": "ADVISOR_REQUEST",
-            "faq_id": conversation.last_faq_id,
-            "category_name": None,
-            "confidence": conversation.last_confidence or 0.0,
-            "resolved": False,
-            "offers_ticket": False,
-            "requires_clarification": False,
-            "options": [],
-            "candidate_faq_ids": [],
-            "fallback_reason": "USER_REQUESTED",
-            "escalated": True,
-            "match": None,
-            "response_source": "DETERMINISTIC",
-            "preserve_context": True,
-            "suggested_action": ChatbotSuggestedAction.CONTACT_ADVISOR,
-        }
-
-    @staticmethod
     def _ticket_authentication_response(
         conversation: Conversation,
+        *,
+        for_advisor: bool = False,
     ) -> dict[str, object]:
-        return {
-            "answer": (
+        if for_advisor:
+            answer = (
+                "Puedo ayudarte a dejar una solicitud para que la atienda un asesor. "
+                "Inicia sesión o regístrate para preparar el ticket; todavía no se "
+                "ha creado una solicitud ni se ha asignado un asesor. Al volver, "
+                "podrás retomar esta conversación. Nunca compartas contraseñas, "
+                "PIN, CVV, OTP, tokens ni códigos de seguridad."
+            )
+            intent = "ADVISOR_REQUEST_AUTHENTICATION_REQUIRED"
+        else:
+            answer = (
                 "Para preparar y confirmar un ticket, inicia sesión o regístrate. "
                 "Después podrás vincular y retomar esta conversación. No compartas "
                 "contraseñas, OTP, CVV, tokens ni códigos de seguridad."
-            ),
-            "intent": "TICKET_CREATION_AUTHENTICATION_REQUIRED",
+            )
+            intent = "TICKET_CREATION_AUTHENTICATION_REQUIRED"
+        return {
+            "answer": answer,
+            "intent": intent,
             "faq_id": None,
             "category_name": None,
             "confidence": 1.0,
@@ -1895,6 +1992,7 @@ class ChatbotService:
             "response_source": "DETERMINISTIC",
             "preserve_context": True,
             "suggested_action": ChatbotSuggestedAction.AUTHENTICATION_REQUIRED,
+            "advisor_handoff_requested": for_advisor,
             "ticket_query": ChatbotTicketQuery(
                 query_type=ChatbotTicketQueryType.AUTHENTICATION_REQUIRED,
                 authentication_required=True,
@@ -1907,7 +2005,10 @@ class ChatbotService:
 
     @staticmethod
     def _ticket_draft_response(
-        conversation: Conversation, reply: TicketDraftReply
+        conversation: Conversation,
+        reply: TicketDraftReply,
+        *,
+        advisor_handoff: bool = False,
     ) -> dict[str, object]:
         if reply.cancelled:
             intent = "TICKET_DRAFT_CANCELLED"
@@ -1918,8 +2019,17 @@ class ChatbotService:
         else:
             intent = "TICKET_DRAFT"
             action = ChatbotSuggestedAction.ASK_CLARIFICATION
+        answer = reply.answer
+        if advisor_handoff and not reply.cancelled:
+            intent = "ADVISOR_TICKET_DRAFT"
+            answer = (
+                "Para que un asesor pueda atenderte, prepararemos una solicitud. "
+                "Todavía no hay un asesor asignado: el ticket solo se enviará "
+                "después de que revises y confirmes los datos. "
+                f"{reply.answer}"
+            )
         return {
-            "answer": reply.answer,
+            "answer": answer,
             "intent": intent,
             "faq_id": conversation.last_faq_id,
             "category_name": None,
@@ -1935,6 +2045,7 @@ class ChatbotService:
             "response_source": "DETERMINISTIC",
             "preserve_context": True,
             "suggested_action": action,
+            "advisor_handoff_requested": advisor_handoff and not reply.cancelled,
             "ticket_query": None,
             "counts_as_clarification": reply.requires_clarification,
         }
@@ -2196,7 +2307,15 @@ class ChatbotService:
 
     @classmethod
     def _meaningful_tokens(cls, value: str) -> list[str]:
-        return [token for token in cls._tokens(value) if token not in _STOP_WORDS]
+        return [
+            token
+            for token in cls._tokens(value)
+            if not token.isdigit() and token not in _STOP_WORDS
+        ]
+
+    @staticmethod
+    def _contains_arithmetic_expression(value: str) -> bool:
+        return bool(_ARITHMETIC_EXPRESSION_PATTERN.search(value))
 
     @classmethod
     def _token_forms(cls, value: str) -> set[str]:

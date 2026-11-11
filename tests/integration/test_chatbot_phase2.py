@@ -245,6 +245,8 @@ def test_owned_code_is_visible_but_other_and_missing_codes_are_indistinguishable
     assert own["ticket_query"]["ticket"]["status"] == "EN_PROCESO"
     assert own["ticket_query"]["ticket"]["status_label"] == "En proceso"
     assert own["ticket_query"]["ticket"]["priority_label"] == "Media"
+    assert own["ticket_query"]["ticket"]["assignment_status"] == "ASSIGNED"
+    assert "Asesor Demo" in own["bot_message"]["content"]
     assert other_code["bot_message"]["content"] == missing["bot_message"]["content"]
     assert other_code["ticket_query"]["found"] is False
     assert other_code["ticket_query"]["ticket"] is None
@@ -361,7 +363,35 @@ def test_status_and_client_waiting_queries_return_only_owner_tickets(
         "TCK-PENDING-001"
     ]
     assert status["ticket_query"]["ticket"]["status"] == "PENDIENTE_CLIENTE"
+    assert status["ticket_query"]["ticket"]["assignment_status"] == "ASSIGNED"
     assert ticket_snapshot(engine) == before
+
+
+def test_new_ticket_is_reported_as_waiting_assignment_not_already_assigned(
+    phase2_client,
+) -> None:
+    client, engine = phase2_client
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-UNASSIGNED-001",
+            status=TicketStatus.NUEVO,
+        )
+        session.commit()
+    token = login(client)
+
+    response = ask(
+        client,
+        "¿En qué estado está el ticket TCK-UNASSIGNED-001?",
+        token,
+    )
+
+    assert response["ticket_query"]["ticket"]["assignment_status"] == "UNASSIGNED"
+    answer = response["bot_message"]["content"].casefold()
+    assert "pendiente de asignación" in answer
+    assert "asignado" not in answer
 
 
 def test_code_reply_resumes_the_pending_status_query(phase2_client) -> None:

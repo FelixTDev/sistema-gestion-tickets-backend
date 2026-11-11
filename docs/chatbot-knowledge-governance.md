@@ -25,6 +25,14 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
   escalar automáticamente. La conversación conserva hasta dos mensajes breves
   de aclaración y, ante una referencia clara, usa el último mensaje del cliente
   y la respuesta anterior del asistente para recuperar el tema.
+- La búsqueda de FAQs descarta tokens numéricos y no resuelve una consulta con
+  una sola palabra compartida. Una expresión aritmética tampoco se envía al
+  proveedor aunque aparezca junto a una consulta bancaria.
+- El proveedor no recibe preguntas sin contexto oficial suficiente ni
+  coincidencias ambiguas. Cada oración de una respuesta generada debe tener
+  soporte léxico en las fuentes seleccionadas y cada número debe aparecer en
+  ese contexto; estas comprobaciones reducen invenciones, pero no equivalen a
+  una verificación semántica formal.
 - Las listas de opciones guardan IDs de FAQ activos. El usuario puede seleccionar
   el título o decir “la primera”, “opción 2”, etc. Solo se resuelve contra las
   opciones pendientes de esa conversación; no se interpreta una opción fuera de
@@ -59,6 +67,15 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
   defensas existentes de inyección, solicitud sensible, grounding y validación
   de salida siguen siendo obligatorias si se usa un proveedor de IA configurado.
   Esta entrega no habilita ni exige un proveedor externo ni una nueva API key.
+- Cuando OpenAI devuelve contadores de uso, el backend guarda input, output y
+  total de tokens en la traza técnica del mensaje y en metadatos de auditoría;
+  no guarda el contenido del prompt del proveedor dentro de esas métricas.
+- Las llamadas reales al proveedor tienen límites por minuto, por conversación y
+  por actor en una ventana móvil de una hora (`CHATBOT_AI_MAX_PROVIDER_CALLS_PER_ACTOR_PER_HOUR`,
+  20 por defecto). Para usuarios autenticados se agrupan todas sus conversaciones;
+  para uso anónimo se agrupan por la clave HMAC derivada de la IP de conexión. Los
+  rechazos por esos límites usan la respuesta determinística y no llaman al proveedor.
+  Las respuestas de caché no consumen cuota de proveedor.
 
 ## Fuente y vigencia de cada FAQ
 
