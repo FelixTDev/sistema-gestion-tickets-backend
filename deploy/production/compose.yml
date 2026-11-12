@@ -1,0 +1,163 @@
+name: gnb-backend-production
+
+x-app-environment: &app-environment
+  APP_NAME: ${APP_NAME:-Banco GNB Atención Digital API}
+  APP_ENV: production
+  DEBUG: "false"
+  DATABASE_URL: mysql+pymysql://${MYSQL_USER:?Set MYSQL_USER}:${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE:?Set MYSQL_DATABASE}
+  DATABASE_CONNECT_TIMEOUT_SECONDS: ${DATABASE_CONNECT_TIMEOUT_SECONDS:-5}
+  SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY}
+  TRUSTED_HOSTS: '["api.felixtintaya.com","localhost","127.0.0.1","api"]'
+  CORS_ORIGINS: '["https://portal.felixtintaya.com"]'
+  ATTACHMENT_STORAGE_DIR: /app/var/uploads
+  EMAIL_PROVIDER: smtp
+  SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:?Set SMTP_USERNAME}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:?Set SMTP_PASSWORD}
+  SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:?Set SMTP_FROM_EMAIL}
+  SMTP_USE_TLS: "false"
+  SMTP_STARTTLS: "true"
+  SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-10}
+  CHATBOT_AI_ENABLED: ${CHATBOT_AI_ENABLED:-false}
+  CHATBOT_AI_PROVIDER: ${CHATBOT_AI_PROVIDER:-noop}
+  CHATBOT_AI_MODEL: ${CHATBOT_AI_MODEL:-gpt-5.4-mini}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+x-app-service: &app-service
+  image: gnb-backend:production
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  environment: *app-environment
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  init: true
+  logging: &default-logging
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?Set MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER:?Set MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping --host=127.0.0.1 --user=root --password="$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    logging: *default-logging
+
+  migrate:
+    <<: *app-service
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    networks:
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  bootstrap:
+    <<: *app-service
+    command: ["python", "-m", "app.seed.production_bootstrap"]
+    profiles: ["bootstrap"]
+    stdin_open: true
+    tty: true
+    networks:
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  api:
+    <<: *app-service
+    command:
+      - fastapi
+      - run
+      - app/main.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --forwarded-allow-ips
+      - "*"
+    volumes:
+      - attachments_data:/app/var/uploads
+    networks:
+      - edge
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2.11.9-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *default-logging
+
+networks:
+  edge:
+    driver: bridge
+  data:
+    driver: bridge
+    internal: true
+
+volumes:
+  mysql_data:
+  attachments_data:
+  caddy_data:
+  caddy_config:
