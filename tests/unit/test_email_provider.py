@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from pydantic import SecretStr
@@ -101,6 +102,41 @@ def test_email_provider_configuration_is_strict_by_environment():
         smtp_settings(smtp_timeout_seconds=61)
 
 
+def test_frontend_base_url_rejects_credentials_and_non_http_schemes():
+    for base_url in (
+        "ftp://portal.example.test",
+        "https://user:password@portal.example.test",
+        "https://portal.example.test?redirect=elsewhere",
+        "https://portal.example.test:0",
+    ):
+        with pytest.raises(ValueError, match="FRONTEND_BASE_URL"):
+            smtp_settings(frontend_base_url=base_url)
+
+
+def test_production_frontend_base_url_requires_https():
+    with pytest.raises(ValueError, match="HTTPS"):
+        Settings(
+            app_env="production",
+            debug=False,
+            email_provider="smtp",
+            smtp_host="smtp.example.test",
+            smtp_from_email="no-reply@example.com",
+            frontend_base_url="http://portal.example.test",
+            secret_key=SECURE_KEY,
+        )
+
+    settings = Settings(
+        app_env="production",
+        debug=False,
+        email_provider="smtp",
+        smtp_host="smtp.example.test",
+        smtp_from_email="no-reply@example.com",
+        frontend_base_url="https://portal.example.test",
+        secret_key=SECURE_KEY,
+    )
+    assert settings.frontend_base_url == "https://portal.example.test"
+
+
 def test_debug_mode_is_rejected_outside_local_environments():
     with pytest.raises(ValueError, match="DEBUG"):
         Settings(
@@ -146,6 +182,7 @@ def test_smtp_starttls_transport_sends_token_only_in_body(monkeypatch, caplog):
     settings = smtp_settings(
         smtp_username="mailer-user",
         smtp_password=SecretStr("smtp-password"),
+        frontend_base_url="https://portal.example.test/",
     )
     provider = email_module.build_email_provider(settings)
     expires_at = datetime.now(UTC) + timedelta(minutes=30)
@@ -167,6 +204,13 @@ def test_smtp_starttls_transport_sends_token_only_in_body(monkeypatch, caplog):
     assert message["From"] == "no-reply@example.com"
     assert message["To"] == "client@example.com"
     assert token in message.get_body().get_content()
+    reset_url = next(
+        line
+        for line in message.get_body().get_content().splitlines()
+        if line.startswith("https://portal.example.test/")
+    )
+    assert urlsplit(reset_url).path == "/restablecer-acceso"
+    assert parse_qs(urlsplit(reset_url).query) == {"token": [token]}
     assert token not in str(message.items())
     assert expires_at.isoformat() in message.get_body().get_content()
     assert token not in caplog.text
@@ -198,3 +242,41 @@ def test_smtp_ssl_transport_supports_anonymous_server(monkeypatch):
     assert transport.started_tls_with is None
     assert transport.login_credentials is None
     assert "verification-token-secret" in transport.messages[0].get_body().get_content()
+
+
+def test_smtp_verification_email_links_to_frontend_route(monkeypatch):
+    monkeypatch.setattr(email_module.smtplib, "SMTP", FakeSmtpTransport)
+    settings = smtp_settings(frontend_base_url="https://portal.example.test")
+    provider = email_module.build_email_provider(settings)
+
+    provider.send_email_verification(
+        "client@example.com",
+        "verification-token-secret",
+        datetime.now(UTC) + timedelta(hours=24),
+    )
+
+    content = FakeSmtpTransport.instances[0].messages[0].get_body().get_content()
+    verification_url = next(
+        line
+        for line in content.splitlines()
+        if line.startswith("https://portal.example.test/")
+    )
+    assert urlsplit(verification_url).path == "/verificar-cuenta"
+    assert parse_qs(urlsplit(verification_url).query) == {
+        "token": ["verification-token-secret"]
+    }
+
+
+def test_smtp_emails_keep_token_compatibility_without_frontend_url(monkeypatch):
+    monkeypatch.setattr(email_module.smtplib, "SMTP", FakeSmtpTransport)
+    provider = email_module.build_email_provider(smtp_settings())
+
+    provider.send_password_reset(
+        "client@example.com",
+        "password-reset-token-secret",
+        datetime.now(UTC) + timedelta(minutes=30),
+    )
+
+    content = FakeSmtpTransport.instances[0].messages[0].get_body().get_content()
+    assert "password-reset-token-secret" in content
+    assert "http://localhost:5173/" not in content

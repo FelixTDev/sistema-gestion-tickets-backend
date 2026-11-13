@@ -1,10 +1,10 @@
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.core.config import get_settings
 from app.db.models import (
     FAQ,
     Conversation,
@@ -15,18 +15,17 @@ from app.db.models import (
     TicketComment,
     User,
 )
+from app.seed import production_bootstrap as production_bootstrap_module
 from app.seed.production_bootstrap import bootstrap_production_data
 
 
 @pytest.fixture
 def production_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[Session]:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("DEBUG", "false")
-    monkeypatch.setenv("SECRET_KEY", "test-secret-for-production-bootstrap-32")
-    monkeypatch.setenv("EMAIL_PROVIDER", "smtp")
-    monkeypatch.setenv("SMTP_HOST", "smtp.example.test")
-    monkeypatch.setenv("SMTP_FROM_EMAIL", "support@example.test")
-    get_settings.cache_clear()
+    monkeypatch.setattr(
+        production_bootstrap_module,
+        "get_settings",
+        lambda: SimpleNamespace(app_env="production"),
+    )
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
     try:
@@ -35,7 +34,6 @@ def production_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[Session]:
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
-        get_settings.cache_clear()
 
 
 def test_bootstrap_creates_only_minimum_production_data(
@@ -44,11 +42,11 @@ def test_bootstrap_creates_only_minimum_production_data(
     email, faq_count = bootstrap_production_data(
         production_session,
         full_name="Supervisor Académico",
-        email="SUPERVISOR@example.test",
+        email="SUPERVISOR@example.com",
         password="SecurePass123",
     )
 
-    assert email == "supervisor@example.test"
+    assert email == "supervisor@example.com"
     assert faq_count > 0
     assert production_session.exec(select(Role)).all()
     assert production_session.exec(select(TicketCategory)).all()
@@ -68,7 +66,7 @@ def test_bootstrap_refuses_to_overwrite_an_existing_account(
     bootstrap_production_data(
         production_session,
         full_name="Supervisor Académico",
-        email="supervisor@example.test",
+        email="supervisor@example.com",
         password="SecurePass123",
     )
 
@@ -76,7 +74,7 @@ def test_bootstrap_refuses_to_overwrite_an_existing_account(
         bootstrap_production_data(
             production_session,
             full_name="Otro Supervisor",
-            email="supervisor@example.test",
+            email="supervisor@example.com",
             password="DifferentPass456",
         )
 

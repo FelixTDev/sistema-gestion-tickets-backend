@@ -3,6 +3,7 @@ import ssl
 from datetime import datetime
 from email.message import EmailMessage
 from typing import Protocol
+from urllib.parse import urlencode
 
 from app.core.config import Settings
 
@@ -40,33 +41,44 @@ class SmtpEmailProvider:
         self.username = settings.smtp_username
         self.password = settings.smtp_password
         self.from_email = settings.smtp_from_email or ""
+        self.frontend_base_url = settings.frontend_base_url
         self.use_tls = settings.smtp_use_tls
         self.starttls = settings.smtp_starttls
         self.timeout = settings.smtp_timeout_seconds
 
     def send_password_reset(self, email: str, token: str, expires_at: datetime) -> None:
+        reset_url = self._frontend_token_url("restablecer-acceso", token)
+        instructions = (
+            f"Abre este enlace para restablecer tu contraseña:\n\n{reset_url}"
+            if reset_url
+            else f"Usa el siguiente token para restablecer tu contraseña:\n\n{token}"
+        )
         self._send(
             recipient=email,
             subject="Recuperación de contraseña",
-            body=(
-                "Usa el siguiente token para restablecer tu contraseña:\n\n"
-                f"{token}\n\n"
-                f"Expira en: {expires_at.isoformat()}"
-            ),
+            body=(f"{instructions}\n\nExpira en: {expires_at.isoformat()}"),
         )
 
     def send_email_verification(
         self, email: str, token: str, expires_at: datetime
     ) -> None:
+        verification_url = self._frontend_token_url("verificar-cuenta", token)
+        instructions = (
+            f"Abre este enlace para verificar tu correo:\n\n{verification_url}"
+            if verification_url
+            else f"Usa el siguiente token para verificar tu correo:\n\n{token}"
+        )
         self._send(
             recipient=email,
             subject="Verificación de correo electrónico",
-            body=(
-                "Usa el siguiente token para verificar tu correo:\n\n"
-                f"{token}\n\n"
-                f"Expira en: {expires_at.isoformat()}"
-            ),
+            body=(f"{instructions}\n\nExpira en: {expires_at.isoformat()}"),
         )
+
+    def _frontend_token_url(self, route: str, token: str) -> str | None:
+        if self.frontend_base_url is None:
+            return None
+        query = urlencode({"token": token})
+        return f"{self.frontend_base_url}/{route}?{query}"
 
     def _send(self, *, recipient: str, subject: str, body: str) -> None:
         message = EmailMessage()

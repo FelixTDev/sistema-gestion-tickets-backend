@@ -24,7 +24,9 @@ de Docker y el seed demo nunca se ejecuta.
    valores hexadecimales también evitan problemas de escape en `DATABASE_URL`.
    Completa `SMTP_USERNAME`, `SMTP_PASSWORD` y `SMTP_FROM_EMAIL` con el login,
    la clave SMTP y el remitente que ya verificaste en Brevo. No uses la API key
-   de Brevo en `SMTP_PASSWORD`.
+   de Brevo en `SMTP_PASSWORD`. `FRONTEND_BASE_URL` usa por defecto
+   `https://portal.felixtintaya.com`; cámbialo solo si el portal se publica en
+   otro dominio HTTPS.
 
 5. Comprueba que Compose puede interpolar la configuración sin mostrarla:
 

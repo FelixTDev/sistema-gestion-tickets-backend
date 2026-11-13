@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import EmailStr, SecretStr, TypeAdapter, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +21,7 @@ class Settings(BaseSettings):
     password_reset_token_expire_minutes: int = 30
     email_verification_token_expire_hours: int = 24
     email_provider: str = "noop"
+    frontend_base_url: str | None = None
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_username: str | None = None
@@ -118,6 +120,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_settings(self) -> "Settings":
+        environment = self.app_env.strip().casefold()
         if self.jwt_algorithm != "HS256":
             raise ValueError("Solo se permite el algoritmo JWT HS256")
         if self.password_min_length < 8:
@@ -142,6 +145,37 @@ class Settings(BaseSettings):
         self.smtp_from_email = (
             self.smtp_from_email.strip() if self.smtp_from_email else None
         )
+        self.frontend_base_url = (
+            self.frontend_base_url.strip().rstrip("/")
+            if self.frontend_base_url
+            else None
+        )
+        if self.frontend_base_url:
+            try:
+                frontend_url = urlsplit(self.frontend_base_url)
+                frontend_port = frontend_url.port
+            except ValueError as error:
+                raise ValueError("FRONTEND_BASE_URL no es una URL válida") from error
+            if (
+                frontend_url.scheme not in {"http", "https"}
+                or not frontend_url.hostname
+                or frontend_url.username is not None
+                or frontend_url.password is not None
+                or frontend_url.query
+                or frontend_url.fragment
+                or frontend_port == 0
+            ):
+                raise ValueError(
+                    "FRONTEND_BASE_URL debe ser una URL HTTP(S) sin credenciales, "
+                    "query ni fragmento"
+                )
+            if (
+                environment in {"staging", "production"}
+                and frontend_url.scheme != "https"
+            ):
+                raise ValueError(
+                    "FRONTEND_BASE_URL debe usar HTTPS en staging/production"
+                )
         if self.smtp_password is not None and not self.smtp_password.get_secret_value():
             self.smtp_password = None
         if not 1 <= self.smtp_port <= 65_535:
@@ -152,7 +186,6 @@ class Settings(BaseSettings):
             raise ValueError("SMTP_USE_TLS y SMTP_STARTTLS son mutuamente excluyentes")
         if bool(self.smtp_username) != bool(self.smtp_password):
             raise ValueError("SMTP_USERNAME y SMTP_PASSWORD deben configurarse juntos")
-        environment = self.app_env.strip().casefold()
         if environment in {"production", "staging"} and self.debug:
             raise ValueError("DEBUG debe estar deshabilitado en staging/production")
         if self.email_provider == "noop" and environment not in {
