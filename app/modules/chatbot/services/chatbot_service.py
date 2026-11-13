@@ -32,6 +32,7 @@ from app.modules.chatbot.schemas.chatbot import (
     ChatbotAvailableAction,
     ChatbotConvertedTicketSummary,
     ChatbotFeedbackMetrics,
+    ChatbotIntent,
     ChatbotSuggestedAction,
     ChatbotTicketAssignmentStatus,
     ChatbotTicketCard,
@@ -40,6 +41,10 @@ from app.modules.chatbot.schemas.chatbot import (
     ChatbotTicketPagination,
     ChatbotTicketQuery,
     ChatbotTicketQueryType,
+    ChatbotUI,
+    ChatbotUIAction,
+    ChatbotUIOption,
+    ChatbotUIType,
     ChatFeedbackCreate,
     ChatFeedbackRead,
     ChatMessageRead,
@@ -100,16 +105,54 @@ _STOP_WORDS = {
     "quiero",
     "y",
 }
+_FAQ_SUBCATEGORY_STOP_WORDS = _STOP_WORDS | {
+    "abrir",
+    "afiliar",
+    "como",
+    "configurar",
+    "donde",
+    "hacer",
+    "habilitar",
+    "ingresar",
+    "mostrar",
+    "olvidar",
+    "puedo",
+    "recuperar",
+    "saber",
+    "solicitar",
+    "usar",
+    "ver",
+}
+_FAQ_SUBCATEGORY_TAG_STOP_WORDS = {
+    "ayuda",
+    "atencion",
+    "banco",
+    "banca",
+    "digital",
+    "informacion",
+    "servicio",
+    "servicios",
+    "solicitud",
+}
 _MARKUP_PATTERN = re.compile(r"<[^>]+>|javascript\s*:", re.IGNORECASE)
 _ARITHMETIC_EXPRESSION_PATTERN = re.compile(
     r"(?<![\w-])\d+\s*(?:\+|\*|/|×|x|−)\s*\d+(?![\w-])|"
     r"(?<![\w-])\d+\s+-\s+\d+(?![\w-])",
     re.IGNORECASE,
 )
+_OBVIOUS_OUT_OF_SCOPE_PATTERN = re.compile(
+    r"\b(?:clima|chiste|cultura\s+general|programar|programaci[oó]n|receta|"
+    r"pel[ií]cula|canci[oó]n)\b|"
+    r"\bcapital\s+de\s+(?:francia|per[uú]|espa[nñ]a|argentina|chile|colombia|"
+    r"ecuador|bolivia|uruguay)\b",
+    re.IGNORECASE,
+)
 _TICKET_REQUEST_PATTERN = re.compile(
     r"\b(?:quiero|necesito|mejor|genera|generar|crea|crear|abre|abrir|"
     r"registra|registrar|levanta|solicito|solicitar|haz|hacer)\b"
-    r".{0,40}\b(?:ticket|caso|solicitud|reclamo)\b"
+    r".{0,40}\b(?:ticket|caso|solicitud|reclamo)\b|"
+    r"\b(?:reportar|reporto|registrar)\b.{0,40}\b"
+    r"(?:error|incidente|problema|falla)\b"
 )
 _ADVISOR_REQUEST_PATTERNS = (
     re.compile(
@@ -121,12 +164,18 @@ _ADVISOR_REQUEST_PATTERNS = (
         r".{0,35}\b(?:asesor|persona|agente|representante)\b"
     ),
     re.compile(r"\batencion\s+humana\b"),
+    re.compile(
+        r"\b(?:quiero|quisiera|necesito|deseo|prefiero)\s+"
+        r"(?:conversar|hablar)\s+con\s+(?:alguien|una\s+persona)\b"
+    ),
 )
 _UNHELPFUL_FOLLOW_UP_PATTERN = re.compile(
     r"\b(?:no\s+me\s+(?:ayudo|sirvio|resolvio|respondio)|"
     r"no\s+fue\s+(?:util|suficiente)|no\s+me\s+ayuda|"
     r"no\s+(?:me\s+)?resuelves?\s*mi\s+duda|"
-    r"no\s+resolviste\s+mi\s+duda|sigo\s+sin\s+respuesta)\b"
+    r"no\s+resolviste\s+mi\s+duda|sigo\s+sin\s+respuesta|"
+    r"eso\s+no\s+era\s+lo\s+que\s+(?:estaba\s+)?preguntando|"
+    r"no\s+era\s+eso\s+lo\s+que\s+preguntaba)\b"
 )
 _GREETING_PHRASES = frozenset(
     {
@@ -140,8 +189,10 @@ _GREETING_PHRASES = frozenset(
     }
 )
 _GREETING_ANSWER = (
-    "¡Hola! ¿En qué puedo ayudarte hoy? Puedo orientarte sobre preguntas "
-    "frecuentes o el seguimiento de una solicitud."
+    "¡Hola! Soy el asistente virtual del prototipo académico de gestión de "
+    "tickets de Banco GNB Perú. No es un canal bancario oficial. ¿En qué "
+    "puedo ayudarte hoy? Puedo orientarte sobre preguntas frecuentes o el "
+    "seguimiento de una solicitud."
 )
 _FAQ_DISCOVERY_PHRASES = (
     "preguntas frecuentes",
@@ -185,6 +236,7 @@ _CONVERSATION_MENU_COMMANDS = frozenset(
         "regresar a las opciones",
         "regresar al menu",
         "regresar al inicio",
+        "regresa al inicio",
         "quiero volver",
         "quiero regresar",
         "quiero volver al menu",
@@ -219,6 +271,11 @@ _TRANSIENT_CONVERSATION_CONTEXT_KEYS = (
     "pending_ticket_query",
     "clarification_attempts",
     "pending_faq_ids",
+    "pending_faq_category_ids",
+    "pending_faq_category_id",
+    "pending_faq_subcategories",
+    "pending_faq_subcategory_id",
+    "pending_ui_menu_id",
     "clarification_context",
     "advisor_handoff_requested",
     "last_terms",
@@ -351,19 +408,55 @@ class ChatbotService:
         self,
         session: Session,
         conversation_id: str,
-        content: str,
+        content: str | None,
         current_user: AuthenticatedUser | None,
+        *,
+        option_id: str | None = None,
     ) -> BotMessageResponse:
         self._require_public_actor(current_user)
         conversation = self._authorized_conversation(
             session, conversation_id, current_user
         )
         self._ensure_message_allowed(conversation)
+        navigation_target = None
+        selected_faq_subcategory = None
+        if option_id is not None and option_id.startswith("nav:"):
+            navigation_target = self._resolve_faq_navigation_target(
+                conversation, option_id
+            )
+            content = {
+                "main": "mostrar menú",
+                "faq_categories": "volver a categorías de preguntas frecuentes",
+                "faq_subcategories": "volver a temas de preguntas frecuentes",
+            }[navigation_target]
+        elif option_id is not None and option_id.startswith("subcategory:"):
+            selected_faq_subcategory = self._resolve_faq_subcategory_option(
+                session, conversation, option_id
+            )
+            content = str(selected_faq_subcategory["label"])
+        elif option_id is not None:
+            content = self._resolve_option_id(session, conversation, option_id)
+        if content is None:
+            raise HTTPException(status_code=422, detail="Mensaje no válido")
         clean_content = self._clean_content(content)
-        is_faq_discovery = self._is_faq_discovery_request(clean_content)
+        is_faq_category_request = option_id == "menu:faq"
+        selected_faq_category_id = (
+            option_id.removeprefix("category:")
+            if option_id is not None and option_id.startswith("category:")
+            else None
+        )
+        is_faq_discovery = (
+            not is_faq_category_request
+            and selected_faq_category_id is None
+            and selected_faq_subcategory is None
+            and navigation_target is None
+            and self._is_faq_discovery_request(clean_content)
+        )
         lifecycle_action = (
-            None
-            if is_faq_discovery
+            ChatbotSuggestedAction.SHOW_MENU
+            if navigation_target == "main"
+            else None
+            if navigation_target is not None or is_faq_discovery
             else self._conversation_lifecycle_action(clean_content)
         )
         if lifecycle_action is None:
@@ -428,7 +521,13 @@ class ChatbotService:
         )
         unrelated_special_message = lifecycle_action is not None or (
             not start_ticket_draft
-            and (is_greeting or is_faq_discovery or is_unhelpful_follow_up)
+            and (
+                is_greeting
+                or is_faq_discovery
+                or is_faq_category_request
+                or selected_faq_category_id is not None
+                or is_unhelpful_follow_up
+            )
         )
         ticket_draft_flow = (
             not unrelated_special_message
@@ -495,12 +594,36 @@ class ChatbotService:
                         }
                     ),
                 )
-                if lifecycle_action == ChatbotSuggestedAction.SHOW_MENU:
-                    menu_discovery, menu_matches = self._faq_discovery_response(session)
-                    result["options"] = menu_discovery["options"]
-                    result["candidate_faq_ids"] = menu_discovery["candidate_faq_ids"]
-                    result["sources"] = menu_discovery["sources"]
-                    matches = menu_matches
+            elif navigation_target == "faq_categories":
+                result = self._faq_category_discovery_response(session)
+            elif navigation_target == "faq_subcategories":
+                category_id = (conversation.context_json or {}).get(
+                    "pending_faq_category_id"
+                )
+                result, matches = self._faq_subcategory_discovery_response(
+                    session, category_id=str(category_id)
+                )
+            elif is_faq_category_request:
+                result = self._faq_category_discovery_response(session)
+            elif selected_faq_category_id is not None:
+                result, matches = self._faq_subcategory_discovery_response(
+                    session, category_id=selected_faq_category_id
+                )
+            elif selected_faq_subcategory is not None:
+                selected_faq_ids = {
+                    faq_id
+                    for faq_id in selected_faq_subcategory.get("faq_ids", [])
+                    if isinstance(faq_id, str)
+                }
+                result, matches = self._faq_discovery_response(
+                    session, faq_ids=selected_faq_ids
+                )
+                result["candidate_faq_category_id"] = selected_faq_subcategory.get(
+                    "category_id"
+                )
+                result["candidate_faq_subcategory_id"] = selected_faq_subcategory.get(
+                    "id"
+                )
             elif ticket_query_request is not None:
                 result = self._ticket_query_response(
                     session, current_user, ticket_query_request
@@ -667,6 +790,7 @@ class ChatbotService:
                 and not matches
                 and not is_greeting
                 and not is_faq_discovery
+                and navigation_target is None
                 and lifecycle_action is None
             )
         )
@@ -678,7 +802,12 @@ class ChatbotService:
             or (is_advisor_request and is_ticket_request)
             or is_greeting
             or is_faq_discovery
+            or is_faq_category_request
+            or selected_faq_category_id is not None
+            or selected_faq_subcategory is not None
+            or navigation_target is not None
             or self._contains_arithmetic_expression(clean_content)
+            or self._is_obviously_out_of_scope(clean_content)
             or selected_match is not None
             or (
                 not paused_draft
@@ -711,30 +840,63 @@ class ChatbotService:
                 conversation.id,
                 datetime.now(UTC) - timedelta(minutes=1),
             )
+            responses_in_conversation = self.conversations.count_ai_provider_attempts(
+                session, conversation.id
+            )
+            retrieval_trace: dict[str, object] = {}
+            if not conversational_ai and self.rag.embedding_provider is not None:
+                retrieval_candidates = self._retrieval_candidates(session, matches)
+                matches, retrieval_trace = self.rag.retrieve_hybrid(
+                    user_message=ai_user_message,
+                    lexical_matches=matches,
+                    candidates=retrieval_candidates,
+                    requests_last_minute=requests_last_minute,
+                    requests_by_actor_last_hour=provider_calls_by_actor_last_hour,
+                    responses_in_conversation=responses_in_conversation,
+                )
             ai_outcome = self.rag.generate(
                 conversation_id=conversation.id,
                 user_message=ai_user_message,
                 matches=matches,
                 requests_last_minute=requests_last_minute,
                 requests_by_actor_last_hour=provider_calls_by_actor_last_hour,
-                responses_in_conversation=(
-                    self.conversations.count_ai_provider_attempts(
-                        session, conversation.id
-                    )
-                ),
+                responses_in_conversation=responses_in_conversation,
                 grounding_required=not conversational_ai,
             )
+            ai_outcome.trace.update(retrieval_trace)
             result["ai_trace"] = ai_outcome.trace
             if ai_outcome.accepted:
                 result["answer"] = ai_outcome.answer
                 result["response_source"] = "AI"
+                result["intent_classification"] = ai_outcome.intent_classification
                 result["sources"] = self._public_sources(ai_outcome.sources)
                 if not conversational_ai:
+                    selected_source_ids = {
+                        source.source_id for source in ai_outcome.sources
+                    }
+                    selected_match = next(
+                        (
+                            match
+                            for match in matches
+                            if match.faq.id in selected_source_ids
+                        ),
+                        matches[0] if matches else None,
+                    )
+                    if selected_match is not None:
+                        result["match"] = selected_match
+                        result["faq_id"] = selected_match.faq.id
+                        result["intent"] = selected_match.intent
+                        result["confidence"] = selected_match.score
+                        result["category_name"] = selected_match.category_name or (
+                            self._category_name(session, selected_match.faq.category_id)
+                        )
                     result["resolved"] = True
                     result["offers_ticket"] = False
                     result["requires_clarification"] = False
+                    result["fallback_reason"] = None
                     result["options"] = []
                     result["candidate_faq_ids"] = []
+                    result["available_actions"] = []
             elif ai_outcome.trace.get("provider_status") == "GENERATED":
                 result["fallback_reason"] = ai_outcome.reason
             action = (
@@ -818,7 +980,15 @@ class ChatbotService:
             context.pop("pending_ticket_query", None)
         if ticket_draft_reply is not None:
             context.pop("clarification_attempts", None)
-            context.pop("pending_faq_ids", None)
+            for key in (
+                "pending_faq_ids",
+                "pending_faq_category_ids",
+                "pending_faq_category_id",
+                "pending_faq_subcategories",
+                "pending_faq_subcategory_id",
+                "pending_ui_menu_id",
+            ):
+                context.pop(key, None)
             context.pop("clarification_context", None)
         else:
             if result["requires_clarification"] and result.get(
@@ -830,8 +1000,52 @@ class ChatbotService:
             elif result["resolved"]:
                 context["clarification_attempts"] = 0
             if result["requires_clarification"]:
-                context["pending_faq_ids"] = result.get("candidate_faq_ids", [])
-                if result.get("intent") == "FAQ_DISCOVERY":
+                intent = result.get("intent")
+                if intent == "FAQ_CATEGORY_DISCOVERY":
+                    context.pop("pending_faq_ids", None)
+                    context["pending_faq_category_ids"] = result.get(
+                        "candidate_faq_category_ids", []
+                    )
+                    for key in (
+                        "pending_faq_category_id",
+                        "pending_faq_subcategories",
+                        "pending_faq_subcategory_id",
+                    ):
+                        context.pop(key, None)
+                    context["pending_ui_menu_id"] = "faq_categories"
+                elif intent == "FAQ_SUBCATEGORY_DISCOVERY":
+                    context.pop("pending_faq_ids", None)
+                    context.pop("pending_faq_category_ids", None)
+                    context["pending_faq_category_id"] = result.get(
+                        "candidate_faq_category_id"
+                    )
+                    context["pending_faq_subcategories"] = result.get(
+                        "candidate_faq_subcategories", []
+                    )
+                    context.pop("pending_faq_subcategory_id", None)
+                    context["pending_ui_menu_id"] = "faq_subcategories"
+                elif result.get("candidate_faq_subcategory_id"):
+                    context["pending_faq_ids"] = result.get("candidate_faq_ids", [])
+                    context["pending_faq_subcategory_id"] = result.get(
+                        "candidate_faq_subcategory_id"
+                    )
+                    context["pending_faq_category_id"] = result.get(
+                        "candidate_faq_category_id"
+                    )
+                    context["pending_ui_menu_id"] = "faq_questions"
+                elif result.get("candidate_faq_ids") and result.get("options"):
+                    context["pending_faq_ids"] = result.get("candidate_faq_ids", [])
+                    context.pop("pending_faq_category_ids", None)
+                    context["pending_ui_menu_id"] = (
+                        "faq_discovery"
+                        if intent == "FAQ_DISCOVERY"
+                        else "faq_suggestions"
+                    )
+                else:
+                    context.pop("pending_faq_ids", None)
+                    context.pop("pending_faq_category_ids", None)
+                    context.pop("pending_ui_menu_id", None)
+                if intent in {"FAQ_DISCOVERY", "FAQ_SUBCATEGORY_DISCOVERY"}:
                     context["clarification_context"] = []
                 else:
                     previous = context.get("clarification_context", [])
@@ -851,7 +1065,15 @@ class ChatbotService:
                         clean_content[:250],
                     ][-2:]
             else:
-                context.pop("pending_faq_ids", None)
+                for key in (
+                    "pending_faq_ids",
+                    "pending_faq_category_ids",
+                    "pending_faq_category_id",
+                    "pending_faq_subcategories",
+                    "pending_faq_subcategory_id",
+                    "pending_ui_menu_id",
+                ):
+                    context.pop(key, None)
                 context.pop("clarification_context", None)
         if not result.get("preserve_context"):
             context["last_terms"] = self._meaningful_tokens(search_content)[:20]
@@ -972,6 +1194,8 @@ class ChatbotService:
             source_category=result["category_name"],
             requires_clarification=result["requires_clarification"],
             clarification_options=result["options"],
+            intent_classification=result.get("intent_classification"),
+            ui=self._ui_for_result(session, result, conversation.context_json or {}),
             suggested_action=result.get(
                 "suggested_action", self._suggested_action(result)
             ),
@@ -1285,6 +1509,27 @@ class ChatbotService:
             reverse=True,
         )
 
+    def _retrieval_candidates(
+        self, session: Session, lexical_matches: list[FAQMatch]
+    ) -> list[FAQMatch]:
+        lexical_by_id = {match.faq.id: match for match in lexical_matches}
+        candidates: list[FAQMatch] = []
+        for faq in self._available_public_faqs(session):
+            lexical = lexical_by_id.get(faq.id)
+            candidates.append(
+                FAQMatch(
+                    faq=faq,
+                    score=lexical.score if lexical is not None else 0.0,
+                    intent=(
+                        lexical.intent if lexical is not None else self._intent_for(faq)
+                    ),
+                    category_name=(
+                        lexical.category_name if lexical is not None else None
+                    ),
+                )
+            )
+        return candidates
+
     def _response_for_matches(
         self, conversation: Conversation, matches: list[FAQMatch]
     ) -> dict[str, object]:
@@ -1382,14 +1627,197 @@ class ChatbotService:
             "response_source": "FALLBACK",
         }
 
-    def _faq_discovery_response(
-        self, session: Session
-    ) -> tuple[dict[str, object], list[FAQMatch]]:
-        available_faqs = [
+    def _available_public_faqs(self, session: Session) -> list[FAQ]:
+        return [
             faq
             for faq in self.faqs.list_active(session)
             if has_verified_official_source(faq.source_url, faq.source_verified_at)
+            and not detect_prompt_injection(
+                f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
+            )
         ]
+
+    def _available_faq_categories(self, session: Session) -> list[tuple[str, str]]:
+        categories: dict[str, str] = {}
+        for faq in self._available_public_faqs(session):
+            name = self._category_name(session, faq.category_id)
+            if name:
+                categories.setdefault(faq.category_id, name)
+        return sorted(categories.items(), key=lambda category: category[1].casefold())
+
+    def _faq_category_discovery_response(self, session: Session) -> dict[str, object]:
+        categories = self._available_faq_categories(session)[:19]
+        labels = [name for _, name in categories]
+        return {
+            "answer": (
+                "Elige una categoría para ver preguntas frecuentes publicadas y "
+                "verificadas."
+                if categories
+                else "No hay preguntas frecuentes verificadas disponibles ahora."
+            ),
+            "intent": "FAQ_CATEGORY_DISCOVERY",
+            "faq_id": None,
+            "category_name": None,
+            "confidence": 1.0,
+            "resolved": not categories,
+            "offers_ticket": False,
+            "requires_clarification": bool(categories),
+            "options": labels,
+            "candidate_faq_ids": [],
+            "candidate_faq_category_ids": [
+                category_id for category_id, _ in categories
+            ],
+            "fallback_reason": None,
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "sources": [],
+            "counts_as_clarification": False,
+        }
+
+    def _faq_subcategory_discovery_response(
+        self, session: Session, *, category_id: str
+    ) -> tuple[dict[str, object], list[FAQMatch]]:
+        category_name = self._category_name(session, category_id)
+        faqs = [
+            faq
+            for faq in self._available_public_faqs(session)
+            if faq.category_id == category_id
+        ]
+        if category_name is None or not faqs:
+            raise HTTPException(
+                status_code=409,
+                detail="La opción ya no está disponible en esta conversación",
+            )
+
+        grouped: dict[str, dict[str, object]] = {}
+        for faq in faqs:
+            label = self._faq_subcategory_label(faq, category_name)
+            group_key = normalize_text(label)
+            group = grouped.setdefault(group_key, {"label": label, "faq_ids": []})
+            faq_ids = group["faq_ids"]
+            if isinstance(faq_ids, list):
+                faq_ids.append(faq.id)
+
+        # A single topic adds no useful navigation step, so retain the existing
+        # category -> FAQ flow for catalogs without multiple verified topics.
+        if len(grouped) < 2:
+            return self._faq_discovery_response(session, category_id=category_id)
+
+        subcategories: list[dict[str, object]] = []
+        for key, group in sorted(
+            grouped.items(), key=lambda item: str(item[1]["label"]).casefold()
+        )[:18]:
+            identity = hashlib.sha256(f"{category_id}:{key}".encode()).hexdigest()[:16]
+            subcategories.append(
+                {
+                    "id": f"subcategory:{identity}",
+                    "label": group["label"],
+                    "category_id": category_id,
+                    "faq_ids": group["faq_ids"],
+                }
+            )
+
+        matches = [
+            FAQMatch(
+                faq=faq,
+                score=1.0,
+                intent=self._intent_for(faq),
+                category_name=category_name,
+            )
+            for faq in faqs
+        ]
+        labels = [str(item["label"]) for item in subcategories]
+        return (
+            {
+                "answer": (
+                    f"Elige un tema de {category_name} para ver preguntas verificadas."
+                ),
+                "intent": "FAQ_SUBCATEGORY_DISCOVERY",
+                "faq_id": None,
+                "category_name": category_name,
+                "confidence": 1.0,
+                "resolved": False,
+                "offers_ticket": False,
+                "requires_clarification": True,
+                "options": labels,
+                "candidate_faq_ids": [],
+                "candidate_faq_category_id": category_id,
+                "candidate_faq_subcategories": subcategories,
+                "fallback_reason": None,
+                "escalated": False,
+                "match": None,
+                "response_source": "DETERMINISTIC",
+                "sources": self._public_sources(matches[:_FAQ_DISCOVERY_MAX_OPTIONS]),
+                "counts_as_clarification": False,
+            },
+            matches,
+        )
+
+    @staticmethod
+    def _faq_subcategory_label(faq: FAQ, category_name: str) -> str:
+        title = faq.title or faq.question
+        title_words = re.findall(r"[^\W_]+", title, re.UNICODE)
+        normalized_words = [normalize_text(word) for word in title_words]
+        category_words = set(normalize_text(category_name.replace("_", " ")).split())
+        category_words.update(
+            word[:-1]
+            for word in tuple(category_words)
+            if len(word) > 3 and word.endswith("s")
+        )
+        category_words.update(_FAQ_SUBCATEGORY_TAG_STOP_WORDS)
+        tag_words = {
+            word
+            for raw_tag in ChatbotService._json_terms(faq.tags)
+            for word in normalize_text(raw_tag).split()
+        }
+        useful_positions = [
+            index
+            for index, word in enumerate(normalized_words)
+            if word in tag_words
+            and word not in category_words
+            and word not in _FAQ_SUBCATEGORY_STOP_WORDS
+        ]
+
+        groups: list[list[int]] = []
+        for position in useful_positions:
+            if not groups or position - groups[-1][-1] > 2:
+                groups.append([position])
+            else:
+                groups[-1].append(position)
+        if groups:
+            selected = max(
+                groups, key=lambda positions: (len(positions), -positions[0])
+            )
+            label_words = title_words[selected[0] : selected[-1] + 1]
+            label = " ".join(label_words)
+        else:
+            tag_words_in_order = [
+                word
+                for raw_tag in ChatbotService._json_terms(faq.tags)
+                for word in re.findall(r"[^\W_]+", raw_tag, re.UNICODE)
+                if normalize_text(word) not in category_words
+                and normalize_text(word) not in _FAQ_SUBCATEGORY_STOP_WORDS
+            ]
+            label = " ".join(tag_words_in_order[:3]) or "Otros temas"
+
+        label = label.strip(" .,!?:;¿¡")[:60]
+        return label[:1].upper() + label[1:] if label else "Otros temas"
+
+    def _faq_discovery_response(
+        self,
+        session: Session,
+        *,
+        category_id: str | None = None,
+        faq_ids: set[str] | None = None,
+    ) -> tuple[dict[str, object], list[FAQMatch]]:
+        available_faqs = self._available_public_faqs(session)
+        if category_id is not None:
+            available_faqs = [
+                faq for faq in available_faqs if faq.category_id == category_id
+            ]
+        if faq_ids is not None:
+            available_faqs = [faq for faq in available_faqs if faq.id in faq_ids]
         selected: list[FAQMatch] = []
         seen_categories: set[str] = set()
 
@@ -1404,10 +1832,6 @@ class ChatbotService:
                     candidate
                     for candidate in available_faqs
                     if category_names.get(candidate.category_id) == category_name
-                    and not detect_prompt_injection(
-                        f"{candidate.title} {candidate.question} "
-                        f"{candidate.summary} {candidate.answer}"
-                    )
                 ),
                 None,
             )
@@ -1428,9 +1852,7 @@ class ChatbotService:
         # Include published FAQ categories not in the preferred menu if space remains.
         if len(selected) < _FAQ_DISCOVERY_MAX_OPTIONS:
             for faq in available_faqs:
-                if faq.category_id in seen_categories or detect_prompt_injection(
-                    f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
-                ):
+                if faq.category_id in seen_categories:
                     continue
                 seen_categories.add(faq.category_id)
                 selected.append(
@@ -1447,9 +1869,7 @@ class ChatbotService:
         if len(selected) < _FAQ_DISCOVERY_MAX_OPTIONS:
             selected_ids = {match.faq.id for match in selected}
             for faq in available_faqs:
-                if faq.id in selected_ids or detect_prompt_injection(
-                    f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
-                ):
+                if faq.id in selected_ids:
                     continue
                 selected.append(
                     FAQMatch(
@@ -1650,7 +2070,7 @@ class ChatbotService:
         has_code_marker = bool(re.search(r"\btck-", normalized))
         code = codes[0] if len(codes) == 1 else None
         has_ticket_subject = bool(
-            re.search(r"\b(?:tickets?|casos?|solicitudes?|reclamos?)\b", normalized)
+            re.search(r"\b(?:tickets?|casos?|solicitud(?:es)?|reclamos?)\b", normalized)
         )
         page_match = re.search(r"\bpagina\s+(\d+)\b", normalized)
         page = min(int(page_match.group(1)), 10_000) if page_match else 1
@@ -1672,10 +2092,47 @@ class ChatbotService:
                 page=page,
             )
 
+        asks_no_response = has_ticket_subject and bool(
+            re.search(
+                r"\b(?:nadie|no\s+me|no\s+han|todavia\s+no|aun\s+no)\b"
+                r".{0,45}\b(?:responde|respondio|contesta|contesto)\b",
+                normalized,
+            )
+        )
+        if asks_no_response:
+            if has_code_marker and (len(codes) != 1 or code is None):
+                return cls._clarify_ticket_code_request(
+                    page,
+                    action=ChatbotSuggestedAction.ADVISOR_RESPONSE_STATUS,
+                    query_type=ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS,
+                )
+            return TicketQueryRequest(
+                action=ChatbotSuggestedAction.ADVISOR_RESPONSE_STATUS,
+                query_type=ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS,
+                tracking_code=code,
+                page=page,
+            )
+
+        forgot_ticket_code = has_ticket_subject and bool(
+            re.search(
+                r"\b(?:no\s+(?:recuerdo|recuerdas|tengo|se)|olvide|olvido)\b"
+                r".{0,35}\b(?:codigo|numero)\b",
+                normalized,
+            )
+        )
+        if forgot_ticket_code:
+            return TicketQueryRequest(
+                action=ChatbotSuggestedAction.LIST_MY_TICKETS,
+                query_type=ChatbotTicketQueryType.TICKET_LIST,
+                page=page,
+            )
+
         asks_what_answered = bool(
             re.search(
                 r"\b(?:que|cual).{0,35}\b(?:respondio|contesto)\b|"
-                r"\b(?:respuesta|comentario)\b.{0,25}\b(?:asesor|ticket)\b",
+                r"\b(?:respuestas?|comentarios?)\b.{0,25}\b(?:asesor|ticket)\b|"
+                r"\bdonde\b.{0,25}\b(?:veo|consulto|reviso)\b.{0,25}"
+                r"\b(?:respuestas?|comentarios?)\b",
                 normalized,
             )
         )
@@ -1741,8 +2198,9 @@ class ChatbotService:
 
         asks_count = bool(
             re.search(
-                r"\b(?:cuantos?|cuantas?)\s+(?:tickets?|casos?|solicitudes?)\b|"
-                r"\b(?:tickets?|casos?|solicitudes?)\s+tengo\b",
+                r"\b(?:cuantos?|cuantas?)\s+"
+                r"(?:tickets?|casos?|solicitud(?:es)?|reclamos?)\b|"
+                r"\b(?:tickets?|casos?|solicitud(?:es)?|reclamos?)\s+tengo\b",
                 normalized,
             )
         )
@@ -2382,6 +2840,456 @@ class ChatbotService:
         )
         return result
 
+    def _main_menu_ui(self, session: Session, *, draft_paused: bool) -> ChatbotUI:
+        options: list[ChatbotUIOption] = []
+        if self._available_faq_categories(session):
+            options.append(
+                ChatbotUIOption(
+                    id="menu:faq",
+                    label="Preguntas frecuentes",
+                    action=ChatbotUIAction.SHOW_FAQ_DISCOVERY,
+                )
+            )
+        options.extend(
+            [
+                ChatbotUIOption(
+                    id="menu:ticket_status",
+                    label="Estado de mi caso",
+                    action=ChatbotUIAction.CHECK_TICKET_STATUS,
+                ),
+                ChatbotUIOption(
+                    id="menu:tickets",
+                    label="Mis solicitudes",
+                    action=ChatbotUIAction.LIST_MY_TICKETS,
+                ),
+                ChatbotUIOption(
+                    id="menu:create_ticket",
+                    label="Registrar una solicitud",
+                    action=ChatbotUIAction.CREATE_TICKET,
+                ),
+                ChatbotUIOption(
+                    id="menu:advisor",
+                    label="Solicitar atención de un asesor",
+                    action=ChatbotUIAction.CONTACT_ADVISOR,
+                ),
+            ]
+        )
+        if draft_paused:
+            options.append(
+                ChatbotUIOption(
+                    id="menu:resume_ticket_draft",
+                    label="Retomar borrador de solicitud",
+                    action=ChatbotUIAction.RESUME_TICKET_DRAFT,
+                )
+            )
+        options.append(
+            ChatbotUIOption(
+                id="menu:end",
+                label="Finalizar conversación",
+                action=ChatbotUIAction.END_CONVERSATION,
+            )
+        )
+        return ChatbotUI(type=ChatbotUIType.MAIN_MENU, menu_id="main", options=options)
+
+    @staticmethod
+    def _faq_choices_ui(
+        faq_ids: list[str], labels: list[str], *, menu_id: str
+    ) -> ChatbotUI | None:
+        options = [
+            ChatbotUIOption(
+                id=f"faq:{faq_id}",
+                label=label,
+                action=ChatbotUIAction.SELECT_FAQ,
+            )
+            for faq_id, label in zip(faq_ids, labels, strict=False)
+            if faq_id and label
+        ][:18]
+        if menu_id == "faq_questions":
+            options.extend(
+                [
+                    ChatbotUIOption(
+                        id="nav:back",
+                        label="Volver a temas",
+                        action=ChatbotUIAction.NAVIGATE_BACK,
+                    ),
+                    ChatbotUIOption(
+                        id="nav:menu",
+                        label="Volver al menú",
+                        action=ChatbotUIAction.SHOW_MENU,
+                    ),
+                ]
+            )
+        if not options:
+            return None
+        return ChatbotUI(
+            type=ChatbotUIType.FAQ_CHOICES,
+            menu_id=menu_id,
+            options=options,
+        )
+
+    @staticmethod
+    def _faq_category_choices_ui(
+        category_ids: list[str], labels: list[str]
+    ) -> ChatbotUI | None:
+        options = [
+            ChatbotUIOption(
+                id=f"category:{category_id}",
+                label=label,
+                action=ChatbotUIAction.SHOW_FAQ_CATEGORY,
+            )
+            for category_id, label in zip(category_ids, labels, strict=False)
+            if category_id and label
+        ][:19]
+        if not options:
+            return None
+        options.append(
+            ChatbotUIOption(
+                id="nav:menu",
+                label="Volver al menú",
+                action=ChatbotUIAction.SHOW_MENU,
+            )
+        )
+        return ChatbotUI(
+            type=ChatbotUIType.FAQ_CATEGORY_CHOICES,
+            menu_id="faq_categories",
+            options=options,
+        )
+
+    @staticmethod
+    def _faq_subcategory_choices_ui(
+        subcategories: list[dict[str, object]],
+    ) -> ChatbotUI | None:
+        options = [
+            ChatbotUIOption(
+                id=str(item["id"]),
+                label=str(item["label"]),
+                action=ChatbotUIAction.SHOW_FAQ_SUBCATEGORY,
+            )
+            for item in subcategories
+            if isinstance(item.get("id"), str) and isinstance(item.get("label"), str)
+        ][:18]
+        if not options:
+            return None
+        options.extend(
+            [
+                ChatbotUIOption(
+                    id="nav:back",
+                    label="Volver a categorías",
+                    action=ChatbotUIAction.NAVIGATE_BACK,
+                ),
+                ChatbotUIOption(
+                    id="nav:menu",
+                    label="Volver al menú",
+                    action=ChatbotUIAction.SHOW_MENU,
+                ),
+            ]
+        )
+        return ChatbotUI(
+            type=ChatbotUIType.FAQ_SUBCATEGORY_CHOICES,
+            menu_id="faq_subcategories",
+            options=options,
+        )
+
+    def _ui_for_result(
+        self, session: Session, result: dict[str, object], context: dict[str, object]
+    ) -> ChatbotUI | None:
+        if result.get("suggested_action") == ChatbotSuggestedAction.SHOW_MENU:
+            return self._main_menu_ui(
+                session, draft_paused=context.get("ticket_draft_paused") is True
+            )
+        subcategories = result.get("candidate_faq_subcategories")
+        if (
+            result.get("intent") == "FAQ_SUBCATEGORY_DISCOVERY"
+            and isinstance(subcategories, list)
+            and all(isinstance(value, dict) for value in subcategories)
+        ):
+            return self._faq_subcategory_choices_ui(subcategories)
+        category_ids = result.get("candidate_faq_category_ids")
+        category_labels = result.get("options")
+        if (
+            result.get("intent") == "FAQ_CATEGORY_DISCOVERY"
+            and isinstance(category_ids, list)
+            and isinstance(category_labels, list)
+            and all(isinstance(value, str) for value in category_ids)
+            and all(isinstance(value, str) for value in category_labels)
+        ):
+            return self._faq_category_choices_ui(category_ids, category_labels)
+        faq_ids = result.get("candidate_faq_ids")
+        labels = result.get("options")
+        if (
+            isinstance(faq_ids, list)
+            and isinstance(labels, list)
+            and all(isinstance(value, str) for value in faq_ids)
+            and all(isinstance(value, str) for value in labels)
+        ):
+            return self._faq_choices_ui(
+                faq_ids,
+                labels,
+                menu_id=(
+                    "faq_questions"
+                    if result.get("candidate_faq_subcategory_id")
+                    else "faq_discovery"
+                    if result.get("intent") == "FAQ_DISCOVERY"
+                    else "faq_suggestions"
+                ),
+            )
+        return None
+
+    def _ui_for_conversation(
+        self, session: Session, context: dict[str, object]
+    ) -> ChatbotUI | None:
+        if context.get("menu_open") is True:
+            return self._main_menu_ui(
+                session, draft_paused=context.get("ticket_draft_paused") is True
+            )
+        menu_id = context.get("pending_ui_menu_id")
+        if menu_id == "faq_subcategories":
+            category_id = context.get("pending_faq_category_id")
+            if isinstance(category_id, str):
+                result, _ = self._faq_subcategory_discovery_response(
+                    session, category_id=category_id
+                )
+                subcategories = result.get("candidate_faq_subcategories")
+                if isinstance(subcategories, list):
+                    return self._faq_subcategory_choices_ui(subcategories)
+        if menu_id == "faq_questions":
+            raw_ids = context.get("pending_faq_ids")
+            if isinstance(raw_ids, list):
+                active = {
+                    faq.id: faq
+                    for faq in self._available_public_faqs(session)
+                    if faq.id in raw_ids
+                }
+                faq_ids = [faq_id for faq_id in raw_ids if faq_id in active]
+                labels = [
+                    active[faq_id].title or active[faq_id].question
+                    for faq_id in faq_ids
+                ]
+                return self._faq_choices_ui(faq_ids, labels, menu_id="faq_questions")
+        raw_category_ids = context.get("pending_faq_category_ids")
+        if isinstance(raw_category_ids, list):
+            allowed_category_ids = {
+                value for value in raw_category_ids if isinstance(value, str)
+            }
+            categories = [
+                (category_id, label)
+                for category_id, label in self._available_faq_categories(session)
+                if category_id in allowed_category_ids
+            ]
+            if categories:
+                return self._faq_category_choices_ui(
+                    [category_id for category_id, _ in categories],
+                    [label for _, label in categories],
+                )
+        raw_ids = context.get("pending_faq_ids")
+        if not isinstance(raw_ids, list):
+            return None
+        allowed_ids = {value for value in raw_ids if isinstance(value, str)}
+        if not allowed_ids:
+            return None
+        active = {
+            faq.id: faq
+            for faq in self.faqs.list_active(session)
+            if faq.id in allowed_ids
+            and has_verified_official_source(faq.source_url, faq.source_verified_at)
+        }
+        faq_ids = [faq_id for faq_id in raw_ids if faq_id in active]
+        labels = [active[faq_id].title or active[faq_id].question for faq_id in faq_ids]
+        menu_id = context.get("pending_ui_menu_id")
+        if menu_id not in {"faq_discovery", "faq_suggestions"}:
+            menu_id = "faq_discovery"
+        return self._faq_choices_ui(faq_ids, labels, menu_id=menu_id)
+
+    def _resolve_faq_navigation_target(
+        self, conversation: Conversation, option_id: str
+    ) -> str:
+        context = conversation.context_json or {}
+        menu_id = context.get("pending_ui_menu_id")
+        if conversation.status != ConversationStatus.WAITING_CLARIFICATION:
+            raise HTTPException(
+                status_code=409,
+                detail="La opción ya no está disponible en esta conversación",
+            )
+        if option_id == "nav:menu" and menu_id in {
+            "faq_categories",
+            "faq_subcategories",
+            "faq_questions",
+        }:
+            return "main"
+        if option_id == "nav:back":
+            targets = {
+                "faq_categories": "main",
+                "faq_subcategories": "faq_categories",
+                "faq_questions": "faq_subcategories",
+            }
+            target = targets.get(str(menu_id))
+            if target is not None:
+                if target == "faq_subcategories" and not isinstance(
+                    context.get("pending_faq_category_id"), str
+                ):
+                    target = None
+                if target is not None:
+                    return target
+        raise HTTPException(
+            status_code=409,
+            detail="La opción ya no está disponible en esta conversación",
+        )
+
+    def _resolve_faq_subcategory_option(
+        self, session: Session, conversation: Conversation, option_id: str
+    ) -> dict[str, object]:
+        context = conversation.context_json or {}
+        raw_subcategories = context.get("pending_faq_subcategories")
+        if (
+            conversation.status != ConversationStatus.WAITING_CLARIFICATION
+            or context.get("pending_ui_menu_id") != "faq_subcategories"
+            or not isinstance(raw_subcategories, list)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="La opción ya no está disponible en esta conversación",
+            )
+        offered = next(
+            (
+                value
+                for value in raw_subcategories
+                if isinstance(value, dict) and value.get("id") == option_id
+            ),
+            None,
+        )
+        if not isinstance(offered, dict):
+            raise HTTPException(
+                status_code=409,
+                detail="La opción ya no está disponible en esta conversación",
+            )
+        category_id = offered.get("category_id")
+        if not isinstance(category_id, str):
+            raise HTTPException(
+                status_code=409,
+                detail="La opción ya no está disponible en esta conversación",
+            )
+        result, _ = self._faq_subcategory_discovery_response(
+            session, category_id=category_id
+        )
+        current = result.get("candidate_faq_subcategories")
+        if not isinstance(current, list):
+            raise HTTPException(
+                status_code=409,
+                detail="La opción ya no está disponible en esta conversación",
+            )
+        resolved = next(
+            (
+                value
+                for value in current
+                if isinstance(value, dict) and value.get("id") == option_id
+            ),
+            None,
+        )
+        if not isinstance(resolved, dict):
+            raise HTTPException(
+                status_code=409,
+                detail="La opción ya no está disponible en esta conversación",
+            )
+        return resolved
+
+    def _resolve_option_id(
+        self, session: Session, conversation: Conversation, option_id: str
+    ) -> str:
+        context = conversation.context_json or {}
+        if option_id.startswith("menu:"):
+            if context.get("menu_open") is not True:
+                raise HTTPException(
+                    status_code=409,
+                    detail="La opción ya no está disponible en esta conversación",
+                )
+            actions = {
+                "menu:ticket_status": "Quiero saber el estado de mi ticket",
+                "menu:tickets": "Mostrar mis tickets",
+                "menu:create_ticket": "Quiero crear un ticket",
+                "menu:advisor": "Quiero hablar con un asesor",
+                "menu:end": "Finalizar conversación",
+            }
+            if option_id == "menu:faq":
+                if not self._available_faq_categories(session):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="La opción ya no está disponible en esta conversación",
+                    )
+                return "Preguntas frecuentes"
+            if option_id == "menu:resume_ticket_draft":
+                if context.get("ticket_draft_paused") is not True:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="La opción ya no está disponible en esta conversación",
+                    )
+                return "Retomar mi borrador de ticket"
+            content = actions.get(option_id)
+            if content is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="La opción ya no está disponible en esta conversación",
+                )
+            return content
+        if option_id.startswith("faq:"):
+            faq_id = option_id.removeprefix("faq:")
+            raw_ids = context.get("pending_faq_ids")
+            if (
+                not isinstance(raw_ids, list)
+                or faq_id not in raw_ids
+                or conversation.status != ConversationStatus.WAITING_CLARIFICATION
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="La opción ya no está disponible en esta conversación",
+                )
+            faq = next(
+                (
+                    item
+                    for item in self.faqs.list_active(session)
+                    if item.id == faq_id
+                    and has_verified_official_source(
+                        item.source_url, item.source_verified_at
+                    )
+                ),
+                None,
+            )
+            if faq is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="La opción ya no está disponible en esta conversación",
+                )
+            return faq.title or faq.question
+        if option_id.startswith("category:"):
+            category_id = option_id.removeprefix("category:")
+            raw_ids = context.get("pending_faq_category_ids")
+            if (
+                not isinstance(raw_ids, list)
+                or category_id not in raw_ids
+                or conversation.status != ConversationStatus.WAITING_CLARIFICATION
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="La opción ya no está disponible en esta conversación",
+                )
+            category = next(
+                (
+                    (item_id, label)
+                    for item_id, label in self._available_faq_categories(session)
+                    if item_id == category_id
+                ),
+                None,
+            )
+            if category is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="La opción ya no está disponible en esta conversación",
+                )
+            return category[1]
+        raise HTTPException(
+            status_code=409,
+            detail="La opción ya no está disponible en esta conversación",
+        )
+
     def _read_ticket_draft(
         self, session: Session, context: dict[str, object]
     ) -> ChatbotTicketDraft:
@@ -2529,6 +3437,7 @@ class ChatbotService:
             last_activity_at=conversation.last_activity_at,
             ticket_draft=self._read_ticket_draft(session, context),
             menu_open=context.get("menu_open") is True,
+            ui=self._ui_for_conversation(session, context),
             converted_ticket=(
                 ChatbotConvertedTicketSummary(
                     id=ticket.id,
@@ -2558,9 +3467,20 @@ class ChatbotService:
             if message.confidence is not None
             else None,
             faq_id=message.faq_id,
+            intent_classification=ChatbotService._message_ai_intent(message),
             response_source=message.response_source,
             created_at=message.created_at,
         )
+
+    @staticmethod
+    def _message_ai_intent(message: ChatMessage) -> ChatbotIntent | None:
+        trace = message.ai_trace_json
+        if not isinstance(trace, dict):
+            return None
+        try:
+            return ChatbotIntent(trace.get("intent_classification"))
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _tokens(value: str) -> list[str]:
@@ -2581,6 +3501,10 @@ class ChatbotService:
     @staticmethod
     def _contains_arithmetic_expression(value: str) -> bool:
         return bool(_ARITHMETIC_EXPRESSION_PATTERN.search(value))
+
+    @staticmethod
+    def _is_obviously_out_of_scope(value: str) -> bool:
+        return bool(_OBVIOUS_OUT_OF_SCOPE_PATTERN.search(normalize_text(value)))
 
     @classmethod
     def _token_forms(cls, value: str) -> set[str]:

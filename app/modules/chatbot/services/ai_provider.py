@@ -45,6 +45,7 @@ class AIGenerationResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    intent_classification: str | None = None
 
     @classmethod
     def generated(
@@ -58,6 +59,7 @@ class AIGenerationResult:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         total_tokens: int | None = None,
+        intent_classification: str | None = None,
     ) -> "AIGenerationResult":
         return cls(
             status="GENERATED",
@@ -69,6 +71,7 @@ class AIGenerationResult:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
+            intent_classification=intent_classification,
         )
 
     @classmethod
@@ -184,6 +187,11 @@ class HttpJsonAIProvider:
                 source_ids=[str(source_id) for source_id in source_ids],
                 provider=self.name,
                 model=self.model,
+                intent_classification=(
+                    decoded.get("intent_classification")
+                    if isinstance(decoded.get("intent_classification"), str)
+                    else None
+                ),
             )
         except TimeoutError:
             return AIGenerationResult.failed(

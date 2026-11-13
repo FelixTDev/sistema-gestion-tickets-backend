@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     chatbot_ai_endpoint: str | None = None
     chatbot_ai_api_key: str | None = None
     chatbot_ai_model: str = "gpt-5.4-mini"
+    chatbot_ai_embeddings_enabled: bool = True
+    chatbot_ai_embedding_model: str = "text-embedding-3-small"
+    chatbot_ai_embedding_dimensions: int = 256
+    chatbot_ai_embedding_max_documents: int = 200
     chatbot_ai_prompt_version: str = "v1"
     chatbot_ai_timeout_seconds: float = 15.0
     chatbot_ai_max_output_chars: int = 1200
@@ -99,6 +103,7 @@ class Settings(BaseSettings):
     chatbot_ai_requests_per_minute: int = 5
     chatbot_ai_max_responses_per_conversation: int = 3
     chatbot_ai_max_provider_calls_per_actor_per_hour: int = 20
+    chatbot_ai_daily_budget_usd: float = 0.50
     chatbot_ai_max_consecutive_failures: int = 3
     chatbot_ai_cooldown_seconds: int = 60
     chatbot_ai_idempotency_window_seconds: int = 30
@@ -212,6 +217,12 @@ class Settings(BaseSettings):
             raise ValueError("El proveedor IA no puede estar vacío")
         if not self.chatbot_ai_model.strip():
             raise ValueError("El modelo IA no puede estar vacío")
+        if not self.chatbot_ai_embedding_model.strip():
+            raise ValueError("El modelo de embeddings no puede estar vacío")
+        if not 1 <= self.chatbot_ai_embedding_dimensions <= 3072:
+            raise ValueError("Las dimensiones de embeddings no son válidas")
+        if not 1 <= self.chatbot_ai_embedding_max_documents <= 1000:
+            raise ValueError("El límite de documentos para embeddings no es válido")
         if self.openai_api_key is not None and not (
             self.openai_api_key.get_secret_value().strip()
         ):
@@ -236,6 +247,8 @@ class Settings(BaseSettings):
             raise ValueError("El límite de respuestas IA debe ser positivo")
         if self.chatbot_ai_max_provider_calls_per_actor_per_hour < 1:
             raise ValueError("El límite horario de llamadas IA debe ser positivo")
+        if not 0 < self.chatbot_ai_daily_budget_usd <= 100:
+            raise ValueError("El presupuesto diario IA debe estar entre 0 y 100 USD")
         if self.chatbot_ai_max_consecutive_failures < 1:
             raise ValueError("El límite de fallos IA debe ser positivo")
         if self.chatbot_ai_cooldown_seconds < 1:

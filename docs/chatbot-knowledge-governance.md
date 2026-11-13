@@ -17,7 +17,14 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
 ## Contrato conversacional
 
 - Los saludos simples obtienen una respuesta cordial determinística; no se
-  clasifican como baja confianza ni ofrecen un ticket por sí solos.
+  clasifican como baja confianza ni ofrecen un ticket por sí solos. La respuesta
+  aclara que se trata de un prototipo académico y no de un canal bancario oficial.
+- El menú principal expone IDs estables para acciones reales. La navegación FAQ
+  presenta solo categorías con preguntas publicadas, activas y con fuente oficial
+  verificada; la selección de categoría ofrece las FAQ de esa categoría.
+- `FAQ_DISCOVERY` es una intención distinta de `SHOW_MENU`. Las categorías FAQ y
+  las preguntas usan `ui` tipado con IDs; el servidor solo acepta IDs ofrecidos
+  en el estado vigente y los vuelve a validar antes de procesarlos.
 - Las respuestas sobre productos y procesos solo usan FAQs publicadas, activas y
   vigentes con URL HTTPS de `bancognb.com.pe` o `www.bancognb.com.pe` y fecha de
   verificación. La fuente usada se devuelve en `sources[]`.
@@ -28,11 +35,30 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
 - La búsqueda de FAQs descarta tokens numéricos y no resuelve una consulta con
   una sola palabra compartida. Una expresión aritmética tampoco se envía al
   proveedor aunque aparezca junto a una consulta bancaria.
-- El proveedor no recibe preguntas sin contexto oficial suficiente ni
-  coincidencias ambiguas. Cada oración de una respuesta generada debe tener
-  soporte léxico en las fuentes seleccionadas y cada número debe aparecer en
-  ese contexto; estas comprobaciones reducen invenciones, pero no equivalen a
-  una verificación semántica formal.
+- El proveedor no genera respuestas bancarias sin contexto oficial suficiente
+  ni con coincidencias ambiguas. Los turnos conversacionales sin contexto son
+  posibles, pero la política y validación solo permiten reconocer el mensaje o
+  pedir aclaración sin afirmar datos bancarios. Cada oración de una respuesta
+  bancaria generada debe tener soporte léxico en las fuentes seleccionadas y
+  cada número debe aparecer en ese contexto; estas comprobaciones reducen
+  invenciones, pero no equivalen a una verificación semántica formal.
+- La salida OpenAI incluye una clasificación de intención de catálogo cerrado.
+  El backend valida el valor y rechaza intenciones que intenten autorizar
+  consultas privadas, cierre, creación o cambios de estado. No se solicita ni
+  se interpreta una probabilidad de confianza del modelo.
+- La recuperación híbrida conserva el buscador léxico, sinónimos y fuzzy como
+  baseline y reordena el catálogo público con embeddings de
+  `text-embedding-3-small` (256 dimensiones). Usa únicamente FAQs activas,
+  publicadas, vigentes y con fuente oficial verificada; excluye contenido con
+  patrones de inyección. La puntuación combinada no reduce una coincidencia
+  léxica previa; si no hay coincidencia léxica, la semántica debe superar el
+  umbral de grounding. La relevancia semántica no concede permisos ni ejecuta
+  operaciones.
+- Los vectores se calculan bajo demanda para un máximo configurable de 200 FAQs
+  y se cachean solo en memoria por proceso, versión y contenido. No se agrega una
+  tabla, migración ni base vectorial. El texto de consulta se minimiza antes de
+  enviarse. Si embeddings falla o excede el presupuesto, el flujo conserva el
+  resultado léxico y aplica los guardrails RAG de siempre.
 - Las listas de opciones guardan IDs de FAQ activos. El usuario puede seleccionar
   el título o decir “la primera”, “opción 2”, etc. Solo se resuelve contra las
   opciones pendientes de esa conversación; no se interpreta una opción fuera de
@@ -46,9 +72,10 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
   se agotan las aclaraciones se ofrece reformular, pedir atención humana o crear
   ticket, sin crear ninguno automáticamente.
 - “Eso no me ayudó” conserva la FAQ y pide una aclaración breve. Una solicitud
-  explícita de asesor usa la escalación existente. Una solicitud explícita de
-  ticket devuelve `suggested_action=CONVERT_TO_TICKET`; ese campo no crea el
-  ticket.
+  explícita de asesor usa la solicitud de atención humana existente; no abre un
+  chat en vivo ni asegura disponibilidad inmediata. Una solicitud explícita de
+  ticket inicia un borrador; solo el endpoint autenticado y el payload completo
+  confirman su creación.
 - `BotMessageResponse.suggested_action` y `conversation_status` son campos
   tipados. `requires_clarification`, `clarification_options`, `sources` y los
   estados existentes siguen disponibles para clientes anteriores.
@@ -66,10 +93,22 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
 - El contenido de usuario y las FAQs se tratan como datos no confiables. Las
   defensas existentes de inyección, solicitud sensible, grounding y validación
   de salida siguen siendo obligatorias si se usa un proveedor de IA configurado.
-  Esta entrega no habilita ni exige un proveedor externo ni una nueva API key.
+  OpenAI sigue desactivado por defecto y solo se activa mediante configuración
+  local explícita; ninguna prueba automatizada llama al servicio externo.
 - Cuando OpenAI devuelve contadores de uso, el backend guarda input, output y
   total de tokens en la traza técnica del mensaje y en metadatos de auditoría;
   no guarda el contenido del prompt del proveedor dentro de esas métricas.
+- Para `gpt-5.4-mini`, la aplicación estima y reserva costo antes de cada llamada
+  con un límite configurable `CHATBOT_AI_DAILY_BUDGET_USD` (0.50 USD por defecto).
+  El presupuesto vive en memoria por proceso y día UTC; tras reinicio o con varias
+  réplicas se requiere además un límite en la cuenta del proveedor para controlar
+  el gasto agregado. El costo estimado de embeddings comparte el mismo límite.
+- El adaptador usa Responses API sin estado (`store=false`) y salida JSON Schema
+  estricta. Para `gpt-5.4-mini` fija `reasoning.effort=none`; el límite de salida
+  predeterminado es 384 tokens. Un estado `incomplete` identifica de forma segura
+  si se agotó `max_output_tokens`; no se reintenta automáticamente. HTTP errors,
+  timeouts, red y salida inválida mantienen fallback controlado sin cuerpo del
+  proveedor ni secretos en la respuesta.
 - Las llamadas reales al proveedor tienen límites por minuto, por conversación y
   por actor en una ventana móvil de una hora (`CHATBOT_AI_MAX_PROVIDER_CALLS_PER_ACTOR_PER_HOUR`,
   20 por defecto). Para usuarios autenticados se agrupan todas sus conversaciones;
@@ -170,3 +209,31 @@ La incorporación de más preguntas debe priorizar cobertura real observada y
 fuentes oficiales verificables. No se debe aumentar artificialmente la
 confianza, responder por similitud de palabras comunes ni degradar a un flujo de
 ticket para compensar una FAQ insuficiente.
+
+## Evaluación reproducible
+
+`tests/evaluation/test_chatbot_hybrid_retrieval.py` compara las mismas dos
+consultas de FAQ contra el baseline léxico y el recuperador híbrido, con vectores
+determinísticos y sin red. En esa fixture sintética, Recall@1 del baseline es
+1/2 y Recall@1 híbrido es 2/2; no es una estimación de calidad sobre clientes ni
+sobre el catálogo productivo. La prueba además calcula el número de
+llamadas y entradas de embedding (incluida la reutilización del caché) y tiempo
+de recuperación.
+
+`tests/evaluation/test_chatbot_phase12_quality.py` verifica respuesta con fuente,
+clasificación cerrada, grounding, repetición en caché, fallback de inyección,
+latencia y cálculo de tokens/costo con un proveedor doble. Las pruebas de fases
+12 y 13 cubren navegación, cierre, borrador, autenticación, confirmación,
+idempotencia, consultas privadas y auditoría. Ejecutar `pytest tests/evaluation`
+desde un directorio sin `.env`, con SQLite y proveedor deshabilitado; estas
+pruebas no llaman OpenAI. El resultado de mocks es evidencia de implementación,
+no evidencia de exactitud del modelo.
+
+Para un estudio académico, versionar un conjunto de consultas etiquetado por
+personas revisoras, separar ajuste de evaluación, fijar baseline y versión del
+catálogo, y calcular al menos: exactitud de intención, Recall@1/MRR de FAQ,
+proporción de respuestas aceptadas con fuente válida, cumplimiento de estados y
+acciones, violaciones de seguridad, latencia p50/p95, tokens de entrada/salida y
+costo estimado por escenario. Una prueba real única de integración no constituye
+un piloto ni permite inferencia estadística; esos resultados y su costo deben
+registrarse aparte de los fixtures sintéticos.

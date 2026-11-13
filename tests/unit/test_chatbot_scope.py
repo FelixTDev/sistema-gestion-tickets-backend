@@ -120,6 +120,7 @@ def rag_settings(**overrides: object) -> SimpleNamespace:
         "chatbot_ai_timeout_seconds": 1,
         "chatbot_ai_max_output_chars": 1200,
         "chatbot_ai_max_output_tokens": 384,
+        "chatbot_ai_daily_budget_usd": 0.50,
         "chatbot_ai_max_consecutive_failures": 3,
         "chatbot_ai_cooldown_seconds": 60,
     }
@@ -150,6 +151,37 @@ def test_single_generic_word_is_not_enough_to_select_a_faq() -> None:
     matches = service_for(faq())._find_matches(None, "tarjeta")
 
     assert matches == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Quiero ver cómo va mi reclamo",
+        "Hace días mandé una solicitud y nadie responde",
+        "No recuerdo el código de mi caso",
+        "¿Dónde veo las respuestas del asesor?",
+    ],
+)
+def test_private_ticket_language_is_recognized_before_ai(message: str) -> None:
+    assert ChatbotService._ticket_query_request(message) is not None
+
+
+def test_reporting_an_error_starts_the_existing_ticket_draft_flow() -> None:
+    assert ChatbotService._is_ticket_request("Necesito reportar un error")
+    assert not ChatbotService._is_ticket_request("Tengo un problema y quisiera ayuda")
+
+
+def test_natural_advisor_request_and_navigation_phrases_are_deterministic() -> None:
+    assert ChatbotService._is_advisor_request("Quiero conversar con alguien")
+    assert (
+        ChatbotService._conversation_lifecycle_action("Regresa al inicio") is not None
+    )
+
+
+def test_unhelpful_rephrase_is_clarified_without_escalating() -> None:
+    assert ChatbotService._is_unhelpful_follow_up(
+        "Eso no era lo que estaba preguntando"
+    )
 
 
 @pytest.mark.parametrize("expression", ["2+2", "2 × 2", "2 - 2", "2/2"])
@@ -382,10 +414,11 @@ def test_rag_trace_records_provider_token_usage(
             text="Comunícate con un canal oficial para bloquear la tarjeta.",
             source_ids=["faq-card-block"],
             provider="test-provider",
-            model="test-model",
+            model="gpt-5.4-mini",
             input_tokens=81,
             output_tokens=24,
             total_tokens=105,
+            intent_classification="FAQ_QUERY",
         )
     )
     rag = RAGService(provider=provider, runtime=_RuntimeState())
@@ -402,6 +435,71 @@ def test_rag_trace_records_provider_token_usage(
     assert result.trace["input_tokens"] == 81
     assert result.trace["output_tokens"] == 24
     assert result.trace["total_tokens"] == 105
+    assert result.trace["intent_classification"] == "FAQ_QUERY"
+    assert result.trace["estimated_cost_usd"] == pytest.approx(0.00016875)
+
+
+def test_rag_rejects_control_intent_even_when_answer_has_valid_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.rag_service.get_settings",
+        lambda: rag_settings(),
+    )
+    provider = CapturingProvider(
+        AIGenerationResult.generated(
+            text="Comunícate con un canal oficial para bloquear la tarjeta.",
+            source_ids=["faq-card-block"],
+            provider="test-provider",
+            model="test-model",
+            intent_classification="TICKET_QUERY",
+        )
+    )
+    rag = RAGService(provider=provider, runtime=_RuntimeState())
+
+    outcome = rag.generate(
+        conversation_id="classification-conversation",
+        user_message="¿Cómo bloqueo una tarjeta perdida?",
+        matches=[match(faq())],
+        requests_last_minute=0,
+        responses_in_conversation=0,
+    )
+
+    assert not outcome.accepted
+    assert outcome.reason == "INTENT_NOT_ALLOWED"
+
+
+def test_rag_does_not_call_provider_when_daily_cost_budget_would_be_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = rag_settings(chatbot_ai_daily_budget_usd=0.0001)
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.rag_service.get_settings",
+        lambda: settings,
+    )
+    provider = CapturingProvider(
+        AIGenerationResult.generated(
+            text="Comunícate con un canal oficial para bloquear la tarjeta.",
+            source_ids=["faq-card-block"],
+            provider="openai",
+            model="gpt-5.4-mini",
+            intent_classification="FAQ_QUERY",
+        )
+    )
+    provider.model = "gpt-5.4-mini"
+    rag = RAGService(provider=provider, runtime=_RuntimeState())
+
+    outcome = rag.generate(
+        conversation_id="budget-conversation",
+        user_message="¿Cómo bloqueo una tarjeta perdida?",
+        matches=[match(faq())],
+        requests_last_minute=0,
+        responses_in_conversation=0,
+    )
+
+    assert not outcome.accepted
+    assert outcome.reason == "DAILY_BUDGET_LIMIT"
+    assert provider.requests == []
 
 
 def test_output_rejects_an_ungrounded_extra_sentence() -> None:

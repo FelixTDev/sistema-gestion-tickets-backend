@@ -3,6 +3,7 @@ from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from app.modules.chatbot.schemas.chatbot import ChatbotIntent
 from app.modules.chatbot.services.ai_provider import (
     AIGenerationResult,
     AIProviderRequest,
@@ -15,8 +16,12 @@ _OUTPUT_SCHEMA = {
     "properties": {
         "text": {"type": "string"},
         "source_ids": {"type": "array", "items": {"type": "string"}},
+        "intent_classification": {
+            "type": "string",
+            "enum": [intent.value for intent in ChatbotIntent],
+        },
     },
-    "required": ["text", "source_ids"],
+    "required": ["text", "source_ids", "intent_classification"],
     "additionalProperties": False,
 }
 
@@ -82,10 +87,40 @@ class OpenAIResponsesProvider:
 
         try:
             decoded = json.loads(body.decode("utf-8"))
-            if not isinstance(decoded, dict) or decoded.get("status") != "completed":
+            if not isinstance(decoded, dict):
                 return self._failed(
                     status="ERROR",
                     error_code="invalid_provider_response",
+                    started=started,
+                )
+            response_status = decoded.get("status")
+            if response_status == "incomplete":
+                incomplete_details = decoded.get("incomplete_details")
+                incomplete_reason = (
+                    incomplete_details.get("reason")
+                    if isinstance(incomplete_details, dict)
+                    else None
+                )
+                safe_reason = (
+                    incomplete_reason
+                    if incomplete_reason in {"max_output_tokens", "content_filter"}
+                    else "provider"
+                )
+                return self._failed(
+                    status="ERROR",
+                    error_code=f"incomplete_{safe_reason}",
+                    started=started,
+                )
+            if response_status != "completed":
+                return self._failed(
+                    status="ERROR",
+                    error_code="invalid_provider_response",
+                    started=started,
+                )
+            if self._contains_refusal(decoded):
+                return self._failed(
+                    status="REFUSED",
+                    error_code="provider_refusal",
                     started=started,
                 )
             output_text = self._extract_output_text(decoded)
@@ -111,6 +146,7 @@ class OpenAIResponsesProvider:
             )
         text = structured_output.get("text")
         source_ids = structured_output.get("source_ids")
+        intent_classification = structured_output.get("intent_classification")
         if (
             not isinstance(text, str)
             or not text.strip()
@@ -118,6 +154,8 @@ class OpenAIResponsesProvider:
             or not isinstance(source_ids, list)
             or (request.grounding_required and not source_ids)
             or any(not isinstance(source_id, str) for source_id in source_ids)
+            or not isinstance(intent_classification, str)
+            or intent_classification not in {intent.value for intent in ChatbotIntent}
         ):
             return self._failed(
                 status="ERROR",
@@ -134,6 +172,7 @@ class OpenAIResponsesProvider:
             input_tokens=self._usage_count(decoded, "input_tokens"),
             output_tokens=self._usage_count(decoded, "output_tokens"),
             total_tokens=self._usage_count(decoded, "total_tokens"),
+            intent_classification=intent_classification,
         )
 
     def _request_payload(self, request: AIProviderRequest) -> dict[str, object]:
@@ -150,7 +189,7 @@ class OpenAIResponsesProvider:
                 for source in request.context
             ],
         }
-        return {
+        payload: dict[str, object] = {
             "model": self.model,
             "store": False,
             "instructions": request.policy,
@@ -165,6 +204,24 @@ class OpenAIResponsesProvider:
                 }
             },
         }
+        if self.model == "gpt-5.4-mini":
+            payload["reasoning"] = {"effort": "none"}
+        return payload
+
+    @staticmethod
+    def _contains_refusal(response: dict[str, object]) -> bool:
+        output = response.get("output")
+        if not isinstance(output, list):
+            return False
+        return any(
+            isinstance(item, dict)
+            and isinstance(item.get("content"), list)
+            and any(
+                isinstance(content_item, dict) and content_item.get("type") == "refusal"
+                for content_item in item["content"]
+            )
+            for item in output
+        )
 
     @staticmethod
     def _extract_output_text(response: dict[str, object]) -> str | None:

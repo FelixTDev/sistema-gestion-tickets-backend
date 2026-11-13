@@ -100,7 +100,13 @@ def send_message(
     current_user: OptionalCurrentUser,
     service: ChatbotServiceDependency,
 ) -> BotMessageResponse:
-    return service.send_message(session, conversation_id, data.content, current_user)
+    return service.send_message(
+        session,
+        conversation_id,
+        data.content,
+        current_user,
+        option_id=data.option_id,
+    )
 
 
 @router.post(

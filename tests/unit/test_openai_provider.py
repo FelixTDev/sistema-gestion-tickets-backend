@@ -45,6 +45,8 @@ def response_body(
     status: str = "completed",
     usage: object | None = None,
 ) -> bytes:
+    if isinstance(payload, dict) and "intent_classification" not in payload:
+        payload = {**payload, "intent_classification": "FAQ_QUERY"}
     response: dict[str, object] = {
         "status": status,
         "output": [
@@ -108,6 +110,7 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
     assert result.status == "GENERATED"
     assert result.text == "Comunícate con el canal oficial para bloquearla."
     assert result.source_ids == ("faq-card-block",)
+    assert result.intent_classification == "FAQ_QUERY"
     assert result.provider == "openai"
     assert result.model == "gpt-5.4-mini"
     assert result.input_tokens == 81
@@ -119,6 +122,7 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
     payload = captured["payload"]
     assert payload["model"] == "gpt-5.4-mini"
     assert payload["store"] is False
+    assert payload["reasoning"] == {"effort": "none"}
     assert payload["max_output_tokens"] == 384
     assert payload["instructions"] == "Responde únicamente con el contexto autorizado."
     sent_input = json.loads(payload["input"])
@@ -128,6 +132,76 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
         "Comunícate con el canal oficial para bloquearla."
     )
     assert "openai-secret-test" not in json.dumps(payload)
+
+
+def test_openai_provider_schema_closes_intent_classification_enum(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, *, timeout: float):
+        captured["payload"] = json.loads(request.data)
+        return FakeResponse(
+            response_body(
+                {
+                    "text": "Comunícate con el canal oficial para bloquearla.",
+                    "source_ids": ["faq-card-block"],
+                    "intent_classification": "FAQ_QUERY",
+                }
+            )
+        )
+
+    monkeypatch.setattr(openai_provider, "urlopen", fake_urlopen)
+    provider = OpenAIResponsesProvider(
+        api_key="openai-secret-test",
+        model="gpt-5.4-mini",
+    )
+
+    result = provider.generate(provider_request())
+
+    assert result.status == "GENERATED"
+    assert result.intent_classification == "FAQ_QUERY"
+    schema = captured["payload"]["text"]["format"]["schema"]
+    expected = {
+        "GREETING",
+        "SHOW_MENU",
+        "FAQ_QUERY",
+        "FAQ_DISCOVERY",
+        "FAQ_CATEGORY_DISCOVERY",
+        "FAQ_SUBCATEGORY_DISCOVERY",
+        "TICKET_QUERY",
+        "TICKET_DETAIL",
+        "CREATE_TICKET",
+        "TICKET_DRAFT_UPDATE",
+        "REQUEST_ADVISOR",
+        "CLARIFICATION",
+        "NAVIGATION",
+        "END_CONVERSATION",
+        "OUT_OF_SCOPE",
+        "UNKNOWN",
+    }
+    assert set(schema["properties"]["intent_classification"]["enum"]) == expected
+    assert schema["required"] == ["text", "source_ids", "intent_classification"]
+
+
+def test_openai_provider_rejects_intent_outside_closed_enum(monkeypatch):
+    monkeypatch.setattr(
+        openai_provider,
+        "urlopen",
+        lambda _request, *, timeout: FakeResponse(
+            response_body(
+                {
+                    "text": "No debe usarse.",
+                    "source_ids": ["faq-card-block"],
+                    "intent_classification": "EXECUTE_TRANSFER",
+                }
+            )
+        ),
+    )
+    provider = OpenAIResponsesProvider(api_key="secret", model="gpt-5.4-mini")
+
+    result = provider.generate(provider_request())
+
+    assert result.status == "ERROR"
+    assert result.error_code == "invalid_provider_response"
 
 
 def test_responses_provider_accepts_source_free_conversational_output(monkeypatch):
@@ -214,6 +288,54 @@ def test_responses_provider_falls_back_on_unusable_model_output(
     assert result.source_ids == ()
 
 
+def test_responses_provider_reports_token_cap_incomplete_status(monkeypatch):
+    body = json.dumps(
+        {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [],
+        }
+    ).encode()
+    monkeypatch.setattr(
+        openai_provider,
+        "urlopen",
+        lambda _request, *, timeout: FakeResponse(body),
+    )
+    provider = OpenAIResponsesProvider(api_key="secret", model="gpt-5.4-mini")
+
+    result = provider.generate(provider_request())
+
+    assert result.status == "ERROR"
+    assert result.error_code == "incomplete_max_output_tokens"
+    assert result.text is None
+
+
+def test_responses_provider_maps_refusal_to_controlled_fallback(monkeypatch):
+    body = json.dumps(
+        {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "refusal", "refusal": "private text"}],
+                }
+            ],
+        }
+    ).encode()
+    monkeypatch.setattr(
+        openai_provider,
+        "urlopen",
+        lambda _request, *, timeout: FakeResponse(body),
+    )
+    provider = OpenAIResponsesProvider(api_key="secret", model="gpt-5.4-mini")
+
+    result = provider.generate(provider_request())
+
+    assert result.status == "REFUSED"
+    assert result.error_code == "provider_refusal"
+    assert result.text is None
+
+
 def test_responses_provider_maps_timeout_without_leaking_request_data(monkeypatch):
     monkeypatch.setattr(
         openai_provider,
@@ -241,6 +363,33 @@ def test_actor_hourly_provider_limit_must_be_positive():
             app_env="test",
             chatbot_ai_max_provider_calls_per_actor_per_hour=0,
         )
+
+
+def test_ai_daily_budget_must_be_positive():
+    with pytest.raises(ValueError, match="presupuesto diario IA"):
+        Settings(app_env="test", chatbot_ai_daily_budget_usd=0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("chatbot_ai_embedding_dimensions", 0, "dimensiones de embeddings"),
+        ("chatbot_ai_embedding_dimensions", 3073, "dimensiones de embeddings"),
+        (
+            "chatbot_ai_embedding_max_documents",
+            0,
+            "límite de documentos para embeddings",
+        ),
+        (
+            "chatbot_ai_embedding_max_documents",
+            1001,
+            "límite de documentos para embeddings",
+        ),
+    ],
+)
+def test_embedding_settings_are_bounded(field: str, value: object, error: str):
+    with pytest.raises(ValueError, match=error):
+        Settings(app_env="test", **{field: value})
 
 
 def test_provider_factory_keeps_openai_disabled_without_explicit_enable(monkeypatch):

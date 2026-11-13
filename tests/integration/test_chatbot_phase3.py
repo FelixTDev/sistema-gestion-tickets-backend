@@ -113,6 +113,32 @@ def test_menu_pauses_ticket_draft_and_get_restores_it(phase3_client) -> None:
     assert restored.json()["ticket_draft"]["status"] == "COLLECTING"
 
 
+def test_paused_draft_can_be_resumed_from_server_offered_menu_option(
+    phase3_client,
+) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+    menu = send(client, conversation_id, "volver al menu", headers)
+
+    resume_option = next(
+        option
+        for option in menu.json()["ui"]["options"]
+        if option["id"] == "menu:resume_ticket_draft"
+    )
+    resumed = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        headers=headers,
+        json={"option_id": resume_option["id"]},
+    )
+
+    assert resumed.status_code == 200
+    assert resumed.json()["ticket_draft"]["paused"] is False
+    assert resumed.json()["ticket_draft"]["status"] == "COLLECTING"
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+
 def test_faq_does_not_resume_paused_draft_but_explicit_resume_does(
     phase3_client,
 ) -> None:

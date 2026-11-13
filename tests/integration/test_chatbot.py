@@ -97,8 +97,10 @@ def test_greeting_gets_a_friendly_reply_without_escalating(chatbot_client, conte
     assert response.status_code == 200
     body = response.json()
     assert body["bot_message"]["content"] == (
-        "¡Hola! ¿En qué puedo ayudarte hoy? Puedo orientarte sobre preguntas "
-        "frecuentes o el seguimiento de una solicitud."
+        "¡Hola! Soy el asistente virtual del prototipo académico de gestión de "
+        "tickets de Banco GNB Perú. No es un canal bancario oficial. ¿En qué "
+        "puedo ayudarte hoy? Puedo orientarte sobre preguntas frecuentes o el "
+        "seguimiento de una solicitud."
     )
     assert body["resolved"] is True
     assert body["offers_ticket"] is False
@@ -126,6 +128,24 @@ def test_greeting_gets_a_friendly_reply_without_escalating(chatbot_client, conte
     assert denied.status_code == 403
 
 
+def test_greeting_identifies_academic_prototype_and_non_official_channel(
+    chatbot_client,
+):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": "hola"},
+    )
+
+    assert response.status_code == 200
+    answer = response.json()["bot_message"]["content"].casefold()
+    assert "prototipo académico" in answer
+    assert "no es un canal bancario oficial" in answer
+    assert response.json()["conversation_status"] == "ACTIVE"
+
+
 def test_greeting_with_a_real_question_uses_the_normal_query_flow(chatbot_client):
     client, _ = chatbot_client
     conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
@@ -137,10 +157,7 @@ def test_greeting_with_a_real_question_uses_the_normal_query_flow(chatbot_client
 
     assert response.status_code == 200
     body = response.json()
-    assert body["bot_message"]["content"] != (
-        "¡Hola! ¿En qué puedo ayudarte hoy? Puedo orientarte sobre preguntas "
-        "frecuentes o el seguimiento de una solicitud."
-    )
+    assert "prototipo académico" not in body["bot_message"]["content"]
     assert body["requires_clarification"] is True
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
     assert body["offers_ticket"] is False
@@ -246,6 +263,303 @@ def test_faq_discovery_accepts_ordinal_follow_up(chatbot_client):
     assert any(source["title"] == first_option for source in body["sources"])
 
 
+def test_faq_discovery_exposes_stable_server_resolvable_option_ids(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+
+    discovery = client.post(endpoint, json={"content": "Preguntas frecuentes"})
+
+    assert discovery.status_code == 200
+    body = discovery.json()
+    assert body["ui"]["type"] == "FAQ_CHOICES"
+    assert body["ui"]["menu_id"] == "faq_discovery"
+    assert [option["label"] for option in body["ui"]["options"]] == body[
+        "clarification_options"
+    ]
+    assert all(option["action"] == "SELECT_FAQ" for option in body["ui"]["options"])
+    option = body["ui"]["options"][0]
+    assert option["id"].startswith("faq:")
+
+    answer = client.post(endpoint, json={"option_id": option["id"]})
+
+    assert answer.status_code == 200
+    answer_body = answer.json()
+    assert answer_body["faq_id"] == option["id"].removeprefix("faq:")
+    assert answer_body["resolved"] is True
+    assert answer_body["sources"][0]["title"] == option["label"]
+
+
+def test_button_ids_are_accepted_only_when_offered_in_current_state(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+
+    menu = client.post(endpoint, json={"content": "mostrar menu"})
+    assert menu.status_code == 200
+    assert menu.json()["ui"]["type"] == "MAIN_MENU"
+    assert (
+        client.get(f"/api/v1/chat/conversations/{conversation_id}").json()["menu_open"]
+        is True
+    )
+
+    rejected = client.post(endpoint, json={"option_id": "menu:delete_conversation"})
+    assert rejected.status_code == 409
+    conversation = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+    assert len(conversation["messages"]) == 2
+    assert conversation["menu_open"] is True
+
+    selected = client.post(endpoint, json={"option_id": "menu:faq"})
+    assert selected.status_code == 200
+    selected_body = selected.json()
+    assert selected_body["bot_message"]["intent"] == "FAQ_CATEGORY_DISCOVERY"
+    assert selected_body["ui"]["type"] == "FAQ_CATEGORY_CHOICES"
+    assert selected_body["menu_open"] is False
+
+
+def test_message_accepts_exactly_one_text_or_option_id(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+
+    both = client.post(
+        endpoint,
+        json={"content": "hola", "option_id": "menu:faq"},
+    )
+    neither = client.post(endpoint, json={})
+
+    assert both.status_code == 422
+    assert neither.status_code == 422
+    conversation = client.get(f"/api/v1/chat/conversations/{conversation_id}")
+    assert conversation.json()["messages"] == []
+
+
+def test_main_menu_is_separate_from_faq_discovery_and_restorable(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+
+    response = client.post(endpoint, json={"content": "mostrar menu"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["suggested_action"] == "SHOW_MENU"
+    assert body["bot_message"]["intent"] == "CONVERSATION_MENU"
+    assert body["clarification_options"] == []
+    assert body["sources"] == []
+    assert body["ui"]["type"] == "MAIN_MENU"
+    assert body["ui"]["menu_id"] == "main"
+    assert {option["id"] for option in body["ui"]["options"]} >= {
+        "menu:faq",
+        "menu:tickets",
+        "menu:create_ticket",
+        "menu:advisor",
+        "menu:end",
+    }
+
+    restored = client.get(f"/api/v1/chat/conversations/{conversation_id}")
+    assert restored.status_code == 200
+    assert restored.json()["ui"] == body["ui"]
+
+
+def test_faq_menu_browses_real_categories_then_questions(chatbot_client):
+    client, engine = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+    client.post(endpoint, json={"content": "mostrar menu"})
+
+    categories = client.post(endpoint, json={"option_id": "menu:faq"})
+
+    assert categories.status_code == 200
+    category_body = categories.json()
+    assert category_body["bot_message"]["intent"] == "FAQ_CATEGORY_DISCOVERY"
+    assert category_body["ui"]["type"] == "FAQ_CATEGORY_CHOICES"
+    assert category_body["sources"] == []
+    assert any(option["id"] == "nav:menu" for option in category_body["ui"]["options"])
+    category_options = [
+        option
+        for option in category_body["ui"]["options"]
+        if option["action"] == "SHOW_FAQ_CATEGORY"
+    ]
+    assert category_options
+    assert all(option["id"].startswith("category:") for option in category_options)
+    category_state = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+    assert category_state["ui"] == category_body["ui"]
+    with Session(engine) as session:
+        active_categories = {
+            faq.category_id
+            for faq in session.exec(
+                select(FAQ).where(FAQ.status == FAQ.Status.PUBLISHED, FAQ.is_active)
+            ).all()
+        }
+    selected_category_id = category_options[0]["id"].removeprefix("category:")
+    assert selected_category_id in active_categories
+
+    subcategories = client.post(
+        endpoint,
+        json={"option_id": category_options[0]["id"]},
+    )
+
+    assert subcategories.status_code == 200
+    subcategory_body = subcategories.json()
+    assert subcategory_body["bot_message"]["intent"] == "FAQ_SUBCATEGORY_DISCOVERY"
+    assert subcategory_body["ui"]["type"] == "FAQ_SUBCATEGORY_CHOICES"
+    subcategory_options = [
+        option
+        for option in subcategory_body["ui"]["options"]
+        if option["action"] == "SHOW_FAQ_SUBCATEGORY"
+    ]
+    assert subcategory_options
+
+    questions = client.post(
+        endpoint,
+        json={"option_id": subcategory_options[0]["id"]},
+    )
+
+    assert questions.status_code == 200
+    question_body = questions.json()
+    assert question_body["bot_message"]["intent"] == "FAQ_DISCOVERY"
+    assert question_body["ui"]["type"] == "FAQ_CHOICES"
+    question_options = [
+        option
+        for option in question_body["ui"]["options"]
+        if option["action"] == "SELECT_FAQ"
+    ]
+    assert question_body["sources"]
+    assert all(option["id"].startswith("faq:") for option in question_options)
+    assert {"nav:back", "nav:menu"} <= {
+        option["id"] for option in question_body["ui"]["options"]
+    }
+    with Session(engine) as session:
+        available_questions = {
+            faq.title or faq.question
+            for faq in session.exec(
+                select(FAQ).where(
+                    FAQ.category_id == selected_category_id,
+                    FAQ.status == FAQ.Status.PUBLISHED,
+                    FAQ.is_active,
+                )
+            ).all()
+        }
+    assert {source["title"] for source in question_body["sources"]} <= (
+        available_questions
+    )
+
+
+def _open_faq_category_choices(client: TestClient) -> tuple[str, dict]:
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+    client.post(endpoint, json={"content": "mostrar menu"})
+    response = client.post(endpoint, json={"option_id": "menu:faq"})
+    assert response.status_code == 200
+    return endpoint, response.json()
+
+
+def test_faq_category_drills_into_verified_subcategories(chatbot_client):
+    client, engine = chatbot_client
+    endpoint, categories = _open_faq_category_choices(client)
+    tarjetas_id = next(
+        option["id"]
+        for option in categories["ui"]["options"]
+        if option["label"] == "TARJETAS"
+    )
+
+    subcategories = client.post(endpoint, json={"option_id": tarjetas_id})
+
+    assert subcategories.status_code == 200
+    subcategory_body = subcategories.json()
+    assert subcategory_body["bot_message"]["intent"] == "FAQ_SUBCATEGORY_DISCOVERY"
+    assert subcategory_body["ui"]["type"] == "FAQ_SUBCATEGORY_CHOICES"
+    assert any(
+        option["action"] == "SHOW_FAQ_SUBCATEGORY"
+        for option in subcategory_body["ui"]["options"]
+    )
+    assert any(
+        option["id"] == "nav:back" for option in subcategory_body["ui"]["options"]
+    )
+    assert any(
+        option["id"] == "nav:menu" for option in subcategory_body["ui"]["options"]
+    )
+    assert all(
+        source["url"].startswith("https://www.bancognb.com.pe/")
+        for source in subcategory_body["sources"]
+    )
+
+    first_subcategory = next(
+        option
+        for option in subcategory_body["ui"]["options"]
+        if option["action"] == "SHOW_FAQ_SUBCATEGORY"
+    )
+    questions = client.post(endpoint, json={"option_id": first_subcategory["id"]})
+
+    assert questions.status_code == 200
+    question_body = questions.json()
+    assert question_body["bot_message"]["intent"] == "FAQ_DISCOVERY"
+    assert question_body["ui"]["type"] == "FAQ_CHOICES"
+    question_options = [
+        option
+        for option in question_body["ui"]["options"]
+        if option["action"] == "SELECT_FAQ"
+    ]
+    assert question_options
+    assert all(option["id"].startswith("faq:") for option in question_options)
+    assert {"nav:back", "nav:menu"} <= {
+        option["id"] for option in question_body["ui"]["options"]
+    }
+    assert all(source["category"] == "TARJETAS" for source in question_body["sources"])
+    with Session(engine) as session:
+        faq_ids = {
+            faq.id
+            for faq in session.exec(
+                select(FAQ).where(
+                    FAQ.category_id == tarjetas_id.removeprefix("category:"),
+                    FAQ.status == FAQ.Status.PUBLISHED,
+                    FAQ.is_active,
+                )
+            ).all()
+        }
+    assert all(
+        option["id"].removeprefix("faq:") in faq_ids for option in question_options
+    )
+
+
+def test_faq_buttons_navigate_back_and_to_main_menu(chatbot_client):
+    client, _ = chatbot_client
+    endpoint, categories = _open_faq_category_choices(client)
+    tarjetas_id = next(
+        option["id"]
+        for option in categories["ui"]["options"]
+        if option["label"] == "TARJETAS"
+    )
+    subcategories = client.post(endpoint, json={"option_id": tarjetas_id})
+    assert subcategories.status_code == 200
+
+    back = client.post(endpoint, json={"option_id": "nav:back"})
+
+    assert back.status_code == 200
+    assert back.json()["ui"]["type"] == "FAQ_CATEGORY_CHOICES"
+
+    main_menu = client.post(endpoint, json={"option_id": "nav:menu"})
+
+    assert main_menu.status_code == 200
+    assert main_menu.json()["suggested_action"] == "SHOW_MENU"
+    assert main_menu.json()["ui"]["type"] == "MAIN_MENU"
+
+
+def test_invalid_faq_navigation_option_does_not_mutate_conversation(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
+    before = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+
+    invalid = client.post(endpoint, json={"option_id": "nav:back"})
+
+    assert invalid.status_code == 409
+    after = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+    assert after["status"] == before["status"]
+    assert after["messages"] == before["messages"]
+
+
 @pytest.mark.parametrize(
     "content",
     ["menú", "mostrar menú", "volver al menú", "regresar a las opciones"],
@@ -265,7 +579,9 @@ def test_explicit_menu_request_returns_show_menu(chatbot_client, content: str):
     assert body["bot_message"]["intent"] == "CONVERSATION_MENU"
     assert body["menu_open"] is True
     assert body["conversation_status"] == "ACTIVE"
-    assert body["clarification_options"]
+    assert body["clarification_options"] == []
+    assert body["sources"] == []
+    assert body["ui"]["type"] == "MAIN_MENU"
 
 
 @pytest.mark.parametrize("content", ["otra consulta", "no me ayudó", "no entendí"])

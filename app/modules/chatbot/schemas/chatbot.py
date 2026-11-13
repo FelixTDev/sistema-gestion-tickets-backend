@@ -1,10 +1,29 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.chatbot.models.conversation import ConversationStatus
 from app.modules.tickets.models.ticket import TicketPriority, TicketStatus
+
+
+class ChatbotIntent(StrEnum):
+    GREETING = "GREETING"
+    SHOW_MENU = "SHOW_MENU"
+    FAQ_QUERY = "FAQ_QUERY"
+    FAQ_DISCOVERY = "FAQ_DISCOVERY"
+    FAQ_CATEGORY_DISCOVERY = "FAQ_CATEGORY_DISCOVERY"
+    FAQ_SUBCATEGORY_DISCOVERY = "FAQ_SUBCATEGORY_DISCOVERY"
+    TICKET_QUERY = "TICKET_QUERY"
+    TICKET_DETAIL = "TICKET_DETAIL"
+    CREATE_TICKET = "CREATE_TICKET"
+    TICKET_DRAFT_UPDATE = "TICKET_DRAFT_UPDATE"
+    REQUEST_ADVISOR = "REQUEST_ADVISOR"
+    CLARIFICATION = "CLARIFICATION"
+    NAVIGATION = "NAVIGATION"
+    END_CONVERSATION = "END_CONVERSATION"
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
+    UNKNOWN = "UNKNOWN"
 
 
 class ChatbotSuggestedAction(StrEnum):
@@ -31,6 +50,40 @@ class ChatbotAvailableAction(StrEnum):
     VIEW_MY_TICKETS = "VIEW_MY_TICKETS"
     OFFICIAL_CHANNELS = "OFFICIAL_CHANNELS"
     RETRY = "RETRY"
+
+
+class ChatbotUIType(StrEnum):
+    MAIN_MENU = "MAIN_MENU"
+    FAQ_CATEGORY_CHOICES = "FAQ_CATEGORY_CHOICES"
+    FAQ_SUBCATEGORY_CHOICES = "FAQ_SUBCATEGORY_CHOICES"
+    FAQ_CHOICES = "FAQ_CHOICES"
+
+
+class ChatbotUIAction(StrEnum):
+    SHOW_FAQ_DISCOVERY = "SHOW_FAQ_DISCOVERY"
+    SHOW_FAQ_CATEGORY = "SHOW_FAQ_CATEGORY"
+    SHOW_FAQ_SUBCATEGORY = "SHOW_FAQ_SUBCATEGORY"
+    SELECT_FAQ = "SELECT_FAQ"
+    NAVIGATE_BACK = "NAVIGATE_BACK"
+    SHOW_MENU = "SHOW_MENU"
+    CHECK_TICKET_STATUS = "CHECK_TICKET_STATUS"
+    LIST_MY_TICKETS = "LIST_MY_TICKETS"
+    CREATE_TICKET = "CREATE_TICKET"
+    CONTACT_ADVISOR = "CONTACT_ADVISOR"
+    RESUME_TICKET_DRAFT = "RESUME_TICKET_DRAFT"
+    END_CONVERSATION = "END_CONVERSATION"
+
+
+class ChatbotUIOption(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    action: ChatbotUIAction
+
+
+class ChatbotUI(BaseModel):
+    type: ChatbotUIType
+    menu_id: str = Field(min_length=1, max_length=40)
+    options: list[ChatbotUIOption] = Field(default_factory=list, max_length=20)
 
 
 class ChatbotTicketAssignmentStatus(StrEnum):
@@ -166,6 +219,7 @@ class ChatMessageRead(BaseModel):
     intent: str | None
     confidence: float | None
     faq_id: str | None = None
+    intent_classification: ChatbotIntent | None = None
     response_source: ChatbotResponseSource | None = None
     created_at: datetime
 
@@ -201,6 +255,13 @@ class ConversationRead(BaseModel):
         default=False,
         description="Indica que el cliente volvió al menú de temas de la conversación.",
     )
+    ui: ChatbotUI | None = Field(
+        default=None,
+        description=(
+            "Control interactivo restaurable del estado actual. Sus identificadores "
+            "solo son válidos en el estado conversacional que los ofreció."
+        ),
+    )
     converted_ticket: ChatbotConvertedTicketSummary | None = Field(
         default=None,
         description=(
@@ -211,14 +272,56 @@ class ConversationRead(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(min_length=1, max_length=10_000)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "required": ["content"],
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 10_000,
+                        }
+                    },
+                    "not": {"required": ["option_id"]},
+                },
+                {
+                    "required": ["option_id"],
+                    "properties": {"option_id": {"type": "string", "minLength": 1}},
+                    "not": {"required": ["content"]},
+                },
+            ]
+        }
+    )
+    content: str | None = Field(default=None, min_length=1, max_length=10_000)
+    option_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=(
+            r"^(?:menu:[a-z_]{1,40}|faq:[0-9a-fA-F-]{36}|"
+            r"category:[0-9a-fA-F-]{36}|subcategory:[0-9a-f]{16}|"
+            r"nav:(?:back|menu))$"
+        ),
+        description=(
+            "Identificador de una opción que el backend ofreció para el estado "
+            "actual. No ejecuta acciones no presentadas por el servidor."
+        ),
+    )
 
     @field_validator("content")
     @classmethod
-    def validate_not_blank(cls, value: str) -> str:
-        if not value.strip():
+    def validate_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("El mensaje no puede estar vacío")
         return value
+
+    @model_validator(mode="after")
+    def require_content_or_option(self) -> "MessageCreate":
+        if (self.content is None) == (self.option_id is None):
+            raise ValueError("Envía exactamente uno de content u option_id")
+        return self
 
 
 class ChatbotSource(BaseModel):
@@ -357,6 +460,20 @@ class BotMessageResponse(BaseModel):
     source_category: str | None = None
     requires_clarification: bool = False
     clarification_options: list[str] = Field(default_factory=list)
+    intent_classification: ChatbotIntent | None = Field(
+        default=None,
+        description=(
+            "Clasificación estructurada de la respuesta IA, validada contra el "
+            "catálogo cerrado. No autoriza operaciones ni reemplaza permisos."
+        ),
+    )
+    ui: ChatbotUI | None = Field(
+        default=None,
+        description=(
+            "Opciones interactivas tipadas. option_id solo se acepta si la opción "
+            "sigue perteneciendo al estado actual de la conversación."
+        ),
+    )
     suggested_action: ChatbotSuggestedAction = Field(
         default=ChatbotSuggestedAction.NONE,
         description=(

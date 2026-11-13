@@ -601,7 +601,13 @@ def test_openapi_exposes_typed_actions_and_existing_conversion_contract() -> Non
     schema = app.openapi()
     components = schema["components"]["schemas"]
     response_fields = components["BotMessageResponse"]["properties"]
+    message_create = components["MessageCreate"]
     conversion_path = "/api/v1/chat/conversations/{conversation_id}/convert-to-ticket"
+
+    assert len(message_create.get("oneOf", [])) == 2
+    assert {
+        tuple(variant.get("required", [])) for variant in message_create["oneOf"]
+    } == {("content",), ("option_id",)}
 
     assert response_fields["suggested_action"]["$ref"].endswith(
         "/ChatbotSuggestedAction"

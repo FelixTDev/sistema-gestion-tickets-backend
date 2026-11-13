@@ -6,7 +6,6 @@ import pytest
 
 from app.modules.chatbot.services.ai_provider import AIGenerationResult
 from app.modules.chatbot.services.guardrails import (
-    detect_prompt_injection,
     minimize_provider_input,
     validate_output,
 )
@@ -43,6 +42,7 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "chatbot_ai_requests_per_minute": 5,
         "chatbot_ai_max_responses_per_conversation": 3,
         "chatbot_ai_max_provider_calls_per_actor_per_hour": 20,
+        "chatbot_ai_daily_budget_usd": 0.50,
         "chatbot_ai_idempotency_window_seconds": 30,
         "chatbot_ai_timeout_seconds": 1,
         "chatbot_ai_max_output_chars": 1200,
@@ -85,7 +85,11 @@ def test_local_quality_evaluation_measures_safe_rag_properties(
             text="Para solicitar una tarjeta, presenta tu documento vigente.",
             source_ids=[match.faq.id],
             provider="quality-fake",
-            model="quality-test",
+            model="gpt-5.4-mini",
+            input_tokens=81,
+            output_tokens=24,
+            total_tokens=105,
+            intent_classification="FAQ_QUERY",
         )
     )
     service = RAGService(provider=provider, runtime=_RuntimeState())
@@ -107,7 +111,7 @@ def test_local_quality_evaluation_measures_safe_rag_properties(
     )
 
     metrics = {
-        "intent_exact": not detect_prompt_injection("¿Cómo solicito una tarjeta?"),
+        "intent_exact": accepted.intent_classification == "FAQ_QUERY",
         "retrieval_correct": [chunk.source_id for chunk in context] == [match.faq.id],
         "grounded": accepted.accepted
         and bool(
@@ -124,6 +128,9 @@ def test_local_quality_evaluation_measures_safe_rag_properties(
         not in minimize_provider_input("Consulta cliente@example.com"),
         "consistent_retry": retry.answer == accepted.answer and provider.calls == 1,
         "latency_measured": accepted.trace.get("duration_ms") is not None,
+        "provider_tokens_measured": accepted.trace.get("total_tokens") == 105,
+        "estimated_cost_measured": accepted.trace.get("estimated_cost_usd")
+        == round((81 * 0.75 + 24 * 4.50) / 1_000_000, 8),
     }
 
     error_provider = FakeProvider(
