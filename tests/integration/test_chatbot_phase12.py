@@ -132,8 +132,14 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
     assert response.status_code == 200
     body = response.json()
     assert body["response_source"] == "AI"
+    assert body["fallback_reason"] is None
     assert body["sources"]
     assert "provider" not in body["sources"][0]
+    assert all(
+        source["url"].startswith("https://www.bancognb.com.pe/")
+        and source["verified_at"]
+        for source in body["sources"]
+    )
     assert len(provider.calls) == 1
     assert len(provider.calls[0].context) <= 3
     assert sum(len(chunk.content) for chunk in provider.calls[0].context) <= 6000
@@ -153,6 +159,10 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
         assert message.ai_trace_json["input_tokens"] == 81
         assert message.ai_trace_json["output_tokens"] == 24
         assert message.ai_trace_json["total_tokens"] == 105
+        assert message.ai_trace_json["provider_status"] == "GENERATED"
+        assert message.ai_trace_json["validated"] is True
+        assert message.ai_trace_json["fallback"] is False
+        assert message.ai_trace_json.get("fallback_reason") is None
         assert "TARJÉTAS" not in str(message.ai_trace_json)
 
         audit = session.exec(
@@ -162,6 +172,63 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
             )
         ).first()
         assert audit is not None
+
+
+def test_generated_but_rejected_ai_keeps_public_fallback_and_private_trace(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text=(
+                "Las compras por internet pueden configurarse desde canales "
+                "digitales y el Banco aprobará automáticamente cada compra."
+            ),
+            source_ids=[faq_id(engine)],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "TARJÉTAS y REQUISITOS"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["response_source"] == "DETERMINISTIC"
+    assert body["fallback_reason"] == "OUT_OF_CONTEXT"
+    assert body["bot_message"]["response_source"] == "DETERMINISTIC"
+    assert body["sources"]
+    assert all(
+        source["url"].startswith("https://www.bancognb.com.pe/")
+        and source["verified_at"]
+        and "provider_status" not in source
+        for source in body["sources"]
+    )
+    assert "provider_status" not in body
+    assert "ai_trace_json" not in body
+    assert len(provider.calls) == 1
+    assert "automáticamente" not in body["bot_message"]["content"].casefold()
+
+    with Session(engine) as session:
+        bot_message = session.exec(
+            select(ChatMessage)
+            .where(
+                ChatMessage.conversation_id == conversation["id"],
+                ChatMessage.sender_type == SenderType.BOT,
+            )
+            .order_by(ChatMessage.created_at.desc())
+        ).first()
+        assert bot_message is not None
+        assert bot_message.ai_trace_json["provider_status"] == "GENERATED"
+        assert bot_message.ai_trace_json["validated"] is False
+        assert bot_message.ai_trace_json["validation_reason"] == "OUT_OF_CONTEXT"
+        assert bot_message.ai_trace_json["fallback"] is True
+        assert bot_message.ai_trace_json["fallback_reason"] == "OUT_OF_CONTEXT"
 
 
 def test_arithmetic_embedded_in_a_banking_query_never_reaches_ai_provider(

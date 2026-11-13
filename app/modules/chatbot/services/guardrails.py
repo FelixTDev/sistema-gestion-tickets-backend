@@ -38,6 +38,15 @@ _SECRET_OUTPUT_PATTERNS = (
     r"(?:api[_ -]?key|token|contrase[nñ]a)\s*[:=]\s*\S+",
     r"<script|javascript\s*:|```",
 )
+_UNGROUNDED_CLAIM_PATTERN = re.compile(
+    r"\b(?:tas\w*|comision\w*|requisit\w*|document\w*|plaz\w*|horari\w*|"
+    r"mont\w*|tarif\w*|deb\w*|necesit\w*|present\w*|ingres\w*|llam\w*|"
+    r"comunic\w*|aprob\w*|autoriz\w*|garant\w*|automatic\w*|cobr\w*|"
+    r"devol\w*|exoner\w*|transfer\w*|proces\w*|inmediat\w*|gratis|"
+    r"grati\w*|siempre|nunca|solo|solamente|unicamente|exclusivamente|"
+    r"proced\w*|sin\s+costo)\b",
+    re.IGNORECASE,
+)
 _EMAIL_PATTERN = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 _LONG_NUMBER_PATTERN = re.compile(r"\b\d{6,}\b")
 _WORD_PATTERN = re.compile(r"[a-z0-9]+")
@@ -69,14 +78,65 @@ _GROUNDING_STOP_WORDS = frozenset(
         "mi",
         "para",
         "por",
+        "puede",
+        "pueden",
+        "puedes",
+        "puedo",
+        "podria",
+        "podrias",
         "que",
         "se",
         "su",
         "un",
         "una",
+        "mediante",
         "y",
     }
 )
+_GROUNDING_EQUIVALENCE_GROUPS = (
+    frozenset(
+        {
+            "ajustar",
+            "ajustarse",
+            "ajuste",
+            "cambiar",
+            "cambio",
+            "configurar",
+            "configurarse",
+            "configuracion",
+            "modificar",
+            "modificarse",
+            "modificacion",
+        }
+    ),
+    frozenset({"canal", "medio", "plataforma"}),
+    frozenset({"digital", "electronico", "online", "virtual"}),
+)
+_CLAIM_FAMILY_PREFIXES = {
+    "approval": ("aprob",),
+    "authorization": ("autoriz",),
+    "automatic": ("automatic",),
+    "charge": ("cobr",),
+    "contact": ("comunic",),
+    "deadline": ("plaz", "horari"),
+    "document": ("document",),
+    "fee": ("comision", "tarif"),
+    "free": ("grati", "gratis", "sin costo"),
+    "guarantee": ("garant",),
+    "immediate": ("inmediat",),
+    "ingress": ("ingres",),
+    "must": ("deb",),
+    "need": ("necesit",),
+    "only": ("solo", "solamente", "unicamente", "exclusivamente"),
+    "process": ("proces", "proced"),
+    "present": ("present",),
+    "rate": ("tas",),
+    "refund": ("devol",),
+    "requirement": ("requisit",),
+    "transfer": ("transfer",),
+    "amount": ("mont",),
+    "call": ("llam",),
+}
 
 
 @dataclass(frozen=True)
@@ -166,6 +226,8 @@ def validate_output(
     context_numbers = _normalized_numbers(context_text)
     if not output_numbers.issubset(context_numbers):
         return GuardrailDecision(False, "OUT_OF_CONTEXT")
+    if not _claim_families(answer_text).issubset(_claim_families(context_text)):
+        return GuardrailDecision(False, "OUT_OF_CONTEXT")
 
     sentences = [
         sentence.strip()
@@ -181,7 +243,10 @@ def validate_output(
         # Require support for each sentence, rather than accepting one grounded
         # phrase that would otherwise mask unrelated claims later in the answer.
         minimum_overlap = min(2, len(sentence_terms))
-        if len(sentence_terms & context_terms) < minimum_overlap:
+        supported_terms = sum(
+            _term_is_supported(term, context_terms) for term in sentence_terms
+        )
+        if supported_terms < minimum_overlap:
             return GuardrailDecision(False, "OUT_OF_CONTEXT")
     return GuardrailDecision(True)
 
@@ -197,6 +262,31 @@ def _grounding_terms(value: str) -> set[str]:
         elif len(token) > 4 and token.endswith("s"):
             terms.add(token[:-1])
     return terms
+
+
+def _term_is_supported(term: str, context_terms: set[str]) -> bool:
+    if term in context_terms:
+        return True
+    return any(
+        term in group and bool(group & context_terms)
+        for group in _GROUNDING_EQUIVALENCE_GROUPS
+    )
+
+
+def _claim_families(value: str) -> set[str]:
+    families: set[str] = set()
+    for match in _UNGROUNDED_CLAIM_PATTERN.finditer(normalize_text(value)):
+        claim = match.group(0)
+        family = next(
+            (
+                name
+                for name, prefixes in _CLAIM_FAMILY_PREFIXES.items()
+                if claim.startswith(prefixes)
+            ),
+            claim,
+        )
+        families.add(family)
+    return families
 
 
 def _normalized_numbers(value: str) -> set[str]:

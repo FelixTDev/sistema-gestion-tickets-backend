@@ -323,3 +323,143 @@ def test_output_accepts_answer_supported_by_the_source() -> None:
     )
 
     assert decision.allowed
+
+
+def test_rag_accepts_a_supported_faq_paraphrase_from_a_simulated_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.rag_service.get_settings",
+        lambda: rag_settings(),
+    )
+    source = faq(
+        question="¿Puedo habilitar o deshabilitar compras por internet en mi tarjeta?",
+        title="Compras por internet en tarjetas",
+        summary=(
+            "Los servicios adicionales de tarjetas, como compras por internet, "
+            "pueden configurarse desde los canales digitales."
+        ),
+        answer=(
+            "Si no tienes acceso, consulta las opciones de atención publicadas "
+            "por el Banco."
+        ),
+    )
+    provider = CountingProvider(
+        AIGenerationResult.generated(
+            text="El servicio puede modificarse mediante plataformas virtuales.",
+            source_ids=[source.id],
+            provider="test-provider",
+            model="test-model",
+        )
+    )
+
+    outcome = RAGService(provider=provider, runtime=_RuntimeState()).generate(
+        conversation_id="supported-paraphrase",
+        user_message=source.question,
+        matches=[match(source)],
+        requests_last_minute=0,
+        responses_in_conversation=0,
+    )
+
+    assert provider.calls == 1
+    assert outcome.accepted
+    assert outcome.answer == (
+        "El servicio puede modificarse mediante plataformas virtuales."
+    )
+    assert outcome.sources[0].source_id == source.id
+    assert outcome.trace["provider_status"] == "GENERATED"
+    assert outcome.trace["validated"] is True
+    assert outcome.trace["fallback"] is False
+    assert outcome.trace.get("fallback_reason") is None
+
+
+@pytest.mark.parametrize(
+    "unsupported_claim",
+    [
+        "el Banco aprobará automáticamente cada compra",
+        "el Banco cobrará una comisión adicional",
+        "debes presentar otro documento",
+        "el servicio se aplicará exclusivamente a tarjetas activas",
+    ],
+)
+def test_rag_rejects_a_supported_statement_mixed_with_an_unsupported_bank_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    unsupported_claim: str,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.rag_service.get_settings",
+        lambda: rag_settings(),
+    )
+    source = faq(
+        question="¿Puedo habilitar o deshabilitar compras por internet en mi tarjeta?",
+        title="Compras por internet en tarjetas",
+        summary=(
+            "Los servicios adicionales de tarjetas, como compras por internet, "
+            "pueden configurarse desde los canales digitales."
+        ),
+        answer=(
+            "Si no tienes acceso, consulta las opciones de atención publicadas "
+            "por el Banco."
+        ),
+    )
+    provider = CountingProvider(
+        AIGenerationResult.generated(
+            text=(
+                "Las compras por internet pueden configurarse desde canales "
+                f"digitales y {unsupported_claim}."
+            ),
+            source_ids=[source.id],
+            provider="test-provider",
+            model="test-model",
+        )
+    )
+
+    outcome = RAGService(provider=provider, runtime=_RuntimeState()).generate(
+        conversation_id="mixed-unsupported-claim",
+        user_message=source.question,
+        matches=[match(source)],
+        requests_last_minute=0,
+        responses_in_conversation=0,
+    )
+
+    assert provider.calls == 1
+    assert not outcome.accepted
+    assert outcome.reason == "OUT_OF_CONTEXT"
+    assert outcome.trace["provider_status"] == "GENERATED"
+    assert outcome.trace["validated"] is False
+    assert outcome.trace["validation_reason"] == "OUT_OF_CONTEXT"
+    assert outcome.trace["fallback"] is True
+    assert outcome.trace["fallback_reason"] == "OUT_OF_CONTEXT"
+
+
+def test_rag_marks_generated_but_rejected_output_as_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.rag_service.get_settings",
+        lambda: rag_settings(),
+    )
+    source = faq()
+    provider = CountingProvider(
+        AIGenerationResult.generated(
+            text="La tasa del producto es 15%.",
+            source_ids=[source.id],
+            provider="test-provider",
+            model="test-model",
+        )
+    )
+
+    outcome = RAGService(provider=provider, runtime=_RuntimeState()).generate(
+        conversation_id="generated-rejected-trace",
+        user_message="¿Cómo bloqueo una tarjeta perdida?",
+        matches=[match(source)],
+        requests_last_minute=0,
+        responses_in_conversation=0,
+    )
+
+    assert not outcome.accepted
+    assert outcome.reason == "OUT_OF_CONTEXT"
+    assert outcome.trace["provider_status"] == "GENERATED"
+    assert outcome.trace["validated"] is False
+    assert outcome.trace["fallback"] is True
+    assert outcome.trace["fallback_reason"] == "OUT_OF_CONTEXT"

@@ -601,6 +601,8 @@ class ChatbotService:
                 result["candidate_faq_ids"] = []
                 result["response_source"] = "AI"
                 result["sources"] = self._public_sources(ai_outcome.sources)
+            elif ai_outcome.trace.get("provider_status") == "GENERATED":
+                result["fallback_reason"] = ai_outcome.reason
             action = (
                 "AI_ACCEPTED"
                 if ai_outcome.accepted

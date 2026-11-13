@@ -324,6 +324,7 @@ class RAGService:
 
     @staticmethod
     def _fallback(trace: dict[str, object], reason: str) -> AIOutcome:
+        trace["fallback"] = True
         trace["fallback_reason"] = reason
         return AIOutcome(False, None, (), trace, reason)
 
