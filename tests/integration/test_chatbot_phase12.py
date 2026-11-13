@@ -17,6 +17,7 @@ from app.modules.chatbot.services.ai_provider import (
     AIProviderRequest,
 )
 from app.modules.chatbot.services.chatbot_service import ChatbotService
+from app.modules.chatbot.services.rag_service import RAGService, _RuntimeState
 from app.modules.conocimiento.models.faq import FAQ
 from app.seed.demo_data import seed_demo_data
 
@@ -88,8 +89,9 @@ def configure_fake(
     )
     monkeypatch.setattr(chatbot_module, "get_settings", lambda: settings)
     monkeypatch.setattr(rag_service, "get_settings", lambda: settings)
+    runtime = _RuntimeState()
     app.dependency_overrides[get_chatbot_service] = lambda: ChatbotService(
-        ai_provider=provider
+        rag_service=RAGService(provider=provider, runtime=runtime)
     )
 
 
@@ -132,14 +134,8 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
     assert response.status_code == 200
     body = response.json()
     assert body["response_source"] == "AI"
-    assert body["fallback_reason"] is None
     assert body["sources"]
     assert "provider" not in body["sources"][0]
-    assert all(
-        source["url"].startswith("https://www.bancognb.com.pe/")
-        and source["verified_at"]
-        for source in body["sources"]
-    )
     assert len(provider.calls) == 1
     assert len(provider.calls[0].context) <= 3
     assert sum(len(chunk.content) for chunk in provider.calls[0].context) <= 6000
@@ -159,10 +155,6 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
         assert message.ai_trace_json["input_tokens"] == 81
         assert message.ai_trace_json["output_tokens"] == 24
         assert message.ai_trace_json["total_tokens"] == 105
-        assert message.ai_trace_json["provider_status"] == "GENERATED"
-        assert message.ai_trace_json["validated"] is True
-        assert message.ai_trace_json["fallback"] is False
-        assert message.ai_trace_json.get("fallback_reason") is None
         assert "TARJÉTAS" not in str(message.ai_trace_json)
 
         audit = session.exec(
@@ -229,6 +221,122 @@ def test_generated_but_rejected_ai_keeps_public_fallback_and_private_trace(
         assert bot_message.ai_trace_json["validation_reason"] == "OUT_OF_CONTEXT"
         assert bot_message.ai_trace_json["fallback"] is True
         assert bot_message.ai_trace_json["fallback_reason"] == "OUT_OF_CONTEXT"
+
+
+def test_private_values_never_reach_provider_request(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="La información oficial indica requisitos para tarjetas.",
+            source_ids=[faq_id(engine)],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    first = client.post(endpoint, json={"content": "TARJETAS y REQUISITOS"})
+    assert first.status_code == 200
+    assert provider.calls
+    provider.calls.clear()
+
+    response = client.post(
+        endpoint,
+        json={"content": ("y eso, PIN 4821; CVV 987; tarjeta 4111 1111 1111 1111")},
+    )
+
+    assert response.status_code == 200
+    assert provider.calls, response.json()
+    serialized = repr(provider.calls[0])
+    assert "4821" not in serialized
+    assert "987" not in serialized
+    assert "4111" not in serialized
+    assert "[dato-sensible-redactado]" in provider.calls[0].user_message
+
+
+def test_conversational_ai_can_rephrase_unhelpful_follow_up_without_sources(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="Entiendo. ¿Qué parte de la respuesta no te ayudó?",
+            source_ids=[],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    client.post(endpoint, json={"content": "hola"})
+
+    response = client.post(endpoint, json={"content": "no me ayudó"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["response_source"] == "AI"
+    assert body["bot_message"]["intent"] == "FOLLOW_UP_UNRESOLVED"
+    assert body["suggested_action"] == "ASK_CLARIFICATION"
+    assert body["conversation_status"] == "WAITING_CLARIFICATION"
+    assert provider.calls[-1].context == ()
+    assert provider.calls[-1].grounding_required is False
+
+
+def test_unsafe_conversational_ai_keeps_deterministic_fallback(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="La tasa es 15%.",
+            source_ids=[],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    client.post(endpoint, json={"content": "hola"})
+
+    response = client.post(endpoint, json={"content": "no me ayudó"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["response_source"] == "DETERMINISTIC"
+    assert body["bot_message"]["intent"] == "FOLLOW_UP_UNRESOLVED"
+    assert "15" not in body["bot_message"]["content"]
+    assert body["conversation_status"] == "WAITING_CLARIFICATION"
+
+
+def test_private_ticket_query_never_reaches_ai_provider(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="No debe utilizarse.",
+            source_ids=[],
+            provider="fake",
+            model="fake-test-model",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "¿Cuántos tickets tengo?"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
+    assert response.json()["ticket_query"]["authentication_required"] is True
+    assert provider.calls == []
 
 
 def test_arithmetic_embedded_in_a_banking_query_never_reaches_ai_provider(

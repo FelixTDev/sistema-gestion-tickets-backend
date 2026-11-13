@@ -11,7 +11,7 @@ from app.db.session import get_session
 from app.main import app
 from app.modules.auditoria.models.audit_log import AuditLog
 from app.modules.chatbot.api.router import get_chatbot_service
-from app.modules.chatbot.models.conversation import Conversation
+from app.modules.chatbot.models.conversation import Conversation, ConversationStatus
 from app.modules.chatbot.services import rag_service as rag_service_module
 from app.modules.chatbot.services.ai_provider import (
     AIGenerationResult,
@@ -91,6 +91,120 @@ def test_anonymous_ticket_request_requires_login_without_creating_ticket(
     assert body["ticket_draft"]["status"] == "INACTIVE"
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+
+def test_menu_pauses_ticket_draft_and_get_restores_it(phase3_client) -> None:
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    started = send(client, conversation_id, "Quiero crear un ticket", headers)
+    assert started.json()["ticket_draft"]["status"] == "COLLECTING"
+
+    menu = send(client, conversation_id, "volver al menú", headers)
+    restored = client.get(
+        f"/api/v1/chat/conversations/{conversation_id}", headers=headers
+    )
+
+    assert menu.status_code == 200
+    assert menu.json()["menu_open"] is True
+    assert menu.json()["ticket_draft"]["paused"] is True
+    assert restored.status_code == 200
+    assert restored.json()["menu_open"] is True
+    assert restored.json()["ticket_draft"]["paused"] is True
+    assert restored.json()["ticket_draft"]["status"] == "COLLECTING"
+
+
+def test_faq_does_not_resume_paused_draft_but_explicit_resume_does(
+    phase3_client,
+) -> None:
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+    send(client, conversation_id, "volver al menú", headers)
+
+    faq = send(
+        client,
+        conversation_id,
+        "¿Qué requisitos necesito para una tarjeta?",
+        headers,
+    )
+    resumed = send(client, conversation_id, "retomar el ticket", headers)
+
+    assert faq.status_code == 200
+    assert faq.json()["ticket_draft"]["paused"] is True
+    assert faq.json()["bot_message"]["intent"] != "TICKET_DRAFT_COLLECTING"
+    assert resumed.status_code == 200
+    assert resumed.json()["ticket_draft"]["paused"] is False
+    assert resumed.json()["ticket_draft"]["status"] == "COLLECTING"
+
+
+@pytest.mark.parametrize(
+    "content", ["salir", "finalizar conversación", "quiero cerrar el chat"]
+)
+def test_explicit_end_closes_and_cannot_be_reactivated(
+    phase3_client, content: str
+) -> None:
+    client, engine = phase3_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    closed = send(client, conversation_id, content)
+    retry = send(client, conversation_id, "hola otra vez")
+
+    assert closed.status_code == 200
+    assert closed.json()["suggested_action"] == "END_CONVERSATION"
+    assert closed.json()["conversation_status"] == "CLOSED"
+    assert retry.status_code == 409
+    with Session(engine) as session:
+        conversation = session.get(Conversation, conversation_id)
+        assert conversation is not None
+        assert conversation.status == ConversationStatus.CLOSED
+        assert conversation.ended_at is not None
+        assert (
+            session.exec(
+                select(Ticket).where(Ticket.conversation_id == conversation_id)
+            ).first()
+            is None
+        )
+
+
+def test_closed_conversation_cannot_be_reactivated_by_reset(phase3_client) -> None:
+    client, engine = phase3_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+    closed = send(client, conversation_id, "salir")
+
+    reset = client.post(f"/api/v1/chat/conversations/{conversation_id}/reset")
+    retry = send(client, conversation_id, "hola")
+
+    assert closed.status_code == 200
+    assert closed.json()["conversation_status"] == "CLOSED"
+    assert reset.status_code == 409
+    assert retry.status_code == 409
+    with Session(engine) as session:
+        conversation = session.get(Conversation, conversation_id)
+        assert conversation is not None
+        assert conversation.status == ConversationStatus.CLOSED
+        close_audit = session.exec(
+            select(AuditLog).where(
+                AuditLog.resource_id == conversation_id,
+                AuditLog.action == "CONVERSATION_CLOSED_BY_CLIENT",
+            )
+        ).all()
+        assert len(close_audit) == 1
+
+
+@pytest.mark.parametrize(
+    "content", ["otra consulta", "volver", "no entendí", "no me ayudó"]
+)
+def test_ambiguous_follow_up_never_closes_conversation(
+    phase3_client, content: str
+) -> None:
+    client, _ = phase3_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = send(client, conversation_id, content)
+
+    assert response.status_code == 200
+    assert response.json()["conversation_status"] != "CLOSED"
+    assert response.json()["suggested_action"] != "END_CONVERSATION"
 
 
 def test_anonymous_conversation_can_be_linked_before_authenticated_draft(

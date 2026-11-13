@@ -20,6 +20,8 @@ class ChatbotSuggestedAction(StrEnum):
     LATEST_ADVISOR_RESPONSE = "LATEST_ADVISOR_RESPONSE"
     CLIENT_ACTION_REQUIRED = "CLIENT_ACTION_REQUIRED"
     CLARIFY_TICKET_CODE = "CLARIFY_TICKET_CODE"
+    SHOW_MENU = "SHOW_MENU"
+    END_CONVERSATION = "END_CONVERSATION"
 
 
 class ChatbotAvailableAction(StrEnum):
@@ -86,6 +88,13 @@ class ChatbotTicketDraftCategoryOption(BaseModel):
 
 class ChatbotTicketDraft(BaseModel):
     status: ChatbotTicketDraftStatus = ChatbotTicketDraftStatus.INACTIVE
+    paused: bool = Field(
+        default=False,
+        description=(
+            "Indica que el borrador se conserva mientras el cliente consulta "
+            "otro tema; no confirma ni crea el ticket."
+        ),
+    )
     fields: ChatbotTicketDraftFields = Field(default_factory=ChatbotTicketDraftFields)
     missing_fields: list[ChatbotTicketDraftField] = Field(default_factory=list)
     validation_errors: list[ChatbotTicketDraftValidationError] = Field(
@@ -187,6 +196,10 @@ class ConversationRead(BaseModel):
     ticket_draft: ChatbotTicketDraft = Field(
         default_factory=ChatbotTicketDraft,
         description="Estado y campos permitidos del borrador conversacional de ticket.",
+    )
+    menu_open: bool = Field(
+        default=False,
+        description="Indica que el cliente volvió al menú de temas de la conversación.",
     )
     converted_ticket: ChatbotConvertedTicketSummary | None = Field(
         default=None,
@@ -496,6 +509,10 @@ class BotMessageResponse(BaseModel):
             "Borrador estructurado del ticket. Solo READY_FOR_CONFIRMATION permite "
             "que la interfaz solicite confirmación en el endpoint de conversión."
         ),
+    )
+    menu_open: bool = Field(
+        default=False,
+        description="Indica que la respuesta abrió el menú de temas del asistente.",
     )
     fallback_reason: str | None = None
     conversation_status: ConversationStatus = ConversationStatus.ACTIVE

@@ -246,6 +246,42 @@ def test_faq_discovery_accepts_ordinal_follow_up(chatbot_client):
     assert any(source["title"] == first_option for source in body["sources"])
 
 
+@pytest.mark.parametrize(
+    "content",
+    ["menú", "mostrar menú", "volver al menú", "regresar a las opciones"],
+)
+def test_explicit_menu_request_returns_show_menu(chatbot_client, content: str):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": content},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["suggested_action"] == "SHOW_MENU"
+    assert body["bot_message"]["intent"] == "CONVERSATION_MENU"
+    assert body["menu_open"] is True
+    assert body["conversation_status"] == "ACTIVE"
+    assert body["clarification_options"]
+
+
+@pytest.mark.parametrize("content", ["otra consulta", "no me ayudó", "no entendí"])
+def test_non_menu_follow_up_does_not_emit_show_menu(chatbot_client, content: str):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": content},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["suggested_action"] != "SHOW_MENU"
+
+
 def test_generic_unmatched_query_does_not_resolve_from_common_words(chatbot_client):
     client, _ = chatbot_client
     conversation_id = client.post("/api/v1/chat/conversations").json()["id"]

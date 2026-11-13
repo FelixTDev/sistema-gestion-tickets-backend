@@ -38,6 +38,7 @@ _SECRET_OUTPUT_PATTERNS = (
     r"(?:api[_ -]?key|token|contrase[nñ]a)\s*[:=]\s*\S+",
     r"<script|javascript\s*:|```",
 )
+_URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
 _UNGROUNDED_CLAIM_PATTERN = re.compile(
     r"\b(?:tas\w*|comision\w*|requisit\w*|document\w*|plaz\w*|horari\w*|"
     r"mont\w*|tarif\w*|deb\w*|necesit\w*|present\w*|ingres\w*|llam\w*|"
@@ -49,6 +50,13 @@ _UNGROUNDED_CLAIM_PATTERN = re.compile(
 )
 _EMAIL_PATTERN = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 _LONG_NUMBER_PATTERN = re.compile(r"\b\d{6,}\b")
+_LABELED_SECRET_PATTERN = re.compile(
+    r"\b(?:contraseña|password|pin|otp|cvv|cvc|token|api[_ -]?key|clave)"
+    r"\s*(?:es|:|=)?\s*[^\s,;]+",
+    re.IGNORECASE,
+)
+_CARD_NUMBER_PATTERN = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
+_REDACTED = "[dato-sensible-redactado]"
 _WORD_PATTERN = re.compile(r"[a-z0-9]+")
 _NUMBER_PATTERN = re.compile(r"(?<!\w)\d+(?:[.,]\d+)?(?!\w)")
 _OFFICIAL_SOURCE_HOSTS = frozenset({"bancognb.com.pe", "www.bancognb.com.pe"})
@@ -188,8 +196,10 @@ def has_verified_official_source(
 
 def minimize_provider_input(value: str) -> str:
     """Remove common personal or credential-like values before provider use."""
-    minimized = _EMAIL_PATTERN.sub("[correo-redactado]", value)
-    minimized = _LONG_NUMBER_PATTERN.sub("[dato-numerico-redactado]", minimized)
+    minimized = _LABELED_SECRET_PATTERN.sub(_REDACTED, value)
+    minimized = _CARD_NUMBER_PATTERN.sub(_REDACTED, minimized)
+    minimized = _EMAIL_PATTERN.sub(_REDACTED, minimized)
+    minimized = _LONG_NUMBER_PATTERN.sub(_REDACTED, minimized)
     return minimized
 
 
@@ -248,6 +258,28 @@ def validate_output(
         )
         if supported_terms < minimum_overlap:
             return GuardrailDecision(False, "OUT_OF_CONTEXT")
+    return GuardrailDecision(True)
+
+
+def validate_conversational_output(
+    text: str | None,
+    source_ids: tuple[str, ...],
+    max_output_chars: int,
+) -> GuardrailDecision:
+    if not text or len(text.strip()) > min(max_output_chars, 500):
+        return GuardrailDecision(False, "OUTPUT_SIZE")
+    if source_ids:
+        return GuardrailDecision(False, "INVALID_SOURCES")
+    normalized = normalize_text(text)
+    if _URL_PATTERN.search(text) or _NUMBER_PATTERN.search(text):
+        return GuardrailDecision(False, "UNGROUNDED_CLAIM")
+    if _UNGROUNDED_CLAIM_PATTERN.search(normalized):
+        return GuardrailDecision(False, "UNGROUNDED_CLAIM")
+    if any(
+        re.search(pattern, normalized, re.IGNORECASE)
+        for pattern in _SECRET_OUTPUT_PATTERNS
+    ):
+        return GuardrailDecision(False, "UNSAFE_OUTPUT")
     return GuardrailDecision(True)
 
 

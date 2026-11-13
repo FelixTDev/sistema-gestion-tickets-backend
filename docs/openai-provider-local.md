@@ -27,7 +27,21 @@ por defecto; no se envían solicitudes a OpenAI hasta habilitarla expresamente.
 
 No subas `.env`, no incluyas la clave en el frontend ni la pegues en chats o logs.
 El adaptador usa `store=false` y no envía historial de conversaciones completo;
-envía únicamente el mensaje minimizado y las fuentes FAQ seleccionadas. Esto evita
+envía únicamente el mensaje minimizado, un contexto conversacional reciente y
+acotado cuando hace falta resolver una referencia, y las fuentes FAQ seleccionadas.
+Antes de la llamada redacta correos, contraseñas, PIN, OTP, CVV/CVC, tokens,
+claves API, números completos de tarjeta y secuencias numéricas largas.
+
+Los turnos sociales o de aclaración pueden usar el modelo sin fuentes RAG, pero
+su salida se limita a reconocer el mensaje o pedir una precisión breve. Si el
+modelo incluye cifras, URLs, requisitos, canales u otras afirmaciones bancarias
+sin fuentes, el backend rechaza esa salida y conserva la respuesta determinista.
+Las afirmaciones sobre productos y procesos siempre requieren contexto RAG
+validado.
+
+`CHATBOT_MAX_MESSAGE_LENGTH` limita el texto del usuario y el contexto reciente;
+`CHATBOT_AI_MAX_CONTEXT_CHARS`, `CHATBOT_AI_MAX_OUTPUT_CHARS` y
+`CHATBOT_AI_MAX_OUTPUT_TOKENS` acotan las fuentes y la salida. Esto evita
 guardar el estado de respuesta de la API, pero no equivale a Zero Data Retention:
 consulta las [reglas vigentes de retención de datos](https://developers.openai.com/api/docs/guides/your-data).
 

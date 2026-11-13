@@ -30,6 +30,7 @@ class AIProviderRequest:
     max_output_chars: int
     max_output_tokens: int
     timeout_seconds: float
+    grounding_required: bool = True
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ class HttpJsonAIProvider:
             "input": request.user_message,
             "policy": request.policy,
             "prompt_version": request.prompt_version,
+            "grounding_required": request.grounding_required,
             "context": [
                 {
                     "source_id": chunk.source_id,

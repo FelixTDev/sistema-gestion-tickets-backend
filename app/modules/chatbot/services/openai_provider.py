@@ -116,7 +116,7 @@ class OpenAIResponsesProvider:
             or not text.strip()
             or len(text) > request.max_output_chars
             or not isinstance(source_ids, list)
-            or not source_ids
+            or (request.grounding_required and not source_ids)
             or any(not isinstance(source_id, str) for source_id in source_ids)
         ):
             return self._failed(
@@ -139,6 +139,7 @@ class OpenAIResponsesProvider:
     def _request_payload(self, request: AIProviderRequest) -> dict[str, object]:
         input_payload = {
             "user_message": request.user_message,
+            "grounding_required": request.grounding_required,
             "sources": [
                 {
                     "id": source.source_id,

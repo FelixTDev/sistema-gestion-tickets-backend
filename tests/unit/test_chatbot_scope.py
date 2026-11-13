@@ -3,9 +3,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.modules.chatbot.services.ai_provider import AIGenerationResult, NoopAIProvider
+from app.modules.chatbot.services.ai_provider import (
+    AIGenerationResult,
+    AIProviderRequest,
+    NoopAIProvider,
+)
 from app.modules.chatbot.services.chatbot_service import ChatbotService
-from app.modules.chatbot.services.guardrails import validate_output
+from app.modules.chatbot.services.guardrails import (
+    minimize_provider_input,
+    validate_output,
+)
 from app.modules.chatbot.services.rag_service import RAGService, _RuntimeState
 
 
@@ -41,6 +48,19 @@ class CountingProvider:
         return self.result
 
 
+class CapturingProvider:
+    name = "test-provider"
+    model = "test-model"
+
+    def __init__(self, result: AIGenerationResult) -> None:
+        self.result = result
+        self.requests: list[AIProviderRequest] = []
+
+    def generate(self, request: AIProviderRequest) -> AIGenerationResult:
+        self.requests.append(request)
+        return self.result
+
+
 def faq(
     *,
     faq_id: str = "faq-card-block",
@@ -49,6 +69,7 @@ def faq(
     summary: str = "Bloquea la tarjeta perdida desde un canal oficial.",
     answer: str = "Comunícate con un canal oficial para bloquear la tarjeta.",
     keywords: str = '["bloqueo de tarjeta", "tarjeta perdida", "canal oficial", "2"]',
+    synonyms: str = "[]",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=faq_id,
@@ -63,7 +84,7 @@ def faq(
         answer=answer,
         keywords=keywords,
         tags="[]",
-        synonyms="[]",
+        synonyms=synonyms,
         intent=None,
         priority=1,
         display_order=1,
@@ -142,6 +163,53 @@ def test_ticket_tracking_code_is_not_treated_as_arithmetic() -> None:
     assert not ChatbotService._contains_arithmetic_expression("TCK-20261015-620F8AF81E")
 
 
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        ("mi contraseña es Secreta-123", "Secreta-123"),
+        ("PIN: 4821", "4821"),
+        ("OTP 654321", "654321"),
+        ("CVV 987", "987"),
+        ("token=abc.def.ghi", "abc.def.ghi"),
+        ("api_key: sk-proyecto-secreto", "sk-proyecto-secreto"),
+        ("tarjeta 4111 1111 1111 1111", "4111 1111 1111 1111"),
+        ("cliente@example.com", "cliente@example.com"),
+    ],
+)
+def test_minimize_provider_input_redacts_credentials_and_pii(
+    message: str, secret: str
+) -> None:
+    minimized = minimize_provider_input(message)
+
+    assert secret not in minimized
+    assert "[dato-sensible-redactado]" in minimized
+
+
+def test_minimize_provider_input_preserves_non_sensitive_intent() -> None:
+    message = "Necesito bloquear mi tarjeta"
+
+    assert minimize_provider_input(message) == message
+
+
+def test_contextual_provider_input_is_redacted_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.chatbot_service.get_settings",
+        lambda: SimpleNamespace(chatbot_max_message_length=180),
+    )
+
+    value = ChatbotService._contextual_provider_input(
+        "Mi PIN es 4821 y " + "a" * 300,
+        "La respuesta anterior fue extensa " + "b" * 1200,
+        "Mi tarjeta es 4111 1111 1111 1111",
+    )
+
+    assert len(value) <= 180
+    assert "4821" not in value
+    assert "4111" not in value
+
+
 def test_specific_banking_question_still_matches_verified_faq() -> None:
     matches = service_for(faq())._find_matches(
         None, "¿Cómo bloqueo una tarjeta perdida?"
@@ -150,6 +218,34 @@ def test_specific_banking_question_still_matches_verified_faq() -> None:
     assert matches
     assert matches[0].faq.id == "faq-card-block"
     assert matches[0].score >= 0.70
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "¿Cómo blokear una tarjeta perdida?",
+        "perdí mi tarjeta, ¿cómo la bloqueo?",
+        "necesito inhabilitar mi plástico extraviado",
+    ],
+)
+def test_retrieval_tolerates_typo_and_verified_paraphrases(query: str) -> None:
+    item = faq(synonyms='["inhabilitar plástico", "plástico extraviado"]')
+
+    matches = service_for(item)._find_matches(None, query)
+
+    assert matches
+    assert matches[0].faq.id == item.id
+    assert matches[0].score >= 0.70
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["tarjeta de cumpleaños", "programar una tarjeta web", "dime un chiste de tarjeta"],
+)
+def test_retrieval_rejects_unrelated_shared_product_words(query: str) -> None:
+    matches = service_for(faq())._find_matches(None, query)
+
+    assert all(item.score < 0.70 for item in matches)
 
 
 def test_rag_does_not_call_provider_when_sources_are_below_threshold(
@@ -201,6 +297,77 @@ def test_rag_does_not_call_provider_for_ambiguous_sources(
     assert not result.accepted
     assert result.reason == "AMBIGUOUS_CONTEXT"
     assert provider.calls == 0
+
+
+def test_conversational_mode_calls_provider_without_rag_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.rag_service.get_settings",
+        lambda: rag_settings(),
+    )
+    provider = CapturingProvider(
+        AIGenerationResult.generated(
+            text="Entiendo. ¿Qué parte de la respuesta no te ayudó?",
+            source_ids=[],
+            provider="test-provider",
+            model="test-model",
+        )
+    )
+    rag = RAGService(provider=provider, runtime=_RuntimeState())
+
+    outcome = rag.generate(
+        conversation_id="conversation-meta",
+        user_message="no me ayudó",
+        matches=[],
+        requests_last_minute=0,
+        responses_in_conversation=0,
+        grounding_required=False,
+    )
+
+    assert outcome.accepted
+    assert outcome.sources == ()
+    assert provider.requests[0].grounding_required is False
+    assert provider.requests[0].context == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "La tasa es 15%.",
+        "Debes presentar dos documentos.",
+        "Ingresa a https://ejemplo.test para bloquear la tarjeta.",
+    ],
+)
+def test_conversational_mode_rejects_banking_claims_without_sources(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.chatbot.services.rag_service.get_settings",
+        lambda: rag_settings(),
+    )
+    provider = CapturingProvider(
+        AIGenerationResult.generated(
+            text=text,
+            source_ids=[],
+            provider="test-provider",
+            model="test-model",
+        )
+    )
+    rag = RAGService(provider=provider, runtime=_RuntimeState())
+
+    outcome = rag.generate(
+        conversation_id="conversation-unsafe-meta",
+        user_message="no me ayudó",
+        matches=[],
+        requests_last_minute=0,
+        responses_in_conversation=0,
+        grounding_required=False,
+    )
+
+    assert not outcome.accepted
+    assert outcome.reason == "UNGROUNDED_CLAIM"
+    assert len(provider.requests) == 1
 
 
 def test_rag_trace_records_provider_token_usage(

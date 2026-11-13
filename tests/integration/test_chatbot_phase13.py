@@ -634,7 +634,13 @@ def test_openapi_exposes_typed_actions_and_existing_conversion_contract() -> Non
         "LATEST_ADVISOR_RESPONSE",
         "CLIENT_ACTION_REQUIRED",
         "CLARIFY_TICKET_CODE",
+        "SHOW_MENU",
+        "END_CONVERSATION",
     ]
+    assert "CLOSED" in components["ConversationStatus"]["enum"]
+    assert response_fields["menu_open"]["default"] is False
+    assert components["ConversationRead"]["properties"]["menu_open"]["default"] is False
+    assert components["ChatbotTicketDraft"]["properties"]["paused"]["default"] is False
     assert conversion_path in schema["paths"]
     assert (
         "confianza de la última respuesta"

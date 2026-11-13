@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from difflib import SequenceMatcher
 
 from fastapi import HTTPException, status
 from sqlmodel import Session
@@ -34,6 +35,7 @@ from app.modules.chatbot.schemas.chatbot import (
     ChatbotSuggestedAction,
     ChatbotTicketAssignmentStatus,
     ChatbotTicketCard,
+    ChatbotTicketDraft,
     ChatbotTicketDraftStatus,
     ChatbotTicketPagination,
     ChatbotTicketQuery,
@@ -46,6 +48,7 @@ from app.modules.chatbot.schemas.chatbot import (
 from app.modules.chatbot.services.guardrails import (
     detect_prompt_injection,
     has_verified_official_source,
+    minimize_provider_input,
 )
 from app.modules.chatbot.services.rag_service import RAGService
 from app.modules.chatbot.services.ticket_draft_service import (
@@ -79,6 +82,7 @@ _STOP_WORDS = {
     "las",
     "los",
     "me",
+    "mi",
     "necesito",
     "no",
     "para",
@@ -164,6 +168,60 @@ _FAQ_DISCOVERY_CATEGORY_ORDER = (
     "BANCA_DIGITAL",
     "CREDITOS",
     "RECLAMOS_SIMPLES",
+)
+_CONVERSATION_MENU_COMMANDS = frozenset(
+    {
+        "menu",
+        "menu principal",
+        "mostrar menu",
+        "ver menu",
+        "abrir menu",
+        "inicio",
+        "volver",
+        "regresar",
+        "volver al menu",
+        "volver al inicio",
+        "volver a las opciones",
+        "regresar a las opciones",
+        "regresar al menu",
+        "regresar al inicio",
+        "quiero volver",
+        "quiero regresar",
+        "quiero volver al menu",
+        "quiero volver al inicio",
+        "mostrar opciones",
+        "ver opciones",
+        "retroceder",
+        "volver atras",
+        "quiero ver las opciones",
+    }
+)
+_END_CONVERSATION_COMMANDS = frozenset(
+    {
+        "salir",
+        "terminar",
+        "finalizar",
+        "cerrar chat",
+        "cerrar",
+        "cerrar conversacion",
+        "finalizar chat",
+        "finalizar conversacion",
+        "terminar chat",
+        "terminar conversacion",
+        "quiero salir",
+        "quiero terminar",
+        "quiero finalizar",
+        "quiero cerrar",
+        "quiero cerrar el chat",
+    }
+)
+_TRANSIENT_CONVERSATION_CONTEXT_KEYS = (
+    "pending_ticket_query",
+    "clarification_attempts",
+    "pending_faq_ids",
+    "clarification_context",
+    "advisor_handoff_requested",
+    "last_terms",
 )
 
 
@@ -302,7 +360,14 @@ class ChatbotService:
         )
         self._ensure_message_allowed(conversation)
         clean_content = self._clean_content(content)
-        self._enforce_limits(session, conversation)
+        is_faq_discovery = self._is_faq_discovery_request(clean_content)
+        lifecycle_action = (
+            None
+            if is_faq_discovery
+            else self._conversation_lifecycle_action(clean_content)
+        )
+        if lifecycle_action is None:
+            self._enforce_limits(session, conversation)
         recent_messages = self.conversations.list_recent_messages(
             session, conversation.id
         )
@@ -325,6 +390,7 @@ class ChatbotService:
         was_waiting_for_clarification = (
             conversation.status == ConversationStatus.WAITING_CLARIFICATION
         )
+        saved_context = dict(conversation.context_json or {})
         is_ticket_request = self._is_ticket_request(clean_content)
         is_advisor_request = self._is_advisor_request(clean_content)
         ticket_query_request = self._ticket_query_request(clean_content)
@@ -335,12 +401,15 @@ class ChatbotService:
             previous_bot_message and self._is_unhelpful_follow_up(clean_content)
         )
         is_greeting = self._is_pure_greeting(clean_content)
-        is_faq_discovery = self._is_faq_discovery_request(clean_content)
         advisor_handoff_requested = is_advisor_request or (
-            (conversation.context_json or {}).get("advisor_handoff_requested") is True
+            saved_context.get("advisor_handoff_requested") is True
         )
-        saved_draft = (conversation.context_json or {}).get(TICKET_DRAFT_CONTEXT_KEY)
+        saved_draft = saved_context.get(TICKET_DRAFT_CONTEXT_KEY)
         current_draft = self.ticket_drafts.read(session, saved_draft)
+        paused_draft = saved_context.get("ticket_draft_paused") is True
+        resume_paused_draft = paused_draft and self.ticket_drafts.is_resume_request(
+            clean_content
+        )
         resume_after_authentication = bool(
             current_user is not None
             and previous_bot_message is not None
@@ -355,12 +424,17 @@ class ChatbotService:
             is_ticket_request
             or advisor_handoff_requested
             or resume_after_authentication
+            or resume_paused_draft
         )
-        unrelated_special_message = not start_ticket_draft and (
-            is_greeting or is_faq_discovery or is_unhelpful_follow_up
+        unrelated_special_message = lifecycle_action is not None or (
+            not start_ticket_draft
+            and (is_greeting or is_faq_discovery or is_unhelpful_follow_up)
         )
         ticket_draft_flow = (
             not unrelated_special_message
+            and not (
+                paused_draft and not resume_paused_draft and not start_ticket_draft
+            )
             and self.ticket_drafts.should_handle(
                 session,
                 clean_content,
@@ -384,7 +458,50 @@ class ChatbotService:
         retrieval_unavailable = False
         ticket_draft_reply: TicketDraftReply | None = None
         try:
-            if ticket_query_request is not None:
+            if lifecycle_action is not None:
+                if (
+                    lifecycle_action == ChatbotSuggestedAction.END_CONVERSATION
+                    and current_draft.status
+                    in {
+                        ChatbotTicketDraftStatus.COLLECTING,
+                        ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                    }
+                ):
+                    ticket_draft_reply = self.ticket_drafts.handle(
+                        session,
+                        (
+                            "Cancela el borrador del ticket. "
+                            "No deseo continuar con su creación."
+                        ),
+                        saved_draft,
+                        start_requested=False,
+                    )
+                result = self._conversation_lifecycle_response(
+                    lifecycle_action,
+                    draft_paused=(
+                        lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
+                        and current_draft.status
+                        in {
+                            ChatbotTicketDraftStatus.COLLECTING,
+                            ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                        }
+                    ),
+                    draft_cancelled=(
+                        lifecycle_action == ChatbotSuggestedAction.END_CONVERSATION
+                        and current_draft.status
+                        in {
+                            ChatbotTicketDraftStatus.COLLECTING,
+                            ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                        }
+                    ),
+                )
+                if lifecycle_action == ChatbotSuggestedAction.SHOW_MENU:
+                    menu_discovery, menu_matches = self._faq_discovery_response(session)
+                    result["options"] = menu_discovery["options"]
+                    result["candidate_faq_ids"] = menu_discovery["candidate_faq_ids"]
+                    result["sources"] = menu_discovery["sources"]
+                    matches = menu_matches
+            elif ticket_query_request is not None:
                 result = self._ticket_query_response(
                     session, current_user, ticket_query_request
                 )
@@ -485,7 +602,9 @@ class ChatbotService:
             selected_match = None
             result = self._knowledge_unavailable_response()
 
-        if result.get("fallback_reason") == "LOW_CONFIDENCE":
+        if lifecycle_action is not None:
+            pass
+        elif result.get("fallback_reason") == "LOW_CONFIDENCE":
             try:
                 discovery, _ = self._faq_discovery_response(session)
                 result["options"] = discovery["options"]
@@ -541,23 +660,36 @@ class ChatbotService:
 
         result["response_source"] = result.get("response_source", "DETERMINISTIC")
         result["sources"] = result.get("sources", self._public_sources(matches[:1]))
+        conversational_ai = bool(
+            is_unhelpful_follow_up
+            or (
+                result.get("requires_clarification")
+                and not matches
+                and not is_greeting
+                and not is_faq_discovery
+                and lifecycle_action is None
+            )
+        )
         skip_ai = bool(
             retrieval_unavailable
             or ticket_query_request is not None
             or is_ticket_request
             or is_advisor_request
-            or is_unhelpful_follow_up
             or (is_advisor_request and is_ticket_request)
             or is_greeting
             or is_faq_discovery
             or self._contains_arithmetic_expression(clean_content)
             or selected_match is not None
-            or current_draft.status
-            in {
-                ChatbotTicketDraftStatus.COLLECTING,
-                ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
-            }
+            or (
+                not paused_draft
+                and current_draft.status
+                in {
+                    ChatbotTicketDraftStatus.COLLECTING,
+                    ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                }
+            )
             or ticket_draft_reply is not None
+            or lifecycle_action is not None
         )
         if skip_ai:
             result["ai_trace"] = (
@@ -590,17 +722,19 @@ class ChatbotService:
                         session, conversation.id
                     )
                 ),
+                grounding_required=not conversational_ai,
             )
             result["ai_trace"] = ai_outcome.trace
             if ai_outcome.accepted:
                 result["answer"] = ai_outcome.answer
-                result["resolved"] = True
-                result["offers_ticket"] = False
-                result["requires_clarification"] = False
-                result["options"] = []
-                result["candidate_faq_ids"] = []
                 result["response_source"] = "AI"
                 result["sources"] = self._public_sources(ai_outcome.sources)
+                if not conversational_ai:
+                    result["resolved"] = True
+                    result["offers_ticket"] = False
+                    result["requires_clarification"] = False
+                    result["options"] = []
+                    result["candidate_faq_ids"] = []
             elif ai_outcome.trace.get("provider_status") == "GENERATED":
                 result["fallback_reason"] = ai_outcome.reason
             action = (
@@ -617,6 +751,7 @@ class ChatbotService:
                         "INVALID_SOURCES",
                         "OUT_OF_CONTEXT",
                         "OUTPUT_SIZE",
+                        "UNGROUNDED_CLAIM",
                     }
                     else "AI_FALLBACK"
                 )
@@ -720,8 +855,46 @@ class ChatbotService:
                 context.pop("clarification_context", None)
         if not result.get("preserve_context"):
             context["last_terms"] = self._meaningful_tokens(search_content)[:20]
+        if lifecycle_action is not None:
+            for key in _TRANSIENT_CONVERSATION_CONTEXT_KEYS:
+                context.pop(key, None)
+            context["menu_open"] = lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
+            if (
+                lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
+                and current_draft.status
+                in {
+                    ChatbotTicketDraftStatus.COLLECTING,
+                    ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                }
+            ):
+                context["ticket_draft_paused"] = True
+            else:
+                context.pop("ticket_draft_paused", None)
+            conversation.category_id = None
+            conversation.pending_question = None
+        else:
+            context["menu_open"] = False
+            if resume_paused_draft or start_ticket_draft:
+                context.pop("ticket_draft_paused", None)
         conversation.context_json = context
-        if result["escalated"]:
+        if lifecycle_action == ChatbotSuggestedAction.END_CONVERSATION:
+            conversation.status = ConversationStatus.CLOSED
+            conversation.ended_at = conversation.last_activity_at
+            self.audit.record(
+                session,
+                event_type="CHATBOT",
+                action="CONVERSATION_CLOSED_BY_CLIENT",
+                actor_user_id=conversation.user_id,
+                actor_role=current_user.role if current_user else None,
+                resource_type="CONVERSATION",
+                resource_id=conversation.id,
+                target_user_id=conversation.user_id,
+                success=True,
+            )
+        elif lifecycle_action == ChatbotSuggestedAction.SHOW_MENU:
+            conversation.status = ConversationStatus.ACTIVE
+            conversation.ended_at = None
+        elif result["escalated"]:
             conversation.status = ConversationStatus.ESCALATED
             conversation.escalation_reason = result["fallback_reason"]
             conversation.escalated_at = conversation.last_activity_at
@@ -808,9 +981,10 @@ class ChatbotService:
             sources=result["sources"],
             ticket_query=result.get("ticket_query"),
             available_actions=result.get("available_actions", []),
-            ticket_draft=self.ticket_drafts.read(
-                session, conversation.context_json.get(TICKET_DRAFT_CONTEXT_KEY)
+            ticket_draft=self._read_ticket_draft(
+                session, conversation.context_json or {}
             ),
+            menu_open=(conversation.context_json or {}).get("menu_open") is True,
         )
 
     def link_user(
@@ -914,6 +1088,10 @@ class ChatbotService:
         if conversation.status == ConversationStatus.CONVERTED_TO_TICKET:
             raise HTTPException(
                 status_code=409, detail="La conversación ya fue convertida"
+            )
+        if conversation.status == ConversationStatus.CLOSED:
+            raise HTTPException(
+                status_code=409, detail="La conversación ya está cerrada"
             )
         conversation.status = ConversationStatus.ACTIVE
         conversation.context_json = {}
@@ -1074,6 +1252,17 @@ class ChatbotService:
             overlap = len(query_forms & field_tokens) / len(query_forms)
             keyword_overlap = len(query_forms & keyword_tokens) / len(query_forms)
             score = min(1.0, 0.55 * overlap + 0.45 * keyword_overlap)
+            candidate_tokens = field_tokens | keyword_tokens
+            fuzzy_overlap = (
+                self._fuzzy_overlap(query_forms, candidate_tokens)
+                if query_forms & candidate_tokens
+                else 0.0
+            )
+            score = max(
+                score,
+                0.80 * keyword_overlap,
+                0.75 * fuzzy_overlap,
+            )
             if query in question or query in title:
                 score = 1.0
             if score > 0:
@@ -2107,14 +2296,25 @@ class ChatbotService:
         previous_bot_message: str,
         current_message: str,
     ) -> str:
-        return (
-            "Usa este diálogo reciente solo para entender la referencia de la "
-            "consulta actual. Basa cualquier dato del producto únicamente en las "
-            "fuentes autorizadas que acompañan la solicitud.\n"
-            f"Mensaje previo del cliente: {previous_user_message[:250]}\n"
-            f"Respuesta previa del asistente: {previous_bot_message[:1000]}\n"
-            f"Consulta actual: {current_message}"
+        limit = get_settings().chatbot_max_message_length
+        policy = "Contexto reciente solo para resolver la referencia actual.\n"
+        labels = (
+            "Mensaje previo del cliente: ",
+            "Respuesta previa del asistente: ",
+            "Consulta actual: ",
         )
+        remaining = max(0, limit - len(policy) - sum(map(len, labels)) - 2)
+        previous_budget = remaining // 5
+        assistant_budget = remaining // 5
+        current_budget = remaining - previous_budget - assistant_budget
+        value = (
+            f"{policy}{labels[0]}"
+            f"{minimize_provider_input(previous_user_message)[:previous_budget]}\n"
+            f"{labels[1]}"
+            f"{minimize_provider_input(previous_bot_message)[:assistant_budget]}\n"
+            f"{labels[2]}{minimize_provider_input(current_message)[:current_budget]}"
+        )
+        return value[:limit]
 
     @staticmethod
     def _suggested_action(result: dict[str, object]) -> ChatbotSuggestedAction:
@@ -2125,6 +2325,70 @@ class ChatbotService:
         if result.get("offers_ticket"):
             return ChatbotSuggestedAction.CONVERT_TO_TICKET
         return ChatbotSuggestedAction.NONE
+
+    @staticmethod
+    def _conversation_lifecycle_action(
+        content: str,
+    ) -> ChatbotSuggestedAction | None:
+        normalized = normalize_text(content).strip(" .,!?:;¿¡")
+        if normalized in _CONVERSATION_MENU_COMMANDS:
+            return ChatbotSuggestedAction.SHOW_MENU
+        if normalized in _END_CONVERSATION_COMMANDS:
+            return ChatbotSuggestedAction.END_CONVERSATION
+        return None
+
+    @staticmethod
+    def _conversation_lifecycle_response(
+        action: ChatbotSuggestedAction,
+        *,
+        draft_paused: bool,
+        draft_cancelled: bool,
+    ) -> dict[str, object]:
+        if action == ChatbotSuggestedAction.SHOW_MENU:
+            answer = (
+                "Volví al menú. Elige un tema o escribe otra consulta; "
+                "el historial de esta conversación se conserva."
+            )
+            if draft_paused:
+                answer += (
+                    " Tu borrador de ticket quedó guardado; puedes retomarlo "
+                    "cuando quieras."
+                )
+            intent = "CONVERSATION_MENU"
+        else:
+            answer = (
+                "La conversación finalizó y su historial se conserva. "
+                "No se creó ningún ticket."
+            )
+            if draft_cancelled:
+                answer += " El borrador pendiente se canceló."
+            intent = "CONVERSATION_ENDED"
+        result = ChatbotService._greeting_response()
+        result.update(
+            answer=answer,
+            intent=intent,
+            resolved=True,
+            offers_ticket=False,
+            requires_clarification=False,
+            options=[],
+            fallback_reason=None,
+            escalated=False,
+            match=None,
+            response_source="DETERMINISTIC",
+            preserve_context=False,
+            suggested_action=action,
+            available_actions=[],
+            sources=[],
+        )
+        return result
+
+    def _read_ticket_draft(
+        self, session: Session, context: dict[str, object]
+    ) -> ChatbotTicketDraft:
+        draft = self.ticket_drafts.read(session, context.get(TICKET_DRAFT_CONTEXT_KEY))
+        return draft.model_copy(
+            update={"paused": context.get("ticket_draft_paused") is True}
+        )
 
     @staticmethod
     def _greeting_response() -> dict[str, object]:
@@ -2245,6 +2509,7 @@ class ChatbotService:
     def _conversation_read(
         self, session: Session, conversation: Conversation
     ) -> ConversationRead:
+        context = conversation.context_json or {}
         ticket = self.tickets.repository.get_by_conversation(session, conversation.id)
         return ConversationRead(
             id=conversation.id,
@@ -2262,10 +2527,8 @@ class ChatbotService:
             escalated_at=conversation.escalated_at,
             converted_at=conversation.converted_at,
             last_activity_at=conversation.last_activity_at,
-            ticket_draft=self.ticket_drafts.read(
-                session,
-                (conversation.context_json or {}).get(TICKET_DRAFT_CONTEXT_KEY),
-            ),
+            ticket_draft=self._read_ticket_draft(session, context),
+            menu_open=context.get("menu_open") is True,
             converted_ticket=(
                 ChatbotConvertedTicketSummary(
                     id=ticket.id,
@@ -2329,6 +2592,22 @@ class ChatbotService:
             elif len(token) > 4 and token.endswith("s"):
                 forms.add(token[:-1])
         return forms
+
+    @staticmethod
+    def _fuzzy_overlap(query_terms: set[str], candidate_terms: set[str]) -> float:
+        eligible = {term for term in query_terms if len(term) >= 5}
+        if not eligible:
+            return 0.0
+        matched = sum(
+            1
+            for term in eligible
+            if any(
+                SequenceMatcher(None, term, candidate).ratio() >= 0.80
+                for candidate in candidate_terms
+                if len(candidate) >= 5
+            )
+        )
+        return matched / len(query_terms)
 
     @classmethod
     def _keywords(cls, raw_keywords: str) -> list[str]:

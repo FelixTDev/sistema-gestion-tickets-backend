@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from io import BytesIO
 from urllib.error import HTTPError
 
@@ -127,6 +128,35 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
         "Comunícate con el canal oficial para bloquearla."
     )
     assert "openai-secret-test" not in json.dumps(payload)
+
+
+def test_responses_provider_accepts_source_free_conversational_output(monkeypatch):
+    monkeypatch.setattr(
+        openai_provider,
+        "urlopen",
+        lambda _request, *, timeout: FakeResponse(
+            response_body(
+                {
+                    "text": "Entiendo. ¿Qué parte de la respuesta no te ayudó?",
+                    "source_ids": [],
+                }
+            )
+        ),
+    )
+    provider = OpenAIResponsesProvider(
+        api_key="openai-secret-test",
+        model="gpt-5.4-mini",
+    )
+    request = replace(
+        provider_request(),
+        context=(),
+        grounding_required=False,
+    )
+
+    result = provider.generate(request)
+
+    assert result.status == "GENERATED"
+    assert result.source_ids == ()
 
 
 @pytest.mark.parametrize(

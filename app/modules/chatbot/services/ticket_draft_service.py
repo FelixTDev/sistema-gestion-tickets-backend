@@ -83,7 +83,7 @@ class TicketDraftService:
         return self._with_category_options(session, draft)
 
     def persisted(self, draft: ChatbotTicketDraft) -> dict[str, object]:
-        return draft.model_dump(mode="json", exclude={"category_options"})
+        return draft.model_dump(mode="json", exclude={"category_options", "paused"})
 
     def should_handle(
         self,

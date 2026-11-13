@@ -20,6 +20,7 @@ from app.modules.chatbot.services.guardrails import (
     has_verified_official_source,
     minimize_provider_input,
     validate_context,
+    validate_conversational_output,
     validate_output,
 )
 from app.shared.text import normalize_text
@@ -69,10 +70,16 @@ class RAGService:
         requests_last_minute: int,
         responses_in_conversation: int,
         requests_by_actor_last_hour: int = 0,
+        grounding_required: bool = True,
     ) -> AIOutcome:
         settings = get_settings()
-        context = self.build_context(matches)
-        cache_key = self._cache_key(conversation_id, user_message, context)
+        context = self.build_context(matches) if grounding_required else []
+        cache_key = self._cache_key(
+            conversation_id,
+            user_message,
+            context,
+            grounding_required=grounding_required,
+        )
         base_trace: dict[str, object] = {
             "provider": getattr(self.provider, "name", "unknown"),
             "model": getattr(self.provider, "model", None),
@@ -81,6 +88,7 @@ class RAGService:
             "source_versions": [chunk.version for chunk in context],
             "scores": [chunk.score for chunk in context],
             "fallback": True,
+            "grounding_required": grounding_required,
         }
         if not settings.chatbot_ai_enabled:
             return self._fallback(base_trace, "DISABLED")
@@ -88,10 +96,15 @@ class RAGService:
             return self._fallback(base_trace, "USER_INJECTION")
         if detect_sensitive_request(user_message):
             return self._fallback(base_trace, "SENSITIVE_REQUEST")
-        context_decision = validate_context(context)
-        if not context_decision.allowed:
-            return self._fallback(base_trace, context_decision.reason or "CONTEXT")
-        if len(context) > 1 and context[0].score - context[1].score < 0.15:
+        if grounding_required:
+            context_decision = validate_context(context)
+            if not context_decision.allowed:
+                return self._fallback(base_trace, context_decision.reason or "CONTEXT")
+        if (
+            grounding_required
+            and len(context) > 1
+            and context[0].score - context[1].score < 0.15
+        ):
             return self._fallback(base_trace, "AMBIGUOUS_CONTEXT")
         cached = self._get_cached(cache_key)
         if cached is not None:
@@ -121,11 +134,21 @@ class RAGService:
         request = AIProviderRequest(
             user_message=minimize_provider_input(user_message),
             context=tuple(context),
-            policy=GUARDRAIL_POLICY,
+            policy=(
+                GUARDRAIL_POLICY
+                if grounding_required
+                else (
+                    GUARDRAIL_POLICY
+                    + " Este turno es solo conversacional: reconoce el mensaje o "
+                    "formula una aclaración breve. No incluyas datos, requisitos, "
+                    "canales ni afirmaciones sobre productos o procesos bancarios."
+                )
+            ),
             prompt_version=settings.chatbot_ai_prompt_version,
             max_output_chars=settings.chatbot_ai_max_output_chars,
             max_output_tokens=settings.chatbot_ai_max_output_tokens,
             timeout_seconds=settings.chatbot_ai_timeout_seconds,
+            grounding_required=grounding_required,
         )
         result = self._call_provider(request)
         trace = {
@@ -147,11 +170,19 @@ class RAGService:
                 self._record_failure()
             return self._fallback(trace, result.status)
         self._record_success()
-        decision = validate_output(
-            result.text,
-            context,
-            result.source_ids,
-            settings.chatbot_ai_max_output_chars,
+        decision = (
+            validate_output(
+                result.text,
+                context,
+                result.source_ids,
+                settings.chatbot_ai_max_output_chars,
+            )
+            if grounding_required
+            else validate_conversational_output(
+                result.text,
+                result.source_ids,
+                settings.chatbot_ai_max_output_chars,
+            )
         )
         trace["validated"] = decision.allowed
         trace["validation_reason"] = decision.reason
@@ -280,9 +311,12 @@ class RAGService:
         conversation_id: str,
         user_message: str,
         context: list[KnowledgeContext],
+        *,
+        grounding_required: bool,
     ) -> str:
         sources = ",".join(f"{chunk.source_id}:{chunk.version}" for chunk in context)
-        return f"{conversation_id}:{normalize_text(user_message)}:{sources}"
+        mode = "grounded" if grounding_required else "conversational"
+        return f"{conversation_id}:{mode}:{normalize_text(user_message)}:{sources}"
 
     def _get_cached(self, key: str) -> AIOutcome | None:
         now = datetime.now(UTC)
