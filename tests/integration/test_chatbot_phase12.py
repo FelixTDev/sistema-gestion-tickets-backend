@@ -1,4 +1,6 @@
+import json
 from collections.abc import Generator
+from pathlib import Path
 from time import monotonic, sleep
 
 import pytest
@@ -34,6 +36,25 @@ class FakeAIProvider:
     def generate(self, request: AIProviderRequest) -> AIGenerationResult:
         self.calls.append(request)
         return self.result
+
+
+class ContextEchoAIProvider:
+    name = "fake-context-echo"
+    model = "fake-test-model"
+
+    def __init__(self) -> None:
+        self.calls: list[AIProviderRequest] = []
+
+    def generate(self, request: AIProviderRequest) -> AIGenerationResult:
+        self.calls.append(request)
+        assert request.context
+        return AIGenerationResult.generated(
+            text=request.context[0].content[:120],
+            source_ids=[request.context[0].source_id],
+            provider=self.name,
+            model=self.model,
+            intent_classification="FAQ_QUERY",
+        )
 
 
 class SlowAIProvider(FakeAIProvider):
@@ -201,6 +222,185 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
             )
         ).first()
         assert audit is not None
+
+
+def test_explicit_faq_selection_uses_ai_when_enabled(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = ContextEchoAIProvider()
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    clarification = client.post(
+        endpoint,
+        json={
+            "content": (
+                "Antes de elegir una tarjeta, ¿en qué sitio oficial puedo "
+                "consultar qué condiciones debo revisar?"
+            )
+        },
+    )
+    assert clarification.status_code == 200
+    assert clarification.json()["requires_clarification"] is True
+    assert provider.calls == []
+    selected_option = clarification.json()["clarification_options"][0]
+
+    selected = client.post(endpoint, json={"content": selected_option})
+
+    assert selected.status_code == 200
+    assert selected.json()["response_source"] == "AI"
+    assert selected.json()["sources"]
+    assert len(provider.calls) == 1
+    assert (
+        provider.calls[0].context[0].source_url == selected.json()["sources"][0]["url"]
+    )
+
+
+def test_explicit_faq_selection_rejects_unsupported_ai_output(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="La aprobación del préstamo está garantizada para toda persona.",
+            source_ids=["unverified-source-id"],
+            provider="fake",
+            model="fake-test-model",
+            intent_classification="FAQ_QUERY",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    clarification = client.post(
+        endpoint,
+        json={
+            "content": (
+                "Antes de elegir una tarjeta, ¿en qué sitio oficial puedo "
+                "consultar qué condiciones debo revisar?"
+            )
+        },
+    )
+    selected_option = clarification.json()["clarification_options"][0]
+
+    selected = client.post(endpoint, json={"content": selected_option})
+
+    assert selected.status_code == 200
+    assert selected.json()["response_source"] == "DETERMINISTIC"
+    assert selected.json()["fallback_reason"] in {
+        "INVALID_SOURCES",
+        "UNGROUNDED_CLAIM",
+    }
+    assert len(provider.calls) == 1
+
+
+def test_private_ticket_queries_never_reach_ai_provider(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.failed(
+            status="UNAVAILABLE",
+            provider="fake",
+            model="fake-test-model",
+            error_code="should_not_be_called",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+
+    for question in (
+        "¿Qué estado tiene mi ticket TCK-20261115-AB12CD34EF?",
+        "Necesito crear un ticket",
+    ):
+        conversation = client.post("/api/v1/chat/conversations").json()
+        response = client.post(
+            f"/api/v1/chat/conversations/{conversation['id']}/messages",
+            json={"content": question},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["intent_classification"] in {
+            "TICKET_QUERY",
+            "CREATE_TICKET",
+        }
+
+    assert provider.calls == []
+
+
+def test_public_statement_question_is_not_classified_as_private_ticket_lookup(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.failed(
+            status="UNAVAILABLE",
+            provider="fake",
+            model="fake-test-model",
+            error_code="trace_only",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={
+            "content": (
+                "¿Qué canal público menciona la solicitud de un duplicado de "
+                "estado de cuenta?"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent_classification"] == "FAQ_QUERY"
+    assert response.json().get("ticket_query") is None
+
+
+def test_adversarial_scenario_corpus_stops_before_fake_provider(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.failed(
+            status="UNAVAILABLE",
+            provider="fake",
+            model="fake-test-model",
+            error_code="should_not_be_called",
+        )
+    )
+    configure_fake(
+        monkeypatch,
+        provider,
+        chatbot_ai_requests_per_minute=1000,
+        chatbot_ai_max_provider_calls_per_actor_per_hour=1000,
+        chatbot_ai_max_responses_per_conversation=1000,
+        chatbot_max_anonymous_conversations_per_hour=1000,
+    )
+    scenarios_path = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "evaluation"
+        / "chatbot_real_scenarios.json"
+    )
+    scenarios = json.loads(scenarios_path.read_text(encoding="utf-8"))["final"]
+    adversarial = [
+        scenario for scenario in scenarios if scenario["kind"] != "LEGITIMATE"
+    ]
+    assert len(adversarial) == 25
+
+    for scenario in adversarial:
+        conversation = client.post("/api/v1/chat/conversations").json()
+        response = client.post(
+            f"/api/v1/chat/conversations/{conversation['id']}/messages",
+            json={"content": scenario["question"]},
+        )
+
+        assert response.status_code == 200, scenario["id"]
+        assert response.json()["response_source"] != "AI", scenario["id"]
+
+    assert provider.calls == []
 
 
 def test_grounded_mobile_banking_paraphrase_is_returned_with_ai_trace(

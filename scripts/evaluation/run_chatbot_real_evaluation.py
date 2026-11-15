@@ -18,6 +18,7 @@ LEDGER_PATH = ROOT / "docs" / "evaluation" / "chatbot_real_evaluation.json"
 MODEL = "gpt-5.4-mini"
 MAX_CALLS = 150
 MAX_CHECKPOINT_CALLS = 40
+MAX_RETEST_CALLS = 100
 MAX_TOKENS = 500_000
 MAX_ESTIMATED_COST_USD = 0.50
 ABSOLUTE_ESTIMATED_COST_USD = 1.0
@@ -69,6 +70,13 @@ def _ticket_count_unchanged(
     ticket_count_before_confirmation: int,
 ) -> bool:
     return ticket_count_before_confirmation == ticket_count_at_flow_start
+
+
+def _scenarios_for_stage(
+    stage: str, scenario_data: dict[str, Any]
+) -> list[dict[str, Any]]:
+    scenario_key = "checkpoint" if stage == "checkpoint" else "final"
+    return scenario_data[scenario_key]
 
 
 def _is_public_faq_context(request: Any) -> bool:
@@ -216,6 +224,10 @@ class EvaluationLedger:
         if stage == "checkpoint" and stage_call_count >= MAX_CHECKPOINT_CALLS:
             raise EvaluationLimitReached(
                 "Se alcanzaría el límite de 40 llamadas del punto intermedio."
+            )
+        if stage == "retest" and stage_call_count >= MAX_RETEST_CALLS:
+            raise EvaluationLimitReached(
+                "Se alcanzaría el límite de 100 llamadas de la repetición."
             )
         estimated_input = _provider_input_estimate(request)
         reserved_tokens = estimated_input + 128
@@ -531,6 +543,7 @@ def _run_question(
             "model": trace.get("model"),
             "provider_called": trace.get("provider_called"),
             "cache_hit": trace.get("cache_hit"),
+            "routing_trace": trace,
             "tokens": {
                 "input": trace.get("input_tokens"),
                 "output": trace.get("output_tokens"),
@@ -808,16 +821,8 @@ def run(stage: str, ledger_path: Path) -> None:
             with TestClient(app) as client:
                 tokens = [_login(client, email, password) for email in actor_emails]
                 advisor_token = _login(client, "asesor@demo.com", password)
-                scenarios = scenario_data[stage]
-                if stage == "checkpoint":
-                    scenario_sets = [
-                        (item, index) for index, item in enumerate(scenarios)
-                    ]
-                else:
-                    scenario_sets = [
-                        (item, index)
-                        for index, item in enumerate(scenario_data["final"])
-                    ]
+                scenarios = _scenarios_for_stage(stage, scenario_data)
+                scenario_sets = [(item, index) for index, item in enumerate(scenarios)]
                 for scenario, index in scenario_sets:
                     should_stop = _run_question(
                         stage=stage,
@@ -862,7 +867,9 @@ def run(stage: str, ledger_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=("checkpoint", "final"), required=True)
+    parser.add_argument(
+        "--stage", choices=("checkpoint", "final", "retest"), required=True
+    )
     parser.add_argument("--ledger", type=Path, default=LEDGER_PATH)
     args = parser.parse_args()
     run(args.stage, args.ledger)

@@ -25,7 +25,13 @@ Cada corrida se ejecuta desde `frontend`:
 ```powershell
 npm run e2e
 npm run e2e:fallback
+npm run e2e:visual
 ```
+
+`npm run e2e:visual` construye la versión de producción, ejecuta el mismo flujo
+en Vite de desarrollo y en `vite preview`, y compara estilos calculados de la
+página, el widget y el diálogo. Ambos recorridos usan SQLite temporal y proveedor
+falso.
 
 El script usa el `backend\.venv` local y crea una SQLite con nombre aleatorio
 bajo el directorio temporal del sistema. El usuario de prueba es

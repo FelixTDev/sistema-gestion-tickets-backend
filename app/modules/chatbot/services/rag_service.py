@@ -350,6 +350,7 @@ class RAGService:
     ) -> AIOutcome:
         settings = get_settings()
         context = self.build_context(matches) if grounding_required else []
+        candidate_scores = [float(match.score) for match in matches]
         if grounding_required and len(context) > 1:
             score_gap = context[0].score - context[1].score
             strong_winner_floor = settings.chatbot_ai_min_confidence + 0.10
@@ -370,6 +371,15 @@ class RAGService:
             "source_ids": [chunk.source_id for chunk in context],
             "source_versions": [chunk.version for chunk in context],
             "scores": [chunk.score for chunk in context],
+            "candidate_match_count": len(matches),
+            "candidate_top_score": (
+                round(max(candidate_scores), 4) if candidate_scores else None
+            ),
+            "minimum_context_score": settings.chatbot_ai_min_confidence,
+            "candidates_below_context_threshold": sum(
+                score < settings.chatbot_ai_min_confidence for score in candidate_scores
+            ),
+            "context_source_count": len(context),
             "fallback": True,
             "grounding_required": grounding_required,
         }
@@ -885,6 +895,7 @@ class RAGService:
     def _fallback(trace: dict[str, object], reason: str) -> AIOutcome:
         trace["fallback"] = True
         trace["fallback_reason"] = reason
+        trace.setdefault("provider_called", False)
         trace.setdefault("response_source", "DETERMINISTIC")
         trace.setdefault("sources", [])
         trace.setdefault("cited_source_ids", [])

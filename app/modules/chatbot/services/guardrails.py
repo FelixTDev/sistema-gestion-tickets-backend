@@ -25,12 +25,17 @@ GUARDRAIL_POLICY = (
 
 _INJECTION_PATTERNS = (
     r"ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions",
+    r"ignore\s+(?:all\s+)?(?:system\s+)?(?:polic(?:y|ies)|rules)\b",
     r"ignora\s+(?:todas\s+)?(?:las\s+)?instrucciones\s+(?:anteriores|previas)",
+    r"ignora\s+(?:(?:todas\s+)?las\s+)?pol[ií]ticas\s+(?:del|de\s+el)\s+sistema",
     r"revela\s+(?:el\s+)?(?:system\s+prompt|prompt|instrucciones internas)",
     r"reveal\s+(?:the\s+)?(?:system\s+prompt|prompt|system instructions)",
     r"olvida\s+(?:todas\s+)?(?:las\s+)?(?:reglas|instrucciones)\s+(?:anteriores|previas)",
     r"muestra\s+(?:tus\s+|las\s+)?(?:indicaciones|instrucciones)\s+(?:ocultas|internas)",
     r"(?:imprime|muestra|revela)\s+(?:las\s+)?instrucciones\s+del\s+sistema",
+    r"(?:copia|repite|imprime|revela|muestra|devuelve)\s+"
+    r"(?:literalmente\s+)?(?:el\s+)?bloque\s+de\s+"
+    r"(?:instrucciones|pol[ií]ticas|reglas)\s+(?:que\s+)?recibiste",
     r"(?:haz|realiza|intenta|usa|aplica)\s+(?:un\s+)?(?:jailbreak|prompt\s+injection)",
     r"execute\s+(?:this\s+)?code|ejecuta\s+(?:este\s+)?c[oó]digo",
 )

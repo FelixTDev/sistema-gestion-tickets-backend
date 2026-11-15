@@ -858,40 +858,56 @@ class ChatbotService:
                 and lifecycle_action is None
             )
         )
-        skip_ai = bool(
-            retrieval_unavailable
-            or ticket_query_request is not None
-            or is_banking_operation
-            or is_ticket_request
-            or is_advisor_request
-            or (is_advisor_request and is_ticket_request)
-            or is_greeting
-            or is_faq_discovery
-            or is_faq_category_request
-            or selected_faq_category_id is not None
-            or selected_faq_subcategory is not None
-            or navigation_target is not None
-            or self._contains_arithmetic_expression(clean_content)
-            or self._is_obviously_out_of_scope(clean_content)
-            or selected_match is not None
-            or (
+        skip_ai_reasons = (
+            (retrieval_unavailable, "KNOWLEDGE_UNAVAILABLE"),
+            (is_banking_operation, "BANKING_OPERATION_OUT_OF_SCOPE"),
+            (ticket_query_request is not None, "TICKET_QUERY"),
+            (is_advisor_request and is_ticket_request, "TICKET_ADVISOR_FLOW"),
+            (is_advisor_request, "ADVISOR_FLOW"),
+            (is_ticket_request, "TICKET_DRAFT_FLOW"),
+            (is_greeting, "GREETING"),
+            (is_faq_discovery, "FAQ_DISCOVERY"),
+            (is_faq_category_request, "FAQ_CATEGORY_DISCOVERY"),
+            (selected_faq_category_id is not None, "FAQ_CATEGORY_SELECTION"),
+            (selected_faq_subcategory is not None, "FAQ_SUBCATEGORY_SELECTION"),
+            (navigation_target is not None, "FAQ_NAVIGATION"),
+            (
+                self._contains_arithmetic_expression(clean_content),
+                "ARITHMETIC_OUT_OF_SCOPE",
+            ),
+            (
+                self._is_obviously_out_of_scope(clean_content),
+                "OUT_OF_SCOPE",
+            ),
+            (
                 not paused_draft
                 and current_draft.status
                 in {
                     ChatbotTicketDraftStatus.COLLECTING,
                     ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
                     ChatbotTicketDraftStatus.CONFIRMED,
-                }
-            )
-            or ticket_draft_reply is not None
-            or lifecycle_action is not None
+                },
+                "ACTIVE_TICKET_DRAFT",
+            ),
+            (ticket_draft_reply is not None, "TICKET_DRAFT_REPLY"),
+            (lifecycle_action is not None, "CONVERSATION_LIFECYCLE"),
         )
+        ai_skip_reason = next(
+            (reason for should_skip, reason in skip_ai_reasons if should_skip),
+            None,
+        )
+        skip_ai = ai_skip_reason is not None
         if skip_ai:
-            result["ai_trace"] = (
-                {"fallback": True, "fallback_reason": "KNOWLEDGE_UNAVAILABLE"}
-                if retrieval_unavailable
-                else None
-            )
+            result["ai_trace"] = {
+                "provider_called": False,
+                "routing_decision": "DETERMINISTIC_SKIP",
+                "routing_reason": ai_skip_reason,
+                **(
+                    {"fallback": True, "fallback_reason": "KNOWLEDGE_UNAVAILABLE"}
+                    if retrieval_unavailable
+                    else {}
+                ),
+            }
         else:
             provider_calls_by_actor_last_hour = (
                 self.conversations.count_recent_ai_provider_attempts_for_actor(
@@ -2448,6 +2464,13 @@ class ChatbotService:
             re.search(r"\b(?:tickets?|casos?|solicitud(?:es)?)\b", normalized)
             or re.search(r"\b(?:mi|mis|mio|mia|mios|mias)\s+reclamos?\b", normalized)
         )
+        has_explicit_ticket_reference = bool(
+            re.search(r"\b(?:tickets?|casos?)\b", normalized)
+            or re.search(
+                r"\b(?:mi|mis|mio|mia|mios|mias)\s+solicitud(?:es)?\b", normalized
+            )
+            or re.search(r"\b(?:mi|mis|mio|mia|mios|mias)\s+reclamos?\b", normalized)
+        )
         page_match = re.search(r"\bpagina\s+(\d+)\b", normalized)
         page = min(int(page_match.group(1)), 10_000) if page_match else 1
 
@@ -2546,7 +2569,7 @@ class ChatbotService:
                 page=page,
             )
 
-        asks_status = (has_ticket_subject or has_code_marker) and bool(
+        asks_status = (has_explicit_ticket_reference or has_code_marker) and bool(
             re.search(
                 r"\b(?:estado|situacion|seguimiento)\b|\bcomo\s+(?:va|esta|sigue)\b",
                 normalized,

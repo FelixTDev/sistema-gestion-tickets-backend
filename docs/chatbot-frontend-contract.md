@@ -170,6 +170,33 @@ una respuesta segura del backend. El frontend debe guiarse por
 `conversation_status`, sin interpretar mensajes de texto mediante frases
 exactas.
 
+Con `CHATBOT_AI_ENABLED=true`, una FAQ elegida explícitamente por el usuario,
+publicada y con fuente oficial verificada pasa a generación IA. Para coincidencias
+automáticas, el puntaje debe ser al menos `CHATBOT_AI_MIN_CONFIDENCE` (0,70 por
+defecto), y el contexto no puede tener resultados demasiado cercanos entre sí.
+Debajo de ese corte, el backend mantiene la aclaración o respuesta determinística;
+el proveedor no recibe una FAQ de baja confianza. `CHATBOT_AI_ENABLED=false`, una
+falla del proveedor o una salida rechazada por validación conservan el fallback
+determinístico. Las consultas privadas de tickets, creación de tickets, saldo y
+otras operaciones bancarias permanecen en ramas de backend sin proveedor.
+
+El retest real del 2026-11-15 confirmó esta condición: 1 de 60 consultas
+legítimas alcanzó IA con fuente verificada; 59 quedaron bajo el corte de contexto
+0,70 y no llegaron al proveedor. Este resultado no cumple el objetivo de 85%;
+los puntajes y motivos por caso están en
+[`chatbot-evaluation.md`](chatbot-evaluation.md). Una consulta por un canal
+público no se convierte en seguimiento privado solo por mencionar una
+“solicitud”; la solicitud debe estar identificada como propia para consultar su
+estado.
+
+La traza `ai_trace_json` es interna y no forma parte del contrato HTTP. Registra
+`routing_reason` cuando una intención determinística evita IA; cuando se evalúa
+RAG, registra `candidate_match_count`, `candidate_top_score`,
+`minimum_context_score`, `candidates_below_context_threshold`,
+`context_source_count`, `fallback_reason` y `provider_called`. El registro de
+evaluación copia esta traza para permitir auditar por qué una consulta alcanzó o no
+el proveedor sin enviar datos privados.
+
 Las trazas IA internas pueden incluir tokens y `estimated_cost_usd`. Para
 `gpt-5.4-mini`, la aplicación reserva una estimación conservadora antes de llamar
 al proveedor y aplica `CHATBOT_AI_DAILY_BUDGET_USD` (0.50 USD por defecto) por

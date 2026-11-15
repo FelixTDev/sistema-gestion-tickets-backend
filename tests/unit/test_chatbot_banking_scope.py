@@ -5,6 +5,11 @@ def test_deterministic_intents_take_priority_over_generic_question_handling() ->
     cases = {
         "¿Cuál es mi saldo?": "OUT_OF_SCOPE",
         "¿Cómo va mi ticket TCK-20261115-AB12CD34EF?": "TICKET_QUERY",
+        "¿Cuál es el estado de mi solicitud?": "TICKET_QUERY",
+        (
+            "¿Qué canal público menciona la solicitud de un duplicado de "
+            "estado de cuenta?"
+        ): "FAQ_QUERY",
         "Quiero crear un ticket": "CREATE_TICKET",
         "Quiero hablar con un asesor": "REQUEST_ADVISOR",
         "feedback": "FEEDBACK",

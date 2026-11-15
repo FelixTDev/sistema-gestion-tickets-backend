@@ -7,6 +7,7 @@ from scripts.evaluation.run_chatbot_real_evaluation import (
     EvaluationLedger,
     EvaluationLimitReached,
     _is_public_faq_context,
+    _scenarios_for_stage,
     _ticket_count_unchanged,
 )
 
@@ -47,6 +48,33 @@ def test_evaluation_ledger_reserves_calls_before_the_checkpoint_limit(tmp_path) 
     saved = json.loads((tmp_path / "evaluation.json").read_text(encoding="utf-8"))
     assert saved["totals"]["provider_calls"] == 40
     assert saved["totals"]["conservative_reserved_tokens"] < 500_000
+
+
+def test_evaluation_ledger_caps_retest_at_100_provider_calls(tmp_path) -> None:
+    ledger = EvaluationLedger(tmp_path / "evaluation.json")
+    ledger.data["runs"] = [
+        {
+            "stage": "retest",
+            "scenario_id": "RETEST-CORPUS",
+            "provider_calls": [
+                {"stage": "retest", "provider_call": True} for _ in range(100)
+            ],
+        }
+    ]
+    ledger._write()
+    run = ledger.begin_run(
+        "retest", {"id": "RETEST-101", "question": "consulta sintética"}
+    )
+
+    with pytest.raises(EvaluationLimitReached, match="100 llamadas"):
+        ledger.reserve_call("retest", run, _request())
+
+
+def test_retest_uses_the_same_final_scenarios() -> None:
+    final_scenarios = [{"id": "L-TEST"}, {"id": "A-TEST"}]
+    scenario_data = {"checkpoint": [{"id": "CP-TEST"}], "final": final_scenarios}
+
+    assert _scenarios_for_stage("retest", scenario_data) is final_scenarios
 
 
 def test_evaluation_preflight_accepts_only_verified_public_faq_context() -> None:
