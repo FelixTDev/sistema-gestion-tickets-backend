@@ -19,6 +19,7 @@ class ChatbotIntent(StrEnum):
     CREATE_TICKET = "CREATE_TICKET"
     TICKET_DRAFT_UPDATE = "TICKET_DRAFT_UPDATE"
     REQUEST_ADVISOR = "REQUEST_ADVISOR"
+    FEEDBACK = "FEEDBACK"
     CLARIFICATION = "CLARIFICATION"
     NAVIGATION = "NAVIGATION"
     END_CONVERSATION = "END_CONVERSATION"
@@ -29,6 +30,8 @@ class ChatbotIntent(StrEnum):
 class ChatbotSuggestedAction(StrEnum):
     NONE = "NONE"
     ASK_CLARIFICATION = "ASK_CLARIFICATION"
+    CREATE_TICKET = "CREATE_TICKET"
+    CONFIRM_TICKET = "CONFIRM_TICKET"
     CONVERT_TO_TICKET = "CONVERT_TO_TICKET"
     CONTACT_ADVISOR = "CONTACT_ADVISOR"
     AUTHENTICATION_REQUIRED = "AUTHENTICATION_REQUIRED"
@@ -50,6 +53,24 @@ class ChatbotAvailableAction(StrEnum):
     VIEW_MY_TICKETS = "VIEW_MY_TICKETS"
     OFFICIAL_CHANNELS = "OFFICIAL_CHANNELS"
     RETRY = "RETRY"
+
+
+class ChatbotQuickReply(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=200)
+
+
+class ChatbotProactiveNoticeType(StrEnum):
+    CLIENT_ACTION_REQUIRED = "CLIENT_ACTION_REQUIRED"
+    RESOLVED_CONFIRMATION_REQUIRED = "RESOLVED_CONFIRMATION_REQUIRED"
+
+
+class ChatbotProactiveNotice(BaseModel):
+    type: ChatbotProactiveNoticeType
+    ticket_id: str = Field(min_length=1, max_length=36)
+    tracking_code: str = Field(min_length=1, max_length=30)
+    message: str = Field(min_length=1, max_length=300)
 
 
 class ChatbotUIType(StrEnum):
@@ -112,6 +133,7 @@ class ChatbotTicketDraftStatus(StrEnum):
     INACTIVE = "INACTIVE"
     COLLECTING = "COLLECTING"
     READY_FOR_CONFIRMATION = "READY_FOR_CONFIRMATION"
+    CONFIRMED = "CONFIRMED"
     CANCELLED = "CANCELLED"
 
 
@@ -141,6 +163,7 @@ class ChatbotTicketDraftCategoryOption(BaseModel):
 
 class ChatbotTicketDraft(BaseModel):
     status: ChatbotTicketDraftStatus = ChatbotTicketDraftStatus.INACTIVE
+    category_name: str | None = None
     paused: bool = Field(
         default=False,
         description=(
@@ -268,6 +291,7 @@ class ConversationRead(BaseModel):
             "Resumen del ticket asociado; nulo si la conversación no fue convertida."
         ),
     )
+    proactive_notices: list[ChatbotProactiveNotice] = Field(default_factory=list)
     messages: list[ChatMessageRead] = Field(default_factory=list)
 
 
@@ -480,8 +504,8 @@ class BotMessageResponse(BaseModel):
             "Acción tipada que la interfaz puede presentar o ejecutar; "
             "nunca confirma por sí sola una conversión a ticket. Las acciones de "
             "consulta usan ticket_query como payload tipado. "
-            "CONVERT_TO_TICKET se emite para un borrador listo y pendiente de "
-            "confirmación explícita mediante el endpoint de conversión."
+            "CONFIRM_TICKET aparece cuando el resumen requiere confirmación; "
+            "CONVERT_TO_TICKET aparece solo después de confirmar el borrador."
         ),
     )
     available_actions: list[ChatbotAvailableAction] = Field(
@@ -491,6 +515,8 @@ class BotMessageResponse(BaseModel):
             "no tiene una respuesta confiable o requiere otro canal."
         ),
     )
+    quick_replies: list[ChatbotQuickReply] = Field(default_factory=list)
+    proactive_notices: list[ChatbotProactiveNotice] = Field(default_factory=list)
     ticket_query: ChatbotTicketQuery | None = Field(
         default=None,
         description=(
@@ -623,8 +649,8 @@ class BotMessageResponse(BaseModel):
     ticket_draft: ChatbotTicketDraft = Field(
         default_factory=ChatbotTicketDraft,
         description=(
-            "Borrador estructurado del ticket. Solo READY_FOR_CONFIRMATION permite "
-            "que la interfaz solicite confirmación en el endpoint de conversión."
+            "Borrador estructurado del ticket. READY_FOR_CONFIRMATION solicita una "
+            "confirmación explícita; CONFIRMED permite la conversión a ticket."
         ),
     )
     menu_open: bool = Field(
@@ -673,6 +699,25 @@ class ChatbotFeedbackMetrics(BaseModel):
     usefulness_rate: float
     faq_backed: int
     generic_replies: int
+
+
+class ChatbotOperationalMetrics(BaseModel):
+    total_conversations: int = Field(ge=0)
+    conversations_ending_in_ticket: int = Field(ge=0)
+    tickets_created: int = Field(ge=0)
+    escalation_requests: int = Field(ge=0)
+    escalation_rate_percent: float = Field(ge=0)
+    fallback_by_reason: dict[str, int] = Field(default_factory=dict)
+    fallback_rate_by_reason_percent: dict[str, float] = Field(default_factory=dict)
+    out_of_context_by_subrule: dict[str, int] = Field(default_factory=dict)
+    intent_counts: dict[str, int] = Field(default_factory=dict)
+    provider_calls_today: int = Field(ge=0)
+    tokens_today: int = Field(ge=0)
+    estimated_cost_today_usd: float = Field(ge=0)
+    total_call_cap: int = Field(ge=1)
+    total_token_cap: int = Field(ge=1)
+    total_estimated_cost_cap_usd: float = Field(gt=0)
+    max_output_tokens_per_call: int = Field(ge=1)
 
 
 class LinkConversationResponse(BaseModel):

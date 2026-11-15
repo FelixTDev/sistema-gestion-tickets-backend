@@ -123,7 +123,7 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
     assert payload["model"] == "gpt-5.4-mini"
     assert payload["store"] is False
     assert payload["reasoning"] == {"effort": "none"}
-    assert payload["max_output_tokens"] == 384
+    assert payload["max_output_tokens"] == 128
     assert payload["instructions"] == "Responde únicamente con el contexto autorizado."
     sent_input = json.loads(payload["input"])
     assert sent_input["user_message"] == "¿Cómo bloqueo mi tarjeta?"
@@ -172,6 +172,7 @@ def test_openai_provider_schema_closes_intent_classification_enum(monkeypatch):
         "CREATE_TICKET",
         "TICKET_DRAFT_UPDATE",
         "REQUEST_ADVISOR",
+            "FEEDBACK",
         "CLARIFICATION",
         "NAVIGATION",
         "END_CONVERSATION",
@@ -355,6 +356,11 @@ def test_openai_provider_requires_nonempty_secret_and_model():
         OpenAIResponsesProvider(api_key="  ", model="gpt-5.4-mini")
     with pytest.raises(ValueError, match="modelo"):
         OpenAIResponsesProvider(api_key="secret", model=" ")
+
+
+def test_openai_provider_rejects_models_outside_the_confirmed_demo_allowlist():
+    with pytest.raises(ValueError, match="gpt-5.4-mini"):
+        OpenAIResponsesProvider(api_key="secret", model="gpt-4o-mini")
 
 
 def test_actor_hourly_provider_limit_must_be_positive():

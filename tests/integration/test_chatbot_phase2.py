@@ -213,6 +213,132 @@ def test_anonymous_ticket_query_returns_login_action_without_ticket_data(
     assert ticket_snapshot(engine) == before
 
 
+def test_referential_follow_ups_resolve_tickets_from_the_current_conversation(
+    phase2_client,
+) -> None:
+    client, engine = phase2_client
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-CONTEXT-001",
+            created_at=datetime(2026, 10, 10, 12, tzinfo=UTC),
+        )
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-CONTEXT-002",
+            status=TicketStatus.EN_PROCESO,
+            created_at=datetime(2026, 10, 11, 12, tzinfo=UTC),
+        )
+        session.commit()
+    headers = {"Authorization": f"Bearer {login(client)}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    listed = client.post(
+        endpoint, headers=headers, json={"content": "Muéstrame mis tickets"}
+    )
+    first = client.post(endpoint, headers=headers, json={"content": "Ese ticket"})
+    other = client.post(endpoint, headers=headers, json={"content": "¿Y el otro?"})
+
+    assert listed.status_code == first.status_code == other.status_code == 200
+    listed_codes = [
+        item["tracking_code"] for item in listed.json()["ticket_query"]["tickets"]
+    ]
+    assert first.json()["ticket_query"]["ticket"]["tracking_code"] == listed_codes[0]
+    assert other.json()["ticket_query"]["ticket"]["tracking_code"] == listed_codes[1]
+
+
+def test_proactive_notices_are_authenticated_and_scoped_to_the_conversation_owner(
+    phase2_client,
+) -> None:
+    client, engine = phase2_client
+    headers = {"Authorization": f"Bearer {login(client)}"}
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        other = add_other_client(session)
+        pending = add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-CLIENT-ACTION-0001",
+            status=TicketStatus.PENDIENTE_CLIENTE,
+        )
+        resolved = add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-RESOLVED-OWNER-0001",
+            status=TicketStatus.RESUELTO,
+        )
+        add_ticket(
+            session,
+            client_id=other.id,
+            tracking_code="TCK-OTHER-CLIENT-0001",
+            status=TicketStatus.PENDIENTE_CLIENTE,
+        )
+        session.commit()
+        pending_id = pending.id
+        resolved_id = resolved.id
+
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    owner_read = client.get(
+        f"/api/v1/chat/conversations/{conversation['id']}", headers=headers
+    )
+    notices = owner_read.json()["proactive_notices"]
+    assert {item["ticket_id"] for item in notices} == {pending_id, resolved_id}
+    assert "espera una respuesta tuya" in next(
+        item["message"]
+        for item in notices
+        if item["type"] == "CLIENT_ACTION_REQUIRED"
+    )
+    assert "¿Confirmas el cierre" in next(
+        item["message"]
+        for item in notices
+        if item["type"] == "RESOLVED_CONFIRMATION_REQUIRED"
+    )
+    assert "TCK-OTHER-CLIENT-0001" not in owner_read.text
+
+    anonymous = client.post("/api/v1/chat/conversations").json()
+    anonymous_read = client.get(
+        f"/api/v1/chat/conversations/{anonymous['id']}"
+    )
+    assert anonymous_read.status_code == 200
+    assert anonymous_read.json()["proactive_notices"] == []
+
+
+def test_client_can_confirm_closure_only_for_a_resolved_ticket(phase2_client) -> None:
+    client, engine = phase2_client
+    headers = {"Authorization": f"Bearer {login(client)}"}
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        resolved = add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-CLOSE-CONFIRM-0001",
+            status=TicketStatus.RESUELTO,
+        )
+        active = add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-CLOSE-ACTIVE-0001",
+            status=TicketStatus.EN_PROCESO,
+        )
+        session.commit()
+        resolved_id = resolved.id
+        active_id = active.id
+
+    closed = client.post(
+        f"/api/v1/tickets/{resolved_id}/confirm-resolution", headers=headers
+    )
+    rejected = client.post(
+        f"/api/v1/tickets/{active_id}/confirm-resolution", headers=headers
+    )
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["status"] == "CERRADO"
+    assert rejected.status_code == 409
+
+
 def test_owned_code_is_visible_but_other_and_missing_codes_are_indistinguishable(
     phase2_client,
 ) -> None:

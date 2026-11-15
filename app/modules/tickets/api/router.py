@@ -283,6 +283,16 @@ def close_ticket(
     return service.close(session, ticket_id, current_user)
 
 
+@router.post("/{ticket_id}/confirm-resolution", response_model=TicketRead)
+def confirm_ticket_resolution(
+    ticket_id: str,
+    session: SessionDependency,
+    current_user: CurrentUser,
+    service: TicketServiceDependency,
+) -> TicketRead:
+    return service.confirm_resolution(session, ticket_id, current_user)
+
+
 @router.post("/{ticket_id}/reopen", response_model=TicketRead)
 def reopen_ticket(
     ticket_id: str,

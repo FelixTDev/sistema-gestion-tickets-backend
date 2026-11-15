@@ -78,12 +78,16 @@ class TicketDraftService:
         if draft.status in {
             ChatbotTicketDraftStatus.COLLECTING,
             ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+            ChatbotTicketDraftStatus.CONFIRMED,
         }:
             return self._refresh_state(session, draft)
         return self._with_category_options(session, draft)
 
     def persisted(self, draft: ChatbotTicketDraft) -> dict[str, object]:
-        return draft.model_dump(mode="json", exclude={"category_options", "paused"})
+        return draft.model_dump(
+            mode="json",
+            exclude={"category_options", "paused", "category_name"},
+        )
 
     def should_handle(
         self,
@@ -96,6 +100,7 @@ class TicketDraftService:
         if draft.status not in {
             ChatbotTicketDraftStatus.COLLECTING,
             ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+            ChatbotTicketDraftStatus.CONFIRMED,
         }:
             return start_requested or self._has_field_label(content)
         if self._is_cancel(content) or self._is_resume(content):
@@ -123,11 +128,14 @@ class TicketDraftService:
         saved_value: object,
         *,
         start_requested: bool,
+        suggested_category_id: str | None = None,
+        initial_description: str | None = None,
     ) -> TicketDraftReply:
         existing = self.read(session, saved_value)
         if self._is_cancel(content) and existing.status in {
             ChatbotTicketDraftStatus.COLLECTING,
             ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+            ChatbotTicketDraftStatus.CONFIRMED,
         }:
             cancelled = ChatbotTicketDraft(status=ChatbotTicketDraftStatus.CANCELLED)
             return TicketDraftReply(
@@ -142,17 +150,37 @@ class TicketDraftService:
         if existing.status in {
             ChatbotTicketDraftStatus.COLLECTING,
             ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+            ChatbotTicketDraftStatus.CONFIRMED,
         }:
-            if (
-                self._is_resume(content)
-                or normalize_text(content) in _CONFIRMATION_WORDS
-            ):
+            normalized_content = normalize_text(content)
+            if self._is_resume(content):
+                return self._reply(existing, session)
+            if normalized_content in _CONFIRMATION_WORDS:
+                if existing.status == ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION:
+                    confirmed = existing.model_copy(
+                        update={"status": ChatbotTicketDraftStatus.CONFIRMED}
+                    )
+                    return TicketDraftReply(
+                        draft=confirmed,
+                        answer=(
+                            "Confirmaste la creación de esta solicitud. "
+                            "La registraré con el resumen mostrado."
+                        ),
+                        requires_clarification=False,
+                        offers_ticket=True,
+                        ready=True,
+                    )
                 return self._reply(existing, session)
             draft = existing.model_copy(deep=True)
+            if draft.status == ChatbotTicketDraftStatus.CONFIRMED:
+                draft.status = ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION
         elif start_requested or self._has_field_label(content):
             draft = ChatbotTicketDraft(
                 status=ChatbotTicketDraftStatus.COLLECTING,
-                fields=ChatbotTicketDraftFields(priority=TicketPriority.MEDIA),
+                fields=ChatbotTicketDraftFields(
+                    category_id=suggested_category_id,
+                    description=initial_description,
+                ),
             )
         else:
             return self._reply(existing, session)
@@ -216,6 +244,9 @@ class TicketDraftService:
             if value is None:
                 continue
             value = " ".join(value.split())
+            if field_name == "description" and initial_description is not None:
+                summary = " ".join(initial_description.split())
+                value = f"{summary}\n\nDetalle comunicado por el cliente: {value}"
             if not minimum <= len(value) <= maximum:
                 draft.fields.__setattr__(draft_field, None)
                 errors[enum_field] = (
@@ -388,6 +419,7 @@ class TicketDraftService:
         draft: ChatbotTicketDraft,
         categories: list[TicketCategory] | None = None,
     ) -> ChatbotTicketDraft:
+        previous_status = draft.status
         categories = (
             categories
             if categories is not None
@@ -419,7 +451,11 @@ class TicketDraftService:
         ]
         draft.missing_fields = missing
         draft.status = (
-            ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION
+            ChatbotTicketDraftStatus.CONFIRMED
+            if previous_status == ChatbotTicketDraftStatus.CONFIRMED
+            and not missing
+            and not errors
+            else ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION
             if not missing and not errors
             else ChatbotTicketDraftStatus.COLLECTING
         )
@@ -431,17 +467,25 @@ class TicketDraftService:
         draft: ChatbotTicketDraft,
         categories: list[TicketCategory] | None = None,
     ) -> ChatbotTicketDraft:
+        categories = (
+            categories
+            if categories is not None
+            else self.categories.list_active(session)
+        )
+        draft.category_name = next(
+            (
+                item.name
+                for item in categories
+                if item.id == draft.fields.category_id
+            ),
+            None,
+        )
         if (
             draft.status != ChatbotTicketDraftStatus.COLLECTING
             or draft.fields.category_id is not None
         ):
             draft.category_options = []
             return draft
-        categories = (
-            categories
-            if categories is not None
-            else self.categories.list_active(session)
-        )
         draft.category_options = [
             ChatbotTicketDraftCategoryOption(id=item.id, name=item.name)
             for item in categories
@@ -450,6 +494,17 @@ class TicketDraftService:
 
     def _reply(self, draft: ChatbotTicketDraft, session: Session) -> TicketDraftReply:
         draft = self._with_category_options(session, draft)
+        if draft.status == ChatbotTicketDraftStatus.CONFIRMED:
+            return TicketDraftReply(
+                draft=draft,
+                answer=(
+                    "La confirmación quedó registrada. La solicitud se creará "
+                    "con el resumen mostrado."
+                ),
+                requires_clarification=False,
+                offers_ticket=True,
+                ready=True,
+            )
         if draft.status == ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION:
             category = next(
                 (

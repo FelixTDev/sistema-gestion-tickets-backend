@@ -87,18 +87,27 @@ class Settings(BaseSettings):
     chatbot_max_clarification_attempts: int = 2
     chatbot_max_conversions_per_day: int = 5
     chatbot_ai_enabled: bool = False
+    chatbot_contextual_followups_enabled: bool = True
+    chatbot_quick_replies_enabled: bool = True
+    chatbot_escalation_ticket_enabled: bool = True
+    chatbot_proactive_notices_enabled: bool = True
+    chatbot_aggregate_metrics_enabled: bool = True
+    chatbot_persona_enabled: bool = True
     chatbot_ai_provider: str = "noop"
     chatbot_ai_endpoint: str | None = None
     chatbot_ai_api_key: str | None = None
     chatbot_ai_model: str = "gpt-5.4-mini"
-    chatbot_ai_embeddings_enabled: bool = True
+    chatbot_ai_embeddings_enabled: bool = False
     chatbot_ai_embedding_model: str = "text-embedding-3-small"
     chatbot_ai_embedding_dimensions: int = 256
     chatbot_ai_embedding_max_documents: int = 200
     chatbot_ai_prompt_version: str = "v1"
     chatbot_ai_timeout_seconds: float = 15.0
     chatbot_ai_max_output_chars: int = 1200
-    chatbot_ai_max_output_tokens: int = 384
+    chatbot_ai_max_output_tokens: int = 128
+    chatbot_ai_total_max_calls: int = 150
+    chatbot_ai_total_max_tokens: int = 500_000
+    chatbot_ai_total_estimated_cost_usd: float = 0.50
     chatbot_ai_max_documents: int = 3
     chatbot_ai_max_context_chars: int = 6000
     chatbot_ai_min_confidence: float = 0.70
@@ -114,6 +123,8 @@ class Settings(BaseSettings):
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ]
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -246,6 +257,19 @@ class Settings(BaseSettings):
             raise ValueError("El límite de aclaraciones del chatbot debe ser positivo")
         if self.chatbot_max_conversions_per_day < 1:
             raise ValueError("El límite de conversiones del chatbot debe ser positivo")
+        if self.chatbot_ai_total_max_calls < 1:
+            raise ValueError("El límite total de llamadas IA debe ser positivo")
+        if self.chatbot_ai_total_max_tokens < 1:
+            raise ValueError("El límite total de tokens IA debe ser positivo")
+        if self.chatbot_ai_total_estimated_cost_usd <= 0:
+            raise ValueError("El límite total de costo IA debe ser positivo")
+        self.chatbot_ai_total_max_calls = min(self.chatbot_ai_total_max_calls, 150)
+        self.chatbot_ai_total_max_tokens = min(
+            self.chatbot_ai_total_max_tokens, 500_000
+        )
+        self.chatbot_ai_total_estimated_cost_usd = min(
+            self.chatbot_ai_total_estimated_cost_usd, 0.50
+        )
         if not self.chatbot_ai_provider.strip():
             raise ValueError("El proveedor IA no puede estar vacío")
         if not self.chatbot_ai_model.strip():
@@ -266,8 +290,11 @@ class Settings(BaseSettings):
             raise ValueError("El timeout IA debe estar entre 0.1 y 30 segundos")
         if not 1 <= self.chatbot_ai_max_output_chars <= 10_000:
             raise ValueError("La salida máxima IA debe estar entre 1 y 10000")
-        if not 32 <= self.chatbot_ai_max_output_tokens <= 4096:
+        if not 1 <= self.chatbot_ai_max_output_tokens <= 4096:
             raise ValueError("Los tokens máximos de salida IA no son válidos")
+        self.chatbot_ai_max_output_tokens = min(
+            self.chatbot_ai_max_output_tokens, 128
+        )
         if not 1 <= self.chatbot_ai_max_documents <= 10:
             raise ValueError("La cantidad de documentos IA debe estar entre 1 y 10")
         if not 100 <= self.chatbot_ai_max_context_chars <= 50_000:

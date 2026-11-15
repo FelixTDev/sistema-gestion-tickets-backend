@@ -36,6 +36,8 @@ class OpenAIResponsesProvider:
             raise ValueError("La clave de OpenAI es obligatoria")
         if not model.strip():
             raise ValueError("El modelo de OpenAI es obligatorio")
+        if model.strip() != "gpt-5.4-mini":
+            raise ValueError("Solo se permite el modelo gpt-5.4-mini para la demo")
         self.api_key = api_key.strip()
         self.model = model.strip()
 
@@ -194,7 +196,7 @@ class OpenAIResponsesProvider:
             "store": False,
             "instructions": request.policy,
             "input": json.dumps(input_payload, ensure_ascii=False),
-            "max_output_tokens": request.max_output_tokens,
+            "max_output_tokens": min(request.max_output_tokens, 128),
             "text": {
                 "format": {
                     "type": "json_schema",

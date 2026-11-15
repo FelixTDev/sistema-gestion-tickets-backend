@@ -8,6 +8,7 @@ from app.db.session import get_session
 from app.modules.chatbot.schemas.chatbot import (
     BotMessageResponse,
     ChatbotFeedbackMetrics,
+    ChatbotOperationalMetrics,
     ChatFeedbackCreate,
     ChatFeedbackRead,
     ConversationActionRequest,
@@ -49,6 +50,15 @@ def chatbot_feedback_metrics(
     service: ChatbotServiceDependency,
 ) -> ChatbotFeedbackMetrics:
     return service.feedback_metrics(session, current_user)
+
+
+@router.get("/admin/metrics", response_model=ChatbotOperationalMetrics)
+def chatbot_operational_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    current_user: CurrentUser,
+    service: ChatbotServiceDependency,
+) -> ChatbotOperationalMetrics:
+    return service.operational_metrics(session, current_user)
 
 
 @router.post(

@@ -438,7 +438,11 @@ class RAGService:
             policy=generation_policy + intent_instruction,
             prompt_version=settings.chatbot_ai_prompt_version,
             max_output_chars=settings.chatbot_ai_max_output_chars,
-            max_output_tokens=settings.chatbot_ai_max_output_tokens,
+            max_output_tokens=(
+                min(settings.chatbot_ai_max_output_tokens, 128)
+                if getattr(self.provider, "name", None) == "openai"
+                else settings.chatbot_ai_max_output_tokens
+            ),
             timeout_seconds=settings.chatbot_ai_timeout_seconds,
             grounding_required=grounding_required,
         )

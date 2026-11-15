@@ -5,7 +5,7 @@ x-app-environment: &app-environment
   DEBUG: ${DEBUG:-true}
   SECRET_KEY: ${SECRET_KEY:-change-this-development-secret-key-32-chars-min}
   TRUSTED_HOSTS: '${TRUSTED_HOSTS:-["localhost","127.0.0.1","testserver"]}'
-  CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}'
+  CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173","http://localhost:5174","http://127.0.0.1:5174"]}'
   ATTACHMENT_STORAGE_DIR: /app/var/uploads
   EMAIL_PROVIDER: ${EMAIL_PROVIDER:-noop}
   FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}

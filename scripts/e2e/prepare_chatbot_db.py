@@ -58,15 +58,15 @@ def main() -> None:
 
     from app.db.init_db import create_db_and_tables
     from app.db.session import engine
-    from app.seed.demo_data import seed_demo_data
+    from app.seed.chatbot_demo_data import seed_chatbot_demo_data
 
     create_db_and_tables()
     with Session(engine) as session:
-        seed_demo_data(session, include_operational_data=False)
+        seed_chatbot_demo_data(session)
 
     print(
-        "SQLite E2E lista: catálogo FAQ público y usuario ficticio; "
-        "sin tickets iniciales."
+        "SQLite E2E lista: catálogo FAQ público, dos clientes aislados, "
+        "asesor, supervisor y seis tickets de estados distintos."
     )
 
 

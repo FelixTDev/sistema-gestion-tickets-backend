@@ -163,7 +163,12 @@ class TicketService:
         conversation.ended_at = now
         conversation.last_activity_at = now
         context = dict(conversation.context_json or {})
+        advisor_handoff = context.get("advisor_handoff_requested") is True
+        if advisor_handoff:
+            conversation.escalation_reason = "CLIENT_REQUESTED_ADVISOR"
+            conversation.escalated_at = now
         context.pop(TICKET_DRAFT_CONTEXT_KEY, None)
+        context.pop("advisor_summary", None)
         conversation.context_json = context
         session.add(conversation)
         self.audit.record(
@@ -176,7 +181,11 @@ class TicketService:
             resource_id=conversation.id,
             target_user_id=actor.user.id,
             success=True,
-            metadata={"ticket_id": ticket.id, "source": TicketSource.CHATBOT.value},
+            metadata={
+                "ticket_id": ticket.id,
+                "source": TicketSource.CHATBOT.value,
+                "advisor_handoff": advisor_handoff,
+            },
         )
         try:
             session.commit()
@@ -250,10 +259,10 @@ class TicketService:
             ) from None
         if draft.status == ChatbotTicketDraftStatus.INACTIVE:
             return
-        if draft.status != ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION:
+        if draft.status != ChatbotTicketDraftStatus.CONFIRMED:
             raise HTTPException(
                 status_code=409,
-                detail="Completa o cancela el borrador antes de convertirlo",
+                detail="Confirma explícitamente el resumen antes de convertirlo",
             )
         fields = draft.fields
         if draft.missing_fields or draft.validation_errors:
@@ -776,6 +785,44 @@ class TicketService:
         self._require_staff(actor)
         ticket = self._get_mutable_ticket(session, ticket_id, data.expected_version)
         self._ensure_actor_can_manage(ticket, actor)
+        return self._apply_status_change(
+            session, ticket, data, actor, notification_type=notification_type
+        )
+
+    def confirm_resolution(
+        self,
+        session: Session,
+        ticket_id: str,
+        actor: AuthenticatedUser,
+    ) -> TicketRead:
+        if actor.role != "CLIENTE":
+            raise HTTPException(
+                status_code=403,
+                detail="Solo el cliente propietario puede confirmar el cierre",
+            )
+        ticket = self._get_authorized(session, ticket_id, actor, lock=True)
+        if ticket.status != TicketStatus.RESUELTO:
+            raise HTTPException(
+                status_code=409,
+                detail="Solo un ticket resuelto puede confirmarse como cerrado",
+            )
+        return self._apply_status_change(
+            session,
+            ticket,
+            StatusChange(status=TicketStatus.CERRADO),
+            actor,
+            notification_type=NotificationType.TICKET_CLOSED,
+        )
+
+    def _apply_status_change(
+        self,
+        session: Session,
+        ticket: Ticket,
+        data: StatusChange,
+        actor: AuthenticatedUser,
+        *,
+        notification_type: NotificationType,
+    ) -> TicketRead:
         self._transition(ticket, data.status, data.reason, actor.role)
         old = ticket.status
         ticket.status = data.status

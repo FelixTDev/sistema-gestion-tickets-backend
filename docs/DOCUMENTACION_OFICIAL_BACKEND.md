@@ -1296,7 +1296,7 @@ No existe un `@ControllerAdvice`/manejador global equivalente: los routers y ser
 | CHATBOT_* | No | Umbrales, cuotas, longitud, contexto y comportamiento IA. | CHATBOT_AI_ENABLED=false |
 | CHATBOT_AI_PROVIDER, CHATBOT_AI_ENDPOINT, CHATBOT_AI_API_KEY, CHATBOT_AI_MODEL | Solo para adaptadores IA opcionales | Selección y configuración del adaptador `http_json`; nunca documentar valores. | CHATBOT_AI_API_KEY=******** |
 | OPENAI_API_KEY | Solo para proveedor OpenAI opcional | Clave del adaptador OpenAI Responses; nunca documentar el valor. | OPENAI_API_KEY=******** |
-| TRUSTED_HOSTS, CORS_ORIGINS | No | Hosts aceptados y orígenes CORS. | CORS_ORIGINS=["http://localhost:5173"] |
+| TRUSTED_HOSTS, CORS_ORIGINS | No | Hosts aceptados y orígenes CORS. | CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","http://localhost:5174","http://127.0.0.1:5174"] |
 | MYSQL_* | Docker Compose | Credenciales y parámetros del contenedor MySQL. | MYSQL_PASSWORD=******** |
 | DEMO_*_PASSWORD | Seed local | Contraseñas de las cuentas de demostración; solo deben usarse localmente. | DEMO_CLIENT_PASSWORD=******** |
 

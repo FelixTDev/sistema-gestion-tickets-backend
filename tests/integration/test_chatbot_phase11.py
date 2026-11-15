@@ -147,17 +147,64 @@ def test_faq_discovery_does_not_consume_an_unknown_query_clarification_attempt(
 def test_manual_escalation_and_reset_are_idempotent(phase11_client) -> None:
     client, _ = phase11_client
     conversation = client.post("/api/v1/chat/conversations").json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/escalate"
     escalation = client.post(
-        f"/api/v1/chat/conversations/{conversation['id']}/escalate",
+        endpoint,
         json={"reason": "Necesito hablar con una persona"},
     )
     assert escalation.status_code == 200
-    assert escalation.json()["status"] == ConversationStatus.ESCALATED
+    assert escalation.json()["status"] == ConversationStatus.ACTIVE
+    assert escalation.json()["turn_count"] == 1
+    assert "no se ha creado una solicitud" in (
+        escalation.json()["messages"][-1]["content"].casefold()
+    )
+    repeated = client.post(
+        endpoint,
+        json={"reason": "Necesito hablar con una persona"},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["turn_count"] == 1
+    assert len(repeated.json()["messages"]) == len(escalation.json()["messages"])
 
     reset = client.post(f"/api/v1/chat/conversations/{conversation['id']}/reset")
     assert reset.status_code == 200
     assert reset.json()["status"] == ConversationStatus.ACTIVE
     assert reset.json()["turn_count"] == 0
+
+
+def test_operational_chatbot_metrics_are_aggregated_and_supervisor_only(
+    phase11_client,
+) -> None:
+    client, _ = phase11_client
+    conversation = client.post("/api/v1/chat/conversations").json()
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "¿Cuál es mi saldo?"},
+    )
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()["quick_replies"]} == {
+        "faq",
+        "create-ticket",
+    }
+    supervisor_headers = {
+        "Authorization": f"Bearer {login(client, 'supervisor@demo.com')}"
+    }
+    supervisor_metrics = client.get(
+        "/api/v1/chat/admin/metrics", headers=supervisor_headers
+    )
+    client_headers = {"Authorization": f"Bearer {login(client, 'cliente@demo.com')}"}
+    denied = client.get("/api/v1/chat/admin/metrics", headers=client_headers)
+
+    assert supervisor_metrics.status_code == 200, supervisor_metrics.text
+    assert supervisor_metrics.json()["fallback_by_reason"][
+        "BANKING_OPERATION_OUT_OF_SCOPE"
+    ] >= 1
+    assert supervisor_metrics.json()["out_of_context_by_subrule"][
+        "BANKING_OPERATION_OUT_OF_SCOPE"
+    ] >= 1
+    assert supervisor_metrics.json()["intent_counts"]["OUT_OF_SCOPE"] >= 1
+    assert "¿Cuál es mi saldo?" not in supervisor_metrics.text
+    assert denied.status_code == 403
 
 
 def test_authenticated_client_can_link_and_convert_once(phase11_client) -> None:

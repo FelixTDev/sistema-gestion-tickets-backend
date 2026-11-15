@@ -245,7 +245,7 @@ def test_anonymous_conversation_can_be_linked_before_authenticated_draft(
     linked = client.post(
         f"/api/v1/chat/conversations/{conversation_id}/link-user", headers=headers
     )
-    resumed = send(client, conversation_id, "Continúa con el borrador", headers)
+    resumed = send(client, conversation_id, "Sí, continúa", headers)
     response = send(
         client,
         conversation_id,
@@ -290,11 +290,13 @@ def test_progressive_draft_is_typed_persisted_and_only_conversion_creates_ticket
         "priority": "ALTA",
     }
     assert body["ticket_draft"]["missing_fields"] == []
-    assert body["suggested_action"] == "CONVERT_TO_TICKET"
-    ambiguous_confirmation = send(client, conversation_id, "sí", headers)
-    assert ambiguous_confirmation.json()["ticket_draft"]["status"] == (
-        "READY_FOR_CONFIRMATION"
-    )
+    assert body["suggested_action"] == "CONFIRM_TICKET"
+    assert {item["id"] for item in body["quick_replies"]} == {
+        "draft-confirm",
+        "draft-cancel",
+    }
+    confirmation = send(client, conversation_id, "sí", headers)
+    assert confirmation.json()["ticket_draft"]["status"] == "CONFIRMED"
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
@@ -376,6 +378,33 @@ def test_progressive_draft_is_typed_persisted_and_only_conversion_creates_ticket
         assert ticket.subject == payload["subject"]
         assert ticket.description == payload["description"]
         assert ticket.priority.value == payload["priority"]
+
+
+def test_ticket_draft_suggests_the_category_from_the_previous_faq(
+    phase3_client,
+) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+
+    faq_answer = send(client, conversation_id, "¿Cómo me afilio a Banca Móvil?", headers)
+    assert faq_answer.status_code == 200
+    assert faq_answer.json()["faq_id"]
+    with Session(engine) as session:
+        expected_category_id = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "BANCA_DIGITAL")
+        ).one().id
+    suggested = send(client, conversation_id, "Quiero crear un ticket", headers)
+
+    assert suggested.status_code == 200
+    assert suggested.json()["ticket_draft"]["status"] == "COLLECTING"
+    assert suggested.json()["ticket_draft"]["fields"]["category_id"] == (
+        expected_category_id
+    )
+    assert suggested.json()["ticket_draft"]["missing_fields"] == [
+        "SUBJECT",
+        "DESCRIPTION",
+        "PRIORITY",
+    ]
 
 
 def test_incomplete_draft_rejects_conversion_even_with_a_complete_request_body(
@@ -543,7 +572,7 @@ def test_existing_category_option_selection_still_matches_catalog_name(
     assert response.json()["ticket_draft"]["fields"]["category_id"] == option["id"]
 
 
-def test_start_message_reuses_incident_description_and_contract_default_priority(
+def test_start_message_reuses_incident_description_and_requests_priority(
     phase3_client,
 ) -> None:
     client, engine = phase3_client
@@ -565,8 +594,8 @@ def test_start_message_reuses_incident_description_and_contract_default_priority
     assert draft["fields"]["category_id"] == category.id
     assert draft["fields"]["subject"] is None
     assert draft["fields"]["description"] == "no recibí la tarjeta solicitada"
-    assert draft["fields"]["priority"] == "MEDIA"
-    assert draft["missing_fields"] == ["SUBJECT"]
+    assert draft["fields"]["priority"] is None
+    assert draft["missing_fields"] == ["SUBJECT", "PRIORITY"]
 
 
 def test_correction_resume_cancel_and_unrelated_question_preserve_draft(
@@ -627,7 +656,13 @@ def test_correction_resume_cancel_and_unrelated_question_preserve_draft(
     assert restarted_fields["category_id"] is None
     assert restarted_fields["subject"] is None
     assert restarted_fields["description"] is None
-    assert restarted_fields["priority"] == "MEDIA"
+    assert restarted_fields["priority"] is None
+    assert restarted.json()["ticket_draft"]["missing_fields"] == [
+        "CATEGORY_ID",
+        "SUBJECT",
+        "DESCRIPTION",
+        "PRIORITY",
+    ]
 
 
 def test_ticket_draft_never_reaches_external_ai_provider(
@@ -692,6 +727,7 @@ def test_openapi_exposes_ticket_draft_status_fields_and_real_enums() -> None:
         "INACTIVE",
         "COLLECTING",
         "READY_FOR_CONFIRMATION",
+        "CONFIRMED",
         "CANCELLED",
     ]
     assert components["TicketPriority"]["enum"] == [
@@ -762,7 +798,10 @@ def test_other_client_cannot_read_change_or_convert_a_private_draft(
         "Descripción: Información privada de mi solicitud.",
         owner_headers,
     )
+    draft = send(client, conversation_id, "Prioridad: MEDIA", owner_headers)
     assert draft.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
+    confirmed = send(client, conversation_id, "Confirmo", owner_headers)
+    assert confirmed.json()["ticket_draft"]["status"] == "CONFIRMED"
     owner_conversion = client.post(
         f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket",
         headers=owner_headers,
@@ -798,3 +837,130 @@ def test_other_client_cannot_read_change_or_convert_a_private_draft(
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 1
         assert session.get(Ticket, owner_conversion.json()["id"]) is not None
+
+
+def test_ticket_draft_collects_each_field_and_requires_explicit_confirmation(
+    phase3_client,
+) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    started = send(client, conversation_id, "Quiero crear un ticket", headers)
+
+    assert started.json()["ticket_draft"]["fields"]["priority"] is None
+    assert started.json()["ticket_draft"]["missing_fields"] == [
+        "CATEGORY_ID",
+        "SUBJECT",
+        "DESCRIPTION",
+        "PRIORITY",
+    ]
+    assert "¿Qué categoría" in started.json()["bot_message"]["content"]
+
+    category = send(client, conversation_id, "Categoría: TARJETAS", headers)
+    assert "¿Qué asunto" in category.json()["bot_message"]["content"]
+    subject = send(client, conversation_id, "Asunto: Tarjeta no recibida", headers)
+    assert "Elige una prioridad" in subject.json()["bot_message"]["content"]
+    description = send(
+        client,
+        conversation_id,
+        "Descripción: No recibí la tarjeta solicitada.",
+        headers,
+    )
+    assert description.json()["ticket_draft"]["status"] == "COLLECTING"
+    assert "Elige una prioridad" in description.json()["bot_message"]["content"]
+    priority = send(client, conversation_id, "Prioridad: MEDIA", headers)
+    assert priority.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
+    payload = priority.json()["ticket_draft"]["fields"]
+    assert priority.json()["offers_ticket"] is True
+    with Session(engine) as session:
+        category_row = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+        assert payload["category_id"] == category_row.id
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+    conversion_url = (
+        f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket"
+    )
+    unconfirmed = client.post(conversion_url, headers=headers, json=payload)
+    assert unconfirmed.status_code == 409
+
+    confirmation = send(client, conversation_id, "Confirmo", headers)
+    assert confirmation.json()["ticket_draft"]["status"] == "CONFIRMED"
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+    created = client.post(conversion_url, headers=headers, json=payload)
+    assert created.status_code == 201, created.text
+    assert created.json()["source"] == "CHATBOT"
+    assert created.json()["status"] == "NUEVO"
+
+
+def test_advisor_request_creates_context_ticket_only_after_confirmation(phase3_client):
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    faq = send(client, conversation_id, "¿Qué requisitos tiene una tarjeta?", headers)
+    assert faq.json()["response_source"] == "DETERMINISTIC"
+    handoff = send(client, conversation_id, "Quiero hablar con un asesor", headers)
+    draft = handoff.json()["ticket_draft"]
+
+    assert handoff.status_code == 200
+    assert handoff.json()["conversation_status"] == "WAITING_CLARIFICATION"
+    assert "no hay transferencia en vivo" in (
+        handoff.json()["bot_message"]["content"].casefold()
+    )
+    assert "código de seguimiento" in (
+        handoff.json()["bot_message"]["content"].casefold()
+    )
+    assert draft["fields"]["category_id"]
+    assert draft["fields"]["description"].startswith(
+        "Resumen de conversación (extracto determinístico):"
+    )
+    assert "requisitos tiene una tarjeta" in draft["fields"]["description"].casefold()
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+    subject = send(client, conversation_id, "Asunto: Requisitos de mi tarjeta", headers)
+    assert "Elige una prioridad" in subject.json()["bot_message"]["content"]
+    description = send(
+        client,
+        conversation_id,
+        "Descripción: Necesito una revisión ficticia de este caso.",
+        headers,
+    )
+    assert "Elige una prioridad" in description.json()["bot_message"]["content"]
+    priority = send(client, conversation_id, "Prioridad: MEDIA", headers)
+    assert priority.json()["suggested_action"] == "CONFIRM_TICKET"
+    assert priority.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
+    confirmed = send(client, conversation_id, "Confirmo", headers)
+    assert confirmed.json()["ticket_draft"]["status"] == "CONFIRMED"
+    payload = confirmed.json()["ticket_draft"]["fields"]
+    created = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket",
+        headers=headers,
+        json=payload,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["source"] == "CHATBOT"
+    assert created.json()["status"] == "NUEVO"
+    assert created.json()["description"].startswith(
+        "Resumen de conversación (extracto determinístico):"
+    )
+    assert "Detalle comunicado por el cliente: Necesito una revisión ficticia" in (
+        created.json()["description"]
+    )
+    assert created.json()["description"] == payload["description"]
+
+    advisor_headers = {
+        "Authorization": f"Bearer {login(client, 'asesor@demo.com')}"
+    }
+    advisor_queue = client.get(
+        "/api/v1/tickets/operations",
+        params={"queue": "unassigned", "page": 1, "page_size": 20},
+        headers=advisor_headers,
+    )
+    assert advisor_queue.status_code == 200, advisor_queue.text
+    ticket = next(
+        item
+        for item in advisor_queue.json()["items"]
+        if item["id"] == created.json()["id"]
+    )
+    assert ticket["description"] == payload["description"]

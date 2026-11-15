@@ -41,11 +41,11 @@ proxy de producción.
 ### CORS para el frontend
 
 Los orígenes permitidos se configuran mediante `CORS_ORIGINS` como una lista JSON.
-El valor local incluido en `.env.example` permite el frontend Vite en
-`http://localhost:5173` y `http://127.0.0.1:5173`:
+El valor local incluido en `.env.example` permite el frontend Vite en los puertos
+`5173` y `5174`, usando `localhost` o `127.0.0.1`:
 
 ```env
-CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","http://localhost:5174","http://127.0.0.1:5174"]
 ```
 
 Para varios orígenes utiliza, por ejemplo,

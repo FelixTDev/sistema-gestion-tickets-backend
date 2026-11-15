@@ -8,10 +8,12 @@ from difflib import SequenceMatcher
 
 from fastapi import HTTPException, status
 from sqlmodel import Session
+from sqlmodel import select
 
 from app.api.deps import AuthenticatedUser
 from app.core.config import get_settings
 from app.modules.auditoria.services.audit_service import AuditService
+from app.modules.chatbot.config.persona import persona_text
 from app.modules.chatbot.models.conversation import (
     TICKET_DRAFT_CONTEXT_KEY,
     Conversation,
@@ -33,10 +35,15 @@ from app.modules.chatbot.schemas.chatbot import (
     ChatbotConvertedTicketSummary,
     ChatbotFeedbackMetrics,
     ChatbotIntent,
+    ChatbotOperationalMetrics,
+    ChatbotProactiveNotice,
+    ChatbotProactiveNoticeType,
+    ChatbotQuickReply,
     ChatbotSuggestedAction,
     ChatbotTicketAssignmentStatus,
     ChatbotTicketCard,
     ChatbotTicketDraft,
+    ChatbotTicketDraftField,
     ChatbotTicketDraftStatus,
     ChatbotTicketPagination,
     ChatbotTicketQuery,
@@ -65,7 +72,7 @@ from app.modules.conocimiento.models.feedback import FAQFeedback
 from app.modules.conocimiento.repositories.faq_repository import FAQRepository
 from app.modules.notificaciones.models.notification import NotificationType
 from app.modules.notificaciones.services.notification_service import NotificationService
-from app.modules.tickets.models.ticket import TicketPriority, TicketStatus
+from app.modules.tickets.models.ticket import TicketPriority, TicketSource, TicketStatus
 from app.modules.tickets.schemas.ticket import TicketRead
 from app.modules.tickets.services.ticket_service import TicketService
 from app.shared.text import normalize_text
@@ -147,6 +154,10 @@ _OBVIOUS_OUT_OF_SCOPE_PATTERN = re.compile(
     r"ecuador|bolivia|uruguay)\b",
     re.IGNORECASE,
 )
+_BANKING_OPERATION_PATTERN = re.compile(
+    r"\b(?:saldos?|transferencias?|transferir|movimientos?)\b",
+    re.IGNORECASE,
+)
 _TICKET_REQUEST_PATTERN = re.compile(
     r"\b(?:quiero|necesito|mejor|genera|generar|crea|crear|abre|abrir|"
     r"registra|registrar|levanta|solicito|solicitar|haz|hacer)\b"
@@ -187,12 +198,6 @@ _GREETING_PHRASES = frozenset(
         "hola buenos dias",
         "hola buenas tardes",
     }
-)
-_GREETING_ANSWER = (
-    "¡Hola! Soy el asistente virtual del prototipo académico de gestión de "
-    "tickets de Banco GNB Perú. No es un canal bancario oficial. ¿En qué "
-    "puedo ayudarte hoy? Puedo orientarte sobre preguntas frecuentes o el "
-    "seguimiento de una solicitud."
 )
 _FAQ_DISCOVERY_PHRASES = (
     "preguntas frecuentes",
@@ -278,6 +283,8 @@ _TRANSIENT_CONVERSATION_CONTEXT_KEYS = (
     "pending_ui_menu_id",
     "clarification_context",
     "advisor_handoff_requested",
+    "last_ticket_query_codes",
+    "last_ticket_query_index",
     "last_terms",
 )
 
@@ -402,7 +409,7 @@ class ChatbotService:
         conversation = self._authorized_conversation(
             session, conversation_id, current_user
         )
-        return self._conversation_read(session, conversation)
+        return self._conversation_read(session, conversation, current_user)
 
     def send_message(
         self,
@@ -439,6 +446,7 @@ class ChatbotService:
         if content is None:
             raise HTTPException(status_code=422, detail="Mensaje no válido")
         clean_content = self._clean_content(content)
+        deterministic_intent = self._classify_deterministic_intent(clean_content)
         is_faq_category_request = option_id == "menu:faq"
         selected_faq_category_id = (
             option_id.removeprefix("category:")
@@ -452,6 +460,7 @@ class ChatbotService:
             and navigation_target is None
             and self._is_faq_discovery_request(clean_content)
         )
+        is_banking_operation = self._is_banking_operation_request(clean_content)
         lifecycle_action = (
             ChatbotSuggestedAction.SHOW_MENU
             if navigation_target == "main"
@@ -486,17 +495,30 @@ class ChatbotService:
         saved_context = dict(conversation.context_json or {})
         is_ticket_request = self._is_ticket_request(clean_content)
         is_advisor_request = self._is_advisor_request(clean_content)
+        advisor_ticket_enabled = get_settings().chatbot_escalation_ticket_enabled
         ticket_query_request = self._ticket_query_request(clean_content)
         ticket_query_request = self._resume_clarified_ticket_query(
             clean_content, conversation, ticket_query_request
         )
+        if ticket_query_request is None and get_settings().chatbot_contextual_followups_enabled:
+            ticket_query_request = self._contextual_ticket_query_request(
+                clean_content, saved_context, previous_bot_message
+            )
         is_unhelpful_follow_up = bool(
             previous_bot_message and self._is_unhelpful_follow_up(clean_content)
         )
         is_greeting = self._is_pure_greeting(clean_content)
-        advisor_handoff_requested = is_advisor_request or (
-            saved_context.get("advisor_handoff_requested") is True
+        advisor_handoff_requested = advisor_ticket_enabled and (
+            is_advisor_request or saved_context.get("advisor_handoff_requested") is True
         )
+        advisor_summary = None
+        if advisor_handoff_requested:
+            saved_summary = saved_context.get("advisor_summary")
+            advisor_summary = (
+                saved_summary
+                if isinstance(saved_summary, str)
+                else self._conversation_summary(recent_messages, clean_content)
+            )
         saved_draft = saved_context.get(TICKET_DRAFT_CONTEXT_KEY)
         current_draft = self.ticket_drafts.read(session, saved_draft)
         paused_draft = saved_context.get("ticket_draft_paused") is True
@@ -564,6 +586,7 @@ class ChatbotService:
                     in {
                         ChatbotTicketDraftStatus.COLLECTING,
                         ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                        ChatbotTicketDraftStatus.CONFIRMED,
                     }
                 ):
                     ticket_draft_reply = self.ticket_drafts.handle(
@@ -583,6 +606,7 @@ class ChatbotService:
                         in {
                             ChatbotTicketDraftStatus.COLLECTING,
                             ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                            ChatbotTicketDraftStatus.CONFIRMED,
                         }
                     ),
                     draft_cancelled=(
@@ -591,6 +615,7 @@ class ChatbotService:
                         in {
                             ChatbotTicketDraftStatus.COLLECTING,
                             ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                            ChatbotTicketDraftStatus.CONFIRMED,
                         }
                     ),
                 )
@@ -624,10 +649,17 @@ class ChatbotService:
                 result["candidate_faq_subcategory_id"] = selected_faq_subcategory.get(
                     "id"
                 )
+            elif is_banking_operation:
+                result = self._banking_operation_response()
             elif ticket_query_request is not None:
                 result = self._ticket_query_response(
                     session, current_user, ticket_query_request
                 )
+            elif not advisor_ticket_enabled and (
+                is_advisor_request
+                or saved_context.get("advisor_handoff_requested") is True
+            ):
+                result = self._advisor_handoff_unavailable_response()
             elif ticket_draft_flow and current_user is None:
                 result = self._ticket_authentication_response(
                     conversation, for_advisor=advisor_handoff_requested
@@ -640,6 +672,20 @@ class ChatbotService:
                     clean_content,
                     saved_draft,
                     start_requested=start_ticket_draft,
+                    suggested_category_id=(
+                        conversation.category_id
+                        if start_ticket_draft
+                        and (
+                            advisor_handoff_requested
+                            or (
+                                is_ticket_request
+                                and previous_bot_message is not None
+                                and previous_bot_message.faq_id is not None
+                            )
+                        )
+                        else None
+                    ),
+                    initial_description=advisor_summary,
                 )
                 if ticket_draft_reply.cancelled:
                     advisor_handoff_requested = False
@@ -797,6 +843,7 @@ class ChatbotService:
         skip_ai = bool(
             retrieval_unavailable
             or ticket_query_request is not None
+            or is_banking_operation
             or is_ticket_request
             or is_advisor_request
             or (is_advisor_request and is_ticket_request)
@@ -815,6 +862,7 @@ class ChatbotService:
                 in {
                     ChatbotTicketDraftStatus.COLLECTING,
                     ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                    ChatbotTicketDraftStatus.CONFIRMED,
                 }
             )
             or ticket_draft_reply is not None
@@ -948,6 +996,31 @@ class ChatbotService:
                 dedupe_key=f"ai:{conversation.id}:{user_message.id}",
             )
 
+        intent_classification = self._resolved_intent_classification(
+            deterministic_intent=deterministic_intent,
+            is_banking_operation=is_banking_operation,
+            is_ticket_request=is_ticket_request,
+            is_advisor_request=is_advisor_request,
+            ticket_query_request=ticket_query_request,
+            ticket_draft_flow=ticket_draft_flow,
+            is_unhelpful_follow_up=is_unhelpful_follow_up,
+            is_greeting=is_greeting,
+            is_faq_discovery=is_faq_discovery,
+            is_faq_category_request=is_faq_category_request,
+            navigation_target=navigation_target,
+            match=result.get("match"),
+            intent=result.get("intent"),
+        )
+        result["intent_classification"] = intent_classification
+        trace = result.get("ai_trace")
+        if not isinstance(trace, dict):
+            trace = {}
+        trace.setdefault("intent_classification", intent_classification.value)
+        trace.setdefault("response_source", result["response_source"])
+        if result.get("fallback_reason") is not None:
+            trace.setdefault("fallback_reason", result["fallback_reason"])
+        result["ai_trace"] = trace
+
         conversation.turn_count += 1
         conversation.last_activity_at = datetime.now(UTC)
         conversation.last_confidence = result["confidence"]
@@ -969,6 +1042,7 @@ class ChatbotService:
             if ticket_draft_reply.draft.status in {
                 ChatbotTicketDraftStatus.COLLECTING,
                 ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                ChatbotTicketDraftStatus.CONFIRMED,
                 ChatbotTicketDraftStatus.CANCELLED,
             }:
                 context[TICKET_DRAFT_CONTEXT_KEY] = self.ticket_drafts.persisted(
@@ -978,13 +1052,51 @@ class ChatbotService:
                 context.pop(TICKET_DRAFT_CONTEXT_KEY, None)
         if result.get("advisor_handoff_requested") is True:
             context["advisor_handoff_requested"] = True
+            if advisor_summary is not None:
+                context["advisor_summary"] = advisor_summary
         elif ticket_draft_reply is not None and ticket_draft_reply.cancelled:
             context.pop("advisor_handoff_requested", None)
+            context.pop("advisor_summary", None)
         pending_ticket_query = result.get("pending_ticket_query")
         if isinstance(pending_ticket_query, dict):
             context["pending_ticket_query"] = pending_ticket_query
         else:
             context.pop("pending_ticket_query", None)
+        ticket_query_payload = result.get("ticket_query")
+        if isinstance(ticket_query_payload, ChatbotTicketQuery):
+            previous_codes = context.get("last_ticket_query_codes")
+            stored_codes = (
+                [code for code in previous_codes if isinstance(code, str)]
+                if isinstance(previous_codes, list)
+                else []
+            )
+            selected_code = (
+                ticket_query_request.tracking_code
+                if ticket_query_request is not None
+                else None
+            )
+            if (
+                ticket_query_payload.query_type == ChatbotTicketQueryType.TICKET_STATUS
+                and selected_code in stored_codes
+            ):
+                context["last_ticket_query_codes"] = stored_codes
+                context["last_ticket_query_index"] = stored_codes.index(selected_code)
+            elif ticket_query_payload.query_type in {
+                ChatbotTicketQueryType.TICKET_LIST,
+                ChatbotTicketQueryType.LATEST_TICKET,
+            }:
+                codes = [item.tracking_code for item in ticket_query_payload.tickets]
+                if ticket_query_payload.ticket is not None:
+                    codes.append(ticket_query_payload.ticket.tracking_code)
+                if codes:
+                    context["last_ticket_query_codes"] = codes
+                    context["last_ticket_query_index"] = None
+                else:
+                    context.pop("last_ticket_query_codes", None)
+                    context.pop("last_ticket_query_index", None)
+        if ticket_draft_reply is not None:
+            context.pop("last_ticket_query_codes", None)
+            context.pop("last_ticket_query_index", None)
         if ticket_draft_reply is not None:
             context.pop("clarification_attempts", None)
             for key in (
@@ -1191,6 +1303,7 @@ class ChatbotService:
         )
         session.commit()
         session.refresh(conversation)
+        draft = self._read_ticket_draft(session, conversation.context_json or {})
         return BotMessageResponse(
             user_message=self._message_read(user_message),
             bot_message=self._message_read(bot_message),
@@ -1212,9 +1325,9 @@ class ChatbotService:
             sources=result["sources"],
             ticket_query=result.get("ticket_query"),
             available_actions=result.get("available_actions", []),
-            ticket_draft=self._read_ticket_draft(
-                session, conversation.context_json or {}
-            ),
+            quick_replies=self._quick_replies(draft, result),
+            proactive_notices=self._proactive_notices(session, current_user),
+            ticket_draft=draft,
             menu_open=(conversation.context_json or {}).get("menu_open") is True,
         )
 
@@ -1272,39 +1385,17 @@ class ChatbotService:
                 status_code=409, detail="La conversación ya fue convertida"
             )
         if conversation.status == ConversationStatus.ESCALATED:
-            return self._conversation_read(session, conversation)
-        now = datetime.now(UTC)
-        conversation.status = ConversationStatus.ESCALATED
-        conversation.escalation_reason = reason or "USER_REQUESTED"
-        conversation.escalated_at = now
-        conversation.last_activity_at = now
-        session.add(conversation)
-        if conversation.user_id is not None:
-            self.notifications.create(
-                session,
-                recipient_user_id=conversation.user_id,
-                notification_type=NotificationType.CHAT_ESCALATED,
-                title="Conversación derivada",
-                message="Tu consulta fue derivada para atención adicional.",
-                related_conversation_id=conversation.id,
-                metadata={"reason": conversation.escalation_reason},
-                dedupe_key=f"chat_escalated:manual:{conversation.id}",
-            )
-        self.audit.record(
-            session,
-            event_type="CHATBOT",
-            action="CONVERSATION_ESCALATED",
-            actor_user_id=conversation.user_id,
-            actor_role=current_user.role if current_user else None,
-            resource_type="CONVERSATION",
-            resource_id=conversation.id,
-            target_user_id=conversation.user_id,
-            success=True,
-            metadata={"reason": conversation.escalation_reason},
-        )
-        session.commit()
-        session.refresh(conversation)
-        return self._conversation_read(session, conversation)
+            return self._conversation_read(session, conversation, current_user)
+        if (conversation.context_json or {}).get("advisor_handoff_requested") is True:
+            return self._conversation_read(session, conversation, current_user)
+        content = "Quiero hablar con un asesor"
+        if reason:
+            content += f". Motivo: {reason}"
+        self.send_message(session, conversation_id, content, current_user)
+        updated = self.conversations.get_conversation(session, conversation_id)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Conversación no encontrada")
+        return self._conversation_read(session, updated, current_user)
 
     def reset(
         self,
@@ -1349,7 +1440,7 @@ class ChatbotService:
         )
         session.commit()
         session.refresh(conversation)
-        return self._conversation_read(session, conversation)
+        return self._conversation_read(session, conversation, current_user)
 
     def feedback(
         self,
@@ -1446,6 +1537,117 @@ class ChatbotService:
             usefulness_rate=round(helpful / total * 100, 2) if total else 0.0,
             faq_backed=faq_backed,
             generic_replies=total - faq_backed,
+        )
+
+    def operational_metrics(
+        self, session: Session, actor: AuthenticatedUser
+    ) -> ChatbotOperationalMetrics:
+        if actor.role != "SUPERVISOR":
+            raise HTTPException(status_code=403, detail="Métricas no autorizadas")
+        settings = get_settings()
+        if not settings.chatbot_aggregate_metrics_enabled:
+            raise HTTPException(status_code=404, detail="Métricas no disponibles")
+
+        messages = list(
+            session.exec(
+                select(ChatMessage).where(ChatMessage.sender_type == SenderType.BOT)
+            ).all()
+        )
+        conversations = list(session.exec(select(Conversation)).all())
+        chatbot_tickets = self.tickets.repository.list_tickets(
+            session, source=TicketSource.CHATBOT
+        )
+        fallback_by_reason: dict[str, int] = {}
+        out_of_context_by_subrule: dict[str, int] = {}
+        intent_counts: dict[str, int] = {}
+        fallback_count = 0
+        provider_calls_today = 0
+        tokens_today = 0
+        estimated_cost_today = 0.0
+        today = datetime.now(UTC).date()
+
+        for message in messages:
+            trace = message.ai_trace_json if isinstance(message.ai_trace_json, dict) else {}
+            reason = trace.get("fallback_reason")
+            if isinstance(reason, str) and reason:
+                fallback_by_reason[reason] = fallback_by_reason.get(reason, 0) + 1
+                fallback_count += 1
+            elif message.response_source == "FALLBACK":
+                fallback_by_reason["UNSPECIFIED"] = (
+                    fallback_by_reason.get("UNSPECIFIED", 0) + 1
+                )
+                fallback_count += 1
+
+            intent = trace.get("intent_classification") or message.intent or "UNKNOWN"
+            if isinstance(intent, str):
+                intent_counts[intent] = intent_counts.get(intent, 0) + 1
+            if reason == "OUT_OF_CONTEXT" or intent == ChatbotIntent.OUT_OF_SCOPE.value:
+                subrule = trace.get("validation_subrule")
+                subrule = subrule if isinstance(subrule, str) and subrule else (
+                    reason if isinstance(reason, str) and reason else "OUT_OF_CONTEXT"
+                )
+                out_of_context_by_subrule[subrule] = (
+                    out_of_context_by_subrule.get(subrule, 0) + 1
+                )
+
+            created_at = message.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            if created_at.date() != today:
+                continue
+            if trace.get("provider_called") is True:
+                provider_calls_today += 1
+            input_tokens = trace.get("input_tokens")
+            output_tokens = trace.get("output_tokens")
+            total_tokens = trace.get("total_tokens")
+            if isinstance(total_tokens, int) and total_tokens >= 0:
+                tokens_today += total_tokens
+            else:
+                tokens_today += sum(
+                    value
+                    for value in (input_tokens, output_tokens)
+                    if isinstance(value, int) and value >= 0
+                )
+            cost = trace.get("estimated_cost_usd")
+            if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+                estimated_cost_today += float(cost)
+
+        total_messages = len(messages)
+        fallback_rates = {
+            reason: round(count / total_messages * 100, 2)
+            for reason, count in fallback_by_reason.items()
+        }
+        advisor_handoffs = sum(
+            1
+            for conversation in conversations
+            if conversation.escalated_at is not None
+            or (conversation.context_json or {}).get("advisor_handoff_requested") is True
+        )
+        total_conversations = len(conversations)
+        return ChatbotOperationalMetrics(
+            total_conversations=total_conversations,
+            conversations_ending_in_ticket=sum(
+                item.status == ConversationStatus.CONVERTED_TO_TICKET
+                for item in conversations
+            ),
+            tickets_created=len(chatbot_tickets),
+            escalation_requests=advisor_handoffs,
+            escalation_rate_percent=(
+                round(advisor_handoffs / total_conversations * 100, 2)
+                if total_conversations
+                else 0.0
+            ),
+            fallback_by_reason=fallback_by_reason,
+            fallback_rate_by_reason_percent=fallback_rates,
+            out_of_context_by_subrule=out_of_context_by_subrule,
+            intent_counts=intent_counts,
+            provider_calls_today=provider_calls_today,
+            tokens_today=tokens_today,
+            estimated_cost_today_usd=round(estimated_cost_today, 8),
+            total_call_cap=settings.chatbot_ai_total_max_calls,
+            total_token_cap=settings.chatbot_ai_total_max_tokens,
+            total_estimated_cost_cap_usd=settings.chatbot_ai_total_estimated_cost_usd,
+            max_output_tokens_per_call=settings.chatbot_ai_max_output_tokens,
         )
 
     def _find_matches(self, session: Session, content: str) -> list[FAQMatch]:
@@ -2061,6 +2263,134 @@ class ChatbotService:
         return bool(_TICKET_REQUEST_PATTERN.search(cls.normalize_text(content)))
 
     @classmethod
+    def _classify_deterministic_intent(cls, content: str) -> ChatbotIntent:
+        if cls._is_banking_operation_request(content):
+            return ChatbotIntent.OUT_OF_SCOPE
+        if cls._ticket_query_request(content) is not None:
+            return ChatbotIntent.TICKET_QUERY
+        if cls._is_ticket_request(content):
+            return ChatbotIntent.CREATE_TICKET
+        if cls._is_advisor_request(content):
+            return ChatbotIntent.REQUEST_ADVISOR
+        if cls._is_feedback_request(content):
+            return ChatbotIntent.FEEDBACK
+        if cls._is_pure_greeting(content):
+            return ChatbotIntent.GREETING
+        if cls._is_faq_discovery_request(content):
+            return ChatbotIntent.FAQ_DISCOVERY
+        if cls._is_obviously_out_of_scope(content):
+            return ChatbotIntent.OUT_OF_SCOPE
+        if "?" in content or re.search(
+            r"\b(?:que|como|cuando|donde|quien|cual|cuanto|cuanta)\b",
+            normalize_text(content),
+        ):
+            return ChatbotIntent.FAQ_QUERY
+        return ChatbotIntent.UNKNOWN
+
+    @staticmethod
+    def _is_banking_operation_request(content: str) -> bool:
+        normalized = normalize_text(content)
+        if not _BANKING_OPERATION_PATTERN.search(normalized):
+            return False
+        if _TICKET_REQUEST_PATTERN.search(normalized) or any(
+            pattern.search(normalized) for pattern in _ADVISOR_REQUEST_PATTERNS
+        ):
+            return False
+        return not re.search(
+            r"\b(?:categor[ií]a|category|asunto|t[ií]tulo|subject|"
+            r"descripci[oó]n|detalle|description|prioridad|priority)\b\s*[:=]",
+            content,
+            re.IGNORECASE,
+        )
+
+    @staticmethod
+    def _banking_operation_response() -> dict[str, object]:
+        return {
+            "answer": (
+                "Este canal no realiza operaciones bancarias ni consulta saldos, "
+                "transferencias o movimientos. Puedo mostrarte preguntas frecuentes "
+                "o ayudarte a crear un ticket de soporte."
+            ),
+            "intent": ChatbotIntent.OUT_OF_SCOPE.value,
+            "intent_classification": ChatbotIntent.OUT_OF_SCOPE,
+            "faq_id": None,
+            "category_name": None,
+            "confidence": 1.0,
+            "resolved": True,
+            "offers_ticket": True,
+            "requires_clarification": False,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": "BANKING_OPERATION_OUT_OF_SCOPE",
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "sources": [],
+            "ai_trace": {
+                "fallback": True,
+                "fallback_reason": "BANKING_OPERATION_OUT_OF_SCOPE",
+                "validation_subrule": "BANKING_OPERATION_OUT_OF_SCOPE",
+                "response_source": "DETERMINISTIC",
+            },
+            "suggested_action": ChatbotSuggestedAction.SHOW_MENU,
+            "available_actions": [
+                ChatbotAvailableAction.BROWSE_KNOWLEDGE,
+                ChatbotAvailableAction.CREATE_TICKET,
+            ],
+        }
+
+    @classmethod
+    def _is_feedback_request(cls, content: str) -> bool:
+        normalized = cls.normalize_text(content).strip(" .,!?:;¿¡")
+        return normalized == "feedback" or bool(
+            _UNHELPFUL_FOLLOW_UP_PATTERN.search(normalized)
+        )
+
+    @staticmethod
+    def _resolved_intent_classification(
+        *,
+        deterministic_intent: ChatbotIntent,
+        is_banking_operation: bool,
+        is_ticket_request: bool,
+        is_advisor_request: bool,
+        ticket_query_request: TicketQueryRequest | None,
+        ticket_draft_flow: bool,
+        is_unhelpful_follow_up: bool,
+        is_greeting: bool,
+        is_faq_discovery: bool,
+        is_faq_category_request: bool,
+        navigation_target: str | None,
+        match: FAQMatch | None,
+        intent: object,
+    ) -> ChatbotIntent:
+        if is_banking_operation or intent == ChatbotIntent.OUT_OF_SCOPE.value:
+            return ChatbotIntent.OUT_OF_SCOPE
+        if ticket_query_request is not None:
+            return ChatbotIntent.TICKET_QUERY
+        if is_ticket_request:
+            return ChatbotIntent.CREATE_TICKET
+        if is_advisor_request:
+            return ChatbotIntent.REQUEST_ADVISOR
+        if ticket_draft_flow:
+            return ChatbotIntent.TICKET_DRAFT_UPDATE
+        if deterministic_intent == ChatbotIntent.FEEDBACK:
+            return ChatbotIntent.FEEDBACK
+        if is_unhelpful_follow_up:
+            return ChatbotIntent.FEEDBACK
+        if is_greeting:
+            return ChatbotIntent.GREETING
+        if is_faq_discovery:
+            return ChatbotIntent.FAQ_DISCOVERY
+        if is_faq_category_request or navigation_target is not None:
+            return ChatbotIntent.NAVIGATION
+        if match is not None or intent == ChatbotIntent.FAQ_QUERY.value:
+            return ChatbotIntent.FAQ_QUERY
+        try:
+            return ChatbotIntent(str(intent))
+        except ValueError:
+            return deterministic_intent
+
+    @classmethod
     def _is_advisor_request(cls, content: str) -> bool:
         normalized = cls.normalize_text(content)
         if re.search(
@@ -2318,6 +2648,50 @@ class ChatbotService:
             query_type=query_type,
             tracking_code=codes[0].upper(),
             page=request.page,
+        )
+
+    @classmethod
+    def _contextual_ticket_query_request(
+        cls,
+        content: str,
+        context: dict[str, object],
+        previous_bot_message: ChatMessage | None,
+    ) -> TicketQueryRequest | None:
+        if previous_bot_message is None or not cls._is_ticket_query_intent(
+            previous_bot_message.intent
+        ):
+            return None
+        normalized = normalize_text(content).strip(" .,!?:;¿¡")
+        is_other = bool(re.fullmatch(r"(?:y\s+)?el\s+otro", normalized))
+        is_reference = bool(
+            re.fullmatch(r"(?:ese|este|el)\s+(?:ticket|caso|solicitud)", normalized)
+        )
+        if not (is_other or is_reference):
+            return None
+        codes = context.get("last_ticket_query_codes")
+        if not isinstance(codes, list):
+            return None
+        safe_codes = [code for code in codes if isinstance(code, str)]
+        if not safe_codes:
+            return None
+        current_index = context.get("last_ticket_query_index")
+        current_index = (
+            current_index
+            if isinstance(current_index, int) and 0 <= current_index < len(safe_codes)
+            else None
+        )
+        if is_other:
+            if len(safe_codes) < 2:
+                return None
+            selected_index = (
+                1 if current_index is None else (current_index + 1) % len(safe_codes)
+            )
+        else:
+            selected_index = current_index if current_index is not None else 0
+        return TicketQueryRequest(
+            action=ChatbotSuggestedAction.TICKET_STATUS,
+            query_type=ChatbotTicketQueryType.TICKET_STATUS,
+            tracking_code=safe_codes[selected_index],
         )
 
     @staticmethod
@@ -2679,7 +3053,11 @@ class ChatbotService:
             action = ChatbotSuggestedAction.NONE
         elif reply.ready:
             intent = "TICKET_DRAFT_READY"
-            action = ChatbotSuggestedAction.CONVERT_TO_TICKET
+            action = (
+                ChatbotSuggestedAction.CONVERT_TO_TICKET
+                if reply.draft.status == ChatbotTicketDraftStatus.CONFIRMED
+                else ChatbotSuggestedAction.CONFIRM_TICKET
+            )
         else:
             intent = "TICKET_DRAFT"
             action = ChatbotSuggestedAction.ASK_CLARIFICATION
@@ -2687,9 +3065,10 @@ class ChatbotService:
         if advisor_handoff and not reply.cancelled:
             intent = "ADVISOR_TICKET_DRAFT"
             answer = (
-                "Para que un asesor pueda atenderte, prepararemos una solicitud. "
-                "Todavía no hay un asesor asignado: el ticket solo se enviará "
-                "después de que revises y confirmes los datos. "
+                "No hay transferencia en vivo. Para que un asesor atienda tu caso, "
+                "prepararemos una solicitud que entrará a la cola después de que "
+                "revises y confirmes los datos; entonces recibirás un código de "
+                "seguimiento. "
                 f"{reply.answer}"
             )
         return {
@@ -2712,6 +3091,32 @@ class ChatbotService:
             "advisor_handoff_requested": advisor_handoff and not reply.cancelled,
             "ticket_query": None,
             "counts_as_clarification": reply.requires_clarification,
+        }
+
+    @staticmethod
+    def _advisor_handoff_unavailable_response() -> dict[str, object]:
+        return {
+            "answer": (
+                "La solicitud de atención de un asesor no está disponible "
+                "temporalmente. Puedes iniciar una solicitud para darle seguimiento."
+            ),
+            "intent": "ADVISOR_REQUEST_UNAVAILABLE",
+            "faq_id": None,
+            "category_name": None,
+            "confidence": 1.0,
+            "resolved": False,
+            "offers_ticket": True,
+            "requires_clarification": False,
+            "options": [],
+            "candidate_faq_ids": [],
+            "fallback_reason": None,
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "preserve_context": True,
+            "suggested_action": ChatbotSuggestedAction.CREATE_TICKET,
+            "advisor_handoff_requested": False,
+            "counts_as_clarification": False,
         }
 
     @staticmethod
@@ -2743,9 +3148,13 @@ class ChatbotService:
     @staticmethod
     def _knowledge_unavailable_response() -> dict[str, object]:
         return {
-            "answer": (
-                "No puedo consultar la información de ayuda en este momento. "
-                "Inténtalo de nuevo más tarde."
+            "answer": persona_text(
+                "error",
+                enabled=get_settings().chatbot_persona_enabled,
+                fallback=(
+                    "No puedo consultar la información de ayuda en este momento. "
+                    "Inténtalo de nuevo más tarde."
+                ),
             ),
             "intent": "KNOWLEDGE_UNAVAILABLE",
             "faq_id": None,
@@ -2796,7 +3205,7 @@ class ChatbotService:
         if result.get("requires_clarification"):
             return ChatbotSuggestedAction.ASK_CLARIFICATION
         if result.get("offers_ticket"):
-            return ChatbotSuggestedAction.CONVERT_TO_TICKET
+            return ChatbotSuggestedAction.CREATE_TICKET
         return ChatbotSuggestedAction.NONE
 
     @staticmethod
@@ -2818,9 +3227,13 @@ class ChatbotService:
         draft_cancelled: bool,
     ) -> dict[str, object]:
         if action == ChatbotSuggestedAction.SHOW_MENU:
-            answer = (
-                "Volví al menú. Elige un tema o escribe otra consulta; "
-                "el historial de esta conversación se conserva."
+            answer = persona_text(
+                "menu_return",
+                enabled=get_settings().chatbot_persona_enabled,
+                fallback=(
+                    "Volví al menú. Elige un tema o escribe otra consulta; "
+                    "el historial de esta conversación se conserva."
+                ),
             )
             if draft_paused:
                 answer += (
@@ -2829,9 +3242,13 @@ class ChatbotService:
                 )
             intent = "CONVERSATION_MENU"
         else:
-            answer = (
-                "La conversación finalizó y su historial se conserva. "
-                "No se creó ningún ticket."
+            answer = persona_text(
+                "farewell",
+                enabled=get_settings().chatbot_persona_enabled,
+                fallback=(
+                    "La conversación finalizó y su historial se conserva. "
+                    "No se creó ningún ticket."
+                ),
             )
             if draft_cancelled:
                 answer += " El borrador pendiente se canceló."
@@ -3316,7 +3733,15 @@ class ChatbotService:
     @staticmethod
     def _greeting_response() -> dict[str, object]:
         return {
-            "answer": _GREETING_ANSWER,
+            "answer": persona_text(
+                "greeting",
+                enabled=get_settings().chatbot_persona_enabled,
+                fallback=(
+                    "Hola. Soy el asistente virtual del prototipo académico de "
+                    "gestión de tickets de Banco GNB Perú. Puedo orientarte sobre "
+                    "preguntas frecuentes o el seguimiento de una solicitud."
+                ),
+            ),
             "intent": None,
             "faq_id": None,
             "category_name": None,
@@ -3430,7 +3855,10 @@ class ChatbotService:
         return conversation
 
     def _conversation_read(
-        self, session: Session, conversation: Conversation
+        self,
+        session: Session,
+        conversation: Conversation,
+        current_user: AuthenticatedUser | None = None,
     ) -> ConversationRead:
         context = conversation.context_json or {}
         ticket = self.tickets.repository.get_by_conversation(session, conversation.id)
@@ -3463,6 +3891,7 @@ class ChatbotService:
                 if ticket is not None
                 else None
             ),
+            proactive_notices=self._proactive_notices(session, current_user),
             messages=[
                 self._message_read(message)
                 for message in self.conversations.list_messages(
@@ -3486,6 +3915,177 @@ class ChatbotService:
             response_source=message.response_source,
             created_at=message.created_at,
         )
+
+    @staticmethod
+    def _conversation_summary(
+        messages: list[ChatMessage], current_message: str
+    ) -> str:
+        user_turns = [
+            " ".join(minimize_provider_input(message.content).split())[:300]
+            for message in messages
+            if message.sender_type == SenderType.USER
+        ][-3:]
+        current_turn = " ".join(minimize_provider_input(current_message).split())
+        if current_turn:
+            reason = re.search(r"\bmotivo\s*:\s*(.+)$", current_turn, re.IGNORECASE)
+            if reason is not None:
+                user_turns.append(f"Motivo indicado: {reason.group(1)[:300]}")
+            elif not ChatbotService._is_advisor_request(current_turn):
+                user_turns.append(current_turn[:300])
+        context = " / ".join(user_turns)
+        if not context:
+            context = "El cliente solicita atención de un asesor."
+        return f"Resumen de conversación (extracto determinístico): {context}"[:1200]
+
+    def _proactive_notices(
+        self,
+        session: Session,
+        current_user: AuthenticatedUser | None,
+    ) -> list[ChatbotProactiveNotice]:
+        settings = get_settings()
+        if (
+            not settings.chatbot_proactive_notices_enabled
+            or current_user is None
+            or current_user.role != "CLIENTE"
+        ):
+            return []
+        page = self.tickets.list_mine(
+            session,
+            current_user,
+            page=1,
+            page_size=20,
+            statuses={TicketStatus.PENDIENTE_CLIENTE, TicketStatus.RESUELTO},
+        )
+        notices: list[ChatbotProactiveNotice] = []
+        for ticket in page.items:
+            if ticket.status == TicketStatus.PENDIENTE_CLIENTE:
+                notices.append(
+                    ChatbotProactiveNotice(
+                        type=ChatbotProactiveNoticeType.CLIENT_ACTION_REQUIRED,
+                        ticket_id=ticket.id,
+                        tracking_code=ticket.tracking_code,
+                        message=(
+                            f"Tu ticket {ticket.tracking_code} espera una respuesta tuya."
+                        ),
+                    )
+                )
+            elif ticket.status == TicketStatus.RESUELTO:
+                notices.append(
+                    ChatbotProactiveNotice(
+                        type=ChatbotProactiveNoticeType.RESOLVED_CONFIRMATION_REQUIRED,
+                        ticket_id=ticket.id,
+                        tracking_code=ticket.tracking_code,
+                        message=(
+                            f"Tu ticket {ticket.tracking_code} fue resuelto. "
+                            "¿Confirmas el cierre de esta solicitud?"
+                        ),
+                    )
+                )
+        return notices
+
+    @staticmethod
+    def _quick_replies(
+        draft: ChatbotTicketDraft,
+        result: dict[str, object],
+    ) -> list[ChatbotQuickReply]:
+        if not get_settings().chatbot_quick_replies_enabled:
+            return []
+        if draft.status == ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION:
+            return [
+                ChatbotQuickReply(
+                    id="draft-confirm",
+                    label="Confirmar solicitud",
+                    content="Confirmo",
+                ),
+                ChatbotQuickReply(
+                    id="draft-cancel",
+                    label="Cancelar borrador",
+                    content="Cancelo el borrador",
+                ),
+            ]
+        if draft.status == ChatbotTicketDraftStatus.CONFIRMED:
+            return []
+        options = result.get("options")
+        if result.get("requires_clarification") and isinstance(options, list):
+            replies = [
+                ChatbotQuickReply(
+                    id=f"clarification-{index + 1}",
+                    label=option[:80],
+                    content=option[:200],
+                )
+                for index, option in enumerate(options[:5])
+                if isinstance(option, str) and option.strip()
+            ]
+            if replies:
+                return replies
+        if draft.status == ChatbotTicketDraftStatus.COLLECTING:
+            if draft.fields.category_id is None and draft.category_options:
+                replies = [
+                    ChatbotQuickReply(
+                        id=f"draft-category-{index + 1}",
+                        label=option.name,
+                        content=f"Categoría: {option.name}",
+                    )
+                    for index, option in enumerate(draft.category_options[:5])
+                ]
+            elif (
+                draft.missing_fields == [ChatbotTicketDraftField.PRIORITY]
+                and not draft.validation_errors
+            ):
+                replies = [
+                    ChatbotQuickReply(
+                        id=f"draft-priority-{priority.value.casefold()}",
+                        label=priority.value.title(),
+                        content=f"Prioridad: {priority.value}",
+                    )
+                    for priority in TicketPriority
+                ]
+            else:
+                replies = []
+            replies.append(
+                ChatbotQuickReply(
+                    id="draft-cancel",
+                    label="Cancelar borrador",
+                    content="Cancelo el borrador",
+                )
+            )
+            return replies
+
+        intent = result.get("intent_classification") or result.get("intent")
+        if (
+            intent == ChatbotIntent.OUT_OF_SCOPE
+            or result.get("fallback_reason") == "BANKING_OPERATION_OUT_OF_SCOPE"
+        ):
+            return [
+                ChatbotQuickReply(
+                    id="faq",
+                    label="Preguntas frecuentes",
+                    content="Preguntas frecuentes",
+                ),
+                ChatbotQuickReply(
+                    id="create-ticket",
+                    label="Crear solicitud",
+                    content="Quiero crear un ticket",
+                ),
+            ]
+        return [
+            ChatbotQuickReply(
+                id="my-tickets", label="Ver mis tickets", content="Mis tickets"
+            ),
+            ChatbotQuickReply(
+                id="create-ticket",
+                label="Crear solicitud",
+                content="Quiero crear un ticket",
+            ),
+            ChatbotQuickReply(
+                id="main-menu", label="Volver al menú", content="Menú principal"
+            ),
+            ChatbotQuickReply(
+                id="contact-advisor",
+                label="Hablar con un asesor",
+                content="Quiero hablar con un asesor",
+            ),
+        ]
 
     @staticmethod
     def _message_ai_intent(message: ChatMessage) -> ChatbotIntent | None:

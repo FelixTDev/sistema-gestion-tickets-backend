@@ -1112,7 +1112,7 @@ def config_rows() -> list[list[str]]:
             "TRUSTED_HOSTS, CORS_ORIGINS",
             "No",
             "Hosts aceptados y orígenes CORS.",
-            'CORS_ORIGINS=["http://localhost:5173"]',
+            'CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","http://localhost:5174","http://127.0.0.1:5174"]',
         ],
         [
             "MYSQL_*",

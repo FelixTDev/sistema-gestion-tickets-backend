@@ -11,6 +11,7 @@ from app.db.session import get_session
 from app.main import app
 from app.modules.auditoria.services.audit_service import AuditService
 from app.modules.chatbot.api.router import get_chatbot_service, get_ticket_service
+from app.modules.chatbot.services import chatbot_service as chatbot_service_module
 from app.modules.chatbot.services import rag_service as rag_service_module
 from app.modules.chatbot.services.ai_provider import (
     AIGenerationResult,
@@ -174,7 +175,9 @@ def test_anonymous_advisor_request_requires_login_without_claiming_assignment(
     assert linked.status_code == 200
     assert resumed.status_code == 200
     assert resumed.json()["ticket_draft"]["status"] == "COLLECTING"
-    assert "asesor asignado" in resumed.json()["bot_message"]["content"].casefold()
+    assert "no hay transferencia en vivo" in (
+        resumed.json()["bot_message"]["content"].casefold()
+    )
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
@@ -201,9 +204,7 @@ def test_authenticated_advisor_request_starts_confirmable_ticket_draft(
     assert body["ticket_draft"]["status"] == "COLLECTING"
     assert body["suggested_action"] == "ASK_CLARIFICATION"
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
-    assert (
-        "todavía no hay un asesor asignado" in body["bot_message"]["content"].casefold()
-    )
+    assert "no hay transferencia en vivo" in body["bot_message"]["content"].casefold()
     assert "confirmes" in body["bot_message"]["content"].casefold()
 
     with Session(engine) as session:
@@ -220,17 +221,32 @@ def test_authenticated_advisor_request_starts_confirmable_ticket_draft(
         headers={"Authorization": f"Bearer {token}"},
         json={"content": "Asunto: Necesito orientación de un asesor"},
     )
-    final_reply = client.post(
+    description_reply = client.post(
         endpoint,
         headers={"Authorization": f"Bearer {token}"},
         json={"content": "Descripción: No puedo completar el trámite de mi tarjeta."},
     )
     assert category_reply.status_code == 200
     assert subject_reply.status_code == 200
-    assert final_reply.status_code == 200
+    assert description_reply.status_code == 200
+    priority_reply = client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": "Prioridad: MEDIA"},
+    )
+    assert priority_reply.status_code == 200
+    final_reply = priority_reply
     draft = final_reply.json()["ticket_draft"]
     assert draft["status"] == "READY_FOR_CONFIRMATION"
-    assert final_reply.json()["suggested_action"] == "CONVERT_TO_TICKET"
+    assert final_reply.json()["suggested_action"] == "CONFIRM_TICKET"
+    confirmation = client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": "Confirmo"},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["ticket_draft"]["status"] == "CONFIRMED"
+    assert confirmation.json()["suggested_action"] == "CONVERT_TO_TICKET"
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
@@ -266,6 +282,37 @@ def test_authenticated_advisor_request_starts_confirmable_ticket_draft(
     assert "pendiente de asignación" in (
         status_reply.json()["bot_message"]["content"].casefold()
     )
+
+
+def test_advisor_ticket_flow_can_be_disabled_without_creating_or_escalating(
+    phase13_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase13_client
+    settings = chatbot_service_module.get_settings()
+    monkeypatch.setattr(
+        chatbot_service_module,
+        "get_settings",
+        lambda: settings.model_copy(
+            update={"chatbot_escalation_ticket_enabled": False}
+        ),
+    )
+    conversation = client.post("/api/v1/chat/conversations").json()
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "quiero hablar con un asesor"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["suggested_action"] == "CREATE_TICKET"
+    assert body["ticket_draft"]["status"] == "INACTIVE"
+    assert "no está disponible temporalmente" in body["bot_message"]["content"].casefold()
+    assert body["conversation_status"] == "ACTIVE"
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+        saved = session.get(models.Conversation, conversation["id"])
+        assert saved is not None
+        assert saved.status.value == "ACTIVE"
 
 
 class ContextCapturingAIProvider:
@@ -470,12 +517,20 @@ def test_failed_conversion_audit_rolls_back_ticket_and_conversation(
             "content": (
                 f"Quiero crear ticket. Categoria: {category.name}. "
                 "Asunto: Consulta para validar atomicidad. "
-                "Descripcion: La conversión debe revertirse si falla la auditoría."
+                "Descripcion: La conversión debe revertirse si falla la auditoría. "
+                "Prioridad: MEDIA."
             )
         },
     )
     assert draft.status_code == 200
     assert draft.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
+    confirmed = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        headers=headers,
+        json={"content": "Confirmo"},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["ticket_draft"]["status"] == "CONFIRMED"
     app.dependency_overrides[get_ticket_service] = lambda: TicketService(
         audit_service=FailingConversionAuditService()
     )
@@ -499,7 +554,7 @@ def test_failed_conversion_audit_rolls_back_ticket_and_conversation(
         assert saved is not None
         assert saved.status.value == "ACTIVE"
         assert saved.context_json["ticket_creation_draft"]["status"] == (
-            "READY_FOR_CONFIRMATION"
+            "CONFIRMED"
         )
 
 
@@ -630,6 +685,8 @@ def test_openapi_exposes_typed_actions_and_existing_conversion_contract() -> Non
     assert components["ChatbotSuggestedAction"]["enum"] == [
         "NONE",
         "ASK_CLARIFICATION",
+        "CREATE_TICKET",
+        "CONFIRM_TICKET",
         "CONVERT_TO_TICKET",
         "CONTACT_ADVISOR",
         "AUTHENTICATION_REQUIRED",
