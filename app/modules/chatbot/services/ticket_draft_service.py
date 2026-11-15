@@ -473,11 +473,7 @@ class TicketDraftService:
             else self.categories.list_active(session)
         )
         draft.category_name = next(
-            (
-                item.name
-                for item in categories
-                if item.id == draft.fields.category_id
-            ),
+            (item.name for item in categories if item.id == draft.fields.category_id),
             None,
         )
         if (

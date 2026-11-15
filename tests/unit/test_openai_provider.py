@@ -109,6 +109,11 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
 
     assert result.status == "GENERATED"
     assert result.text == "Comunícate con el canal oficial para bloquearla."
+    assert json.loads(result.raw_output) == {
+        "text": "Comunícate con el canal oficial para bloquearla.",
+        "source_ids": ["faq-card-block"],
+        "intent_classification": "FAQ_QUERY",
+    }
     assert result.source_ids == ("faq-card-block",)
     assert result.intent_classification == "FAQ_QUERY"
     assert result.provider == "openai"
@@ -172,7 +177,7 @@ def test_openai_provider_schema_closes_intent_classification_enum(monkeypatch):
         "CREATE_TICKET",
         "TICKET_DRAFT_UPDATE",
         "REQUEST_ADVISOR",
-            "FEEDBACK",
+        "FEEDBACK",
         "CLARIFICATION",
         "NAVIGATION",
         "END_CONVERSATION",

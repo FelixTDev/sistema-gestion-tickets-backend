@@ -17,8 +17,7 @@ PERSONA_TEXTS = {
         "el historial de esta conversación se conserva."
     ),
     "farewell": (
-        "La conversación finalizó y su historial se conserva. "
-        "No se creó ningún ticket."
+        "La conversación finalizó y su historial se conserva. No se creó ningún ticket."
     ),
 }
 

@@ -1,9 +1,14 @@
 # Checklist para habilitar el chatbot con IA en producción
 
-Este documento prepara una activación gradual. La batería real se ejecutó con
-`gpt-5.4-mini`, embeddings desactivados y hasta 128 tokens de salida. La
-configuración de producción debe mantener un límite de gasto explícito y no
-activar embeddings hasta validar su coste y su efecto en la recuperación.
+Este checklist no autoriza una activación en producción. La IA está deshabilitada
+por defecto y la evaluación de esta demo usa solo datos sintéticos, SQLite
+temporal, `gpt-5.4-mini`, embeddings apagados y hasta 128 tokens de salida.
+
+> **No usar con datos reales de clientes.** La corrida permitida en esta línea
+> usa un incentivo sujeto a compartir entradas y salidas con OpenAI. Las
+> preguntas y respuestas enviadas a ese proveedor no son apropiadas para
+> información privada, financiera o identificable de clientes. Mantener
+> `CHATBOT_AI_ENABLED=false` para cualquier entorno que contenga esos datos.
 
 ## Variables y secretos
 
@@ -18,7 +23,7 @@ imágenes, historial de comandos ni logs:
 | `OPENAI_API_KEY` | Secreto de proyecto | Clave del proyecto OpenAI con acceso a Responses API. |
 | `CHATBOT_AI_EMBEDDINGS_ENABLED` | `false` al inicio | Coincide con la configuración probada; habilitar embeddings requiere una validación y presupuesto aparte. |
 | `CHATBOT_AI_DAILY_BUDGET_USD` | `0.50` | Tope interno del backend; configurar además límites y alertas en OpenAI. |
-| `CHATBOT_AI_MAX_OUTPUT_TOKENS` | `384` | Valor de configuración de producción; la batería se limitó a 128. |
+| `CHATBOT_AI_MAX_OUTPUT_TOKENS` | `128` | Límite aplicado por esta línea de evaluación; no aumentarlo para la demo. |
 | `CHATBOT_AI_TIMEOUT_SECONDS` | `15` | El backend debe responder con fallback ante timeout. |
 | `CHATBOT_AI_REQUESTS_PER_MINUTE` | `5` | Límite global del backend. |
 | `CHATBOT_AI_MAX_RESPONSES_PER_CONVERSATION` | `3` | Evita llamadas ilimitadas dentro de una conversación. |
@@ -63,9 +68,10 @@ inicial hasta que el operador apruebe el canary.
 7. Aumentar el tráfico gradualmente solo después de revisar los resultados y el
    gasto observado en OpenAI.
 
-La batería de 54 casos en SQLite/TestClient valida el backend aislado, no
-sustituye el canary con la base, DNS, configuración y tráfico reales de
-producción.
+La evaluación local con escenarios sintéticos y SQLite temporal valida el
+backend aislado, no sustituye un estudio con usuarios ni un proceso de
+aprobación de seguridad. Los resultados y denominadores reales se mantienen en
+`docs/chatbot-evaluation.md` y `docs/evaluation/chatbot_real_evaluation.json`.
 
 ## Rollback
 

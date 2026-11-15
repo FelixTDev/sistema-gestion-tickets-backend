@@ -98,7 +98,8 @@ def test_greeting_gets_a_friendly_reply_without_escalating(chatbot_client, conte
     body = response.json()
     assert body["bot_message"]["content"] == (
         "¡Hola! Soy el asistente virtual del prototipo académico de gestión de "
-        "tickets de Banco GNB Perú. No es un canal bancario oficial. ¿En qué "
+        "tickets de Banco GNB Perú. No es un canal bancario oficial ni procesa "
+        "operaciones bancarias. ¿En qué "
         "puedo ayudarte hoy? Puedo orientarte sobre preguntas frecuentes o el "
         "seguimiento de una solicitud."
     )

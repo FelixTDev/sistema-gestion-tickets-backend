@@ -20,14 +20,19 @@ se obtiene de la respuesta de creación y se usa en las operaciones siguientes.
 | `POST /api/v1/chat/conversations/{conversation_id}/feedback` | Opcional | `ChatFeedbackCreate` (`is_helpful` requerido) | `201 ChatFeedbackRead` |
 | `POST /api/v1/chat/conversations/{conversation_id}/link-user` | Bearer JWT de `CLIENTE` | Sin body | `200 LinkConversationResponse` |
 | `POST /api/v1/chat/conversations/{conversation_id}/convert-to-ticket` | Bearer JWT de `CLIENTE` propietario | `TicketCreate` | `201 TicketRead`; `200` en reintento idéntico; `409` si cambia el payload tras convertir |
+| `POST /api/v1/tickets/{ticket_id}/confirm-resolution` | Bearer JWT de `CLIENTE` propietario | Sin body | `200 TicketRead`; confirma el cierre de un ticket resuelto propio |
+| `GET /api/v1/chat/admin/metrics` | Bearer JWT de `SUPERVISOR` | Sin body | `200 ChatbotOperationalMetrics`; solo agregados |
 
 `TicketCreate` requiere `category_id`, `subject` (3–200 caracteres) y
 `description` (5–10 000 caracteres). `priority` es opcional y, si se omite,
 usa `MEDIA`. Obtén los IDs disponibles desde `GET /api/v1/categories`, que lista
-las categorías activas. En el flujo de borrador, el frontend solicita
-confirmación explícita cuando `ticket_draft.status=READY_FOR_CONFIRMATION` y solo
-entonces envía la conversión. El envío del body al endpoint constituye la
-confirmación; `CONVERT_TO_TICKET` por sí sola nunca crea el ticket.
+las categorías activas. En el flujo conversacional, el frontend presenta el
+resumen cuando `ticket_draft.status=READY_FOR_CONFIRMATION`. La respuesta del
+cliente `Confirmo` cambia el borrador a `CONFIRMED`; solo entonces se envía el
+body al endpoint de conversión. `CONVERT_TO_TICKET` por sí sola nunca crea el
+ticket. La primera conversión crea un ticket `NUEVO` con origen `CHATBOT` y
+requiere la confirmación explícita; un reintento idéntico devuelve el ticket
+original.
 
 `SHOW_MENU` y `END_CONVERSATION` son acciones de interfaz devueltas por el
 endpoint de mensajes; no tienen endpoints propios. `CONTACT_ADVISOR` puede
@@ -68,6 +73,18 @@ mensajes ni ejecutar acciones.
 - `ChatbotSuggestedAction.SHOW_MENU`: muestra opciones sin borrar historial ni
   cerrar la conversación.
 - `ChatbotSuggestedAction.END_CONVERSATION`: acompaña una finalización explícita.
+- `BotMessageResponse.quick_replies`: acciones de texto sugeridas para el turno;
+  el cliente puede enviarlas como contenido normal y el backend las vuelve a
+  clasificar.
+- `ConversationRead.proactive_notices` y `BotMessageResponse.proactive_notices`:
+  avisos de tickets propios en estado `PENDIENTE_CLIENTE` o `RESUELTO`. El primer
+  caso enlaza a los tickets propios; el segundo permite confirmar el cierre con
+  `POST /api/v1/tickets/{ticket_id}/confirm-resolution`.
+- `BotMessageResponse.ticket_draft`: conserva campos, estado, errores y pausa.
+  Los estados `READY_FOR_CONFIRMATION`, `CONFIRMED` y `CANCELLED` son explícitos;
+  el modelo no autoriza una conversión.
+- `response_source`, `fallback_reason` y `sources`: permiten mostrar si la
+  respuesta vino de IA o fallback y qué fuentes públicas se usaron.
 - `BotMessageResponse.ui` y `ConversationRead.ui`: describen las opciones
   seleccionables del estado actual y permiten restaurarlas tras una recarga.
 - `intent_classification`: enum cerrado adicional para respuestas generadas por
@@ -97,6 +114,15 @@ pero no forman una jerarquía de subcategorías navegable. No existe un campo ni
 una ruta de subcategoría en el contrato actual. Las pruebas del frontend validan
 API y componentes con respuestas simuladas; no equivalen a una ejecución E2E
 contra un navegador y backend levantados juntos.
+
+Cuando el cliente pide un asesor, el borrador incluye un resumen determinístico
+de la conversación. La interfaz debe indicar que no existe transferencia en vivo
+y pedir confirmación antes de crear el ticket. La conversión lo deja sin asignar
+en la cola operativa. Un asesor puede ver el ticket en la cola sin asignar, pero
+el detalle queda restringido hasta que un supervisor lo asigne o el asesor lo
+tome; esto evita exponer el contenido completo antes de reclamar la atención.
+La ruta de cola es `GET /api/v1/tickets/operations?queue=unassigned`, para roles
+internos autorizados.
 
 ## Navegación y opciones seleccionables
 

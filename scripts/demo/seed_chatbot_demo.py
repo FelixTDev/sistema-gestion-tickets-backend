@@ -17,7 +17,9 @@ def configure_runtime() -> Path:
     try:
         database_path.relative_to(temporary_root)
     except ValueError as error:
-        raise SystemExit("El seed de demo solo permite archivos dentro de TEMP.") from error
+        raise SystemExit(
+            "El seed de demo solo permite archivos dentro de TEMP."
+        ) from error
     if database_path.suffix.casefold() not in {".sqlite", ".sqlite3", ".db"}:
         raise SystemExit("La ruta de demo debe tener extensión SQLite.")
     if database_path.exists():

@@ -306,7 +306,9 @@ def test_advisor_ticket_flow_can_be_disabled_without_creating_or_escalating(
     body = response.json()
     assert body["suggested_action"] == "CREATE_TICKET"
     assert body["ticket_draft"]["status"] == "INACTIVE"
-    assert "no está disponible temporalmente" in body["bot_message"]["content"].casefold()
+    assert (
+        "no está disponible temporalmente" in body["bot_message"]["content"].casefold()
+    )
     assert body["conversation_status"] == "ACTIVE"
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
@@ -553,9 +555,7 @@ def test_failed_conversion_audit_rolls_back_ticket_and_conversation(
         saved = session.get(models.Conversation, conversation["id"])
         assert saved is not None
         assert saved.status.value == "ACTIVE"
-        assert saved.context_json["ticket_creation_draft"]["status"] == (
-            "CONFIRMED"
-        )
+        assert saved.context_json["ticket_creation_draft"]["status"] == ("CONFIRMED")
 
 
 class FailingAIProvider:

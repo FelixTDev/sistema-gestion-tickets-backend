@@ -282,11 +282,12 @@ curl -X POST http://localhost:8000/api/v1/chat/conversations/<conversation_id>/l
 
 ### RAG/IA con guardrails
 
-La Fase 12 usa la recuperación determinista existente como RAG local mínimo; no
-se agregan embeddings, almacén vectorial, FULLTEXT ni un servicio externo: el
-volumen y el modelo actual de FAQs no justifican esa infraestructura. Solo se
-recuperan FAQs publicadas, activas, vigentes y de categorías activas; el contexto
-se limita por cantidad de documentos y caracteres.
+La recuperación de FAQ es local y léxica. El código incluye una ruta opcional de
+recuperación híbrida con embeddings, pero `CHATBOT_AI_EMBEDDINGS_ENABLED=false`
+por defecto y permanece desactivada en la demo y en la evaluación descrita aquí.
+No se usa un almacén vectorial ni se envían embeddings. Solo se recuperan FAQs
+publicadas, activas, vigentes y de categorías activas; el contexto se limita por
+cantidad de documentos y caracteres.
 
 Esto todavía no es una base RAG empresarial completa ni habilita un copiloto para
 Asesores o Supervisores. El chatbot público usa el corpus de FAQs de cliente y el
@@ -295,16 +296,15 @@ copiloto interno hacen falta fuentes operativas autorizadas, su clasificación p
 audiencia y permisos, y un proveedor/gateway de IA aprobado; no se debe reutilizar
 contenido interno como respuesta pública ni cargarlo sin esas fuentes.
 
-La generación está desacoplada mediante `AIProvider` y `NoopAIProvider`. El
-entorno incluye `CHATBOT_AI_*`, pero `CHATBOT_AI_ENABLED=false` y
-`CHATBOT_AI_PROVIDER=noop` son los valores seguros por defecto. No hay API key ni
-proveedor externo incluido en el repositorio; un adaptador aprobado puede
-inyectarse detrás de la interfaz sin modificar el chatbot ni sus endpoints.
-El adaptador opcional `http_json` espera un gateway interno configurado por
-`CHATBOT_AI_ENDPOINT`, `CHATBOT_AI_API_KEY` y `CHATBOT_AI_MODEL`; si falta
-cualquier valor o el endpoint es inválido, se usa Noop y el fallback determinista.
-El contrato del gateway recibe solo `model`, `input`, `policy`,
-`prompt_version` y `context`, y debe devolver `text` y `source_ids`.
+La generación está desacoplada mediante `AIProvider`. `CHATBOT_AI_ENABLED=false`
+y `CHATBOT_AI_PROVIDER=noop` son los valores seguros por defecto. Se incluyen
+adaptadores opcionales para OpenAI Responses y un gateway interno `http_json`; si
+falta configuración o el proveedor falla, se conserva el fallback determinista.
+Para esta evaluación se permite únicamente `gpt-5.4-mini`, con 128 tokens de
+salida como máximo, tope de 150 llamadas, 500 000 tokens y USD 0.50 estimados;
+los embeddings permanecen apagados. Si se usa una modalidad de incentivo que
+comparte entradas y salidas con OpenAI, no se deben enviar datos reales de
+clientes ni contenido privado de tickets.
 
 Antes de invocar IA se validan el mensaje, las fuentes y los guardrails contra
 prompt injection, solicitudes de secretos y contenido malicioso. La salida debe
@@ -319,6 +319,11 @@ interna conserva proveedor, modelo, versión de prompt, fuentes, scores, duraci�
 validación y motivo de fallback, sin prompts completos, respuestas técnicas,
 tokens, secretos ni datos personales. Los eventos `CHATBOT_AI` se auditan con
 metadatos mínimos y redactados.
+
+Para ejecutar la demo local aislada, seguir [docs/DEMO.md](docs/DEMO.md) y usar
+solo las [cuentas locales de demostración](docs/chatbot-demo-credentials.md).
+El contrato de respuestas está en
+[docs/chatbot-frontend-contract.md](docs/chatbot-frontend-contract.md).
 
 ## Gestión de tickets
 

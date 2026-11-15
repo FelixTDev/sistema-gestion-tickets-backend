@@ -26,6 +26,44 @@ def test_demo_seed_is_idempotent():
     assert len(roles) == 3
 
 
+def test_chatbot_demo_seed_is_sqlite_only_and_isolates_operational_tickets():
+    from sqlmodel import SQLModel
+
+    from app.db.models import Role, Ticket, User
+    from app.modules.tickets.models.ticket import TicketStatus
+    from app.seed.chatbot_demo_data import seed_chatbot_demo_data
+
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        seed_chatbot_demo_data(session)
+        seed_chatbot_demo_data(session)
+        users = {user.email: user for user in session.exec(select(User)).all()}
+        roles = {role.name for role in session.exec(select(Role)).all()}
+        tickets = session.exec(select(Ticket)).all()
+
+    assert roles == {"CLIENTE", "ASESOR", "SUPERVISOR"}
+    assert {"cliente@demo.com", "cliente2@demo.com"}.issubset(users)
+    assert {"asesor@demo.com", "supervisor@demo.com"}.issubset(users)
+    assert len(tickets) == 6
+    assert {ticket.tracking_code for ticket in tickets} == {
+        f"TCK-LOCAL-{number:03d}" for number in range(1, 7)
+    }
+    assert TicketStatus.PENDIENTE_CLIENTE in {ticket.status for ticket in tickets}
+    assert TicketStatus.RESUELTO in {ticket.status for ticket in tickets}
+    assert all(
+        ticket.client_id == users["cliente@demo.com"].id
+        for ticket in tickets
+        if ticket.tracking_code != "TCK-LOCAL-006"
+    )
+    assert (
+        next(
+            ticket for ticket in tickets if ticket.tracking_code == "TCK-LOCAL-006"
+        ).client_id
+        == users["cliente2@demo.com"].id
+    )
+
+
 def test_demo_seed_populates_operational_data_without_forbidden_text():
     from sqlmodel import SQLModel
 

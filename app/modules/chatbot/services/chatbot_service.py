@@ -7,8 +7,7 @@ from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 
 from fastapi import HTTPException, status
-from sqlmodel import Session
-from sqlmodel import select
+from sqlmodel import Session, select
 
 from app.api.deps import AuthenticatedUser
 from app.core.config import get_settings
@@ -282,7 +281,6 @@ _TRANSIENT_CONVERSATION_CONTEXT_KEYS = (
     "pending_faq_subcategory_id",
     "pending_ui_menu_id",
     "clarification_context",
-    "advisor_handoff_requested",
     "last_ticket_query_codes",
     "last_ticket_query_index",
     "last_terms",
@@ -500,7 +498,10 @@ class ChatbotService:
         ticket_query_request = self._resume_clarified_ticket_query(
             clean_content, conversation, ticket_query_request
         )
-        if ticket_query_request is None and get_settings().chatbot_contextual_followups_enabled:
+        if (
+            ticket_query_request is None
+            and get_settings().chatbot_contextual_followups_enabled
+        ):
             ticket_query_request = self._contextual_ticket_query_request(
                 clean_content, saved_context, previous_bot_message
             )
@@ -508,17 +509,6 @@ class ChatbotService:
             previous_bot_message and self._is_unhelpful_follow_up(clean_content)
         )
         is_greeting = self._is_pure_greeting(clean_content)
-        advisor_handoff_requested = advisor_ticket_enabled and (
-            is_advisor_request or saved_context.get("advisor_handoff_requested") is True
-        )
-        advisor_summary = None
-        if advisor_handoff_requested:
-            saved_summary = saved_context.get("advisor_summary")
-            advisor_summary = (
-                saved_summary
-                if isinstance(saved_summary, str)
-                else self._conversation_summary(recent_messages, clean_content)
-            )
         saved_draft = saved_context.get(TICKET_DRAFT_CONTEXT_KEY)
         current_draft = self.ticket_drafts.read(session, saved_draft)
         paused_draft = saved_context.get("ticket_draft_paused") is True
@@ -535,6 +525,34 @@ class ChatbotService:
             }
             and self.ticket_drafts.is_resume_request(clean_content)
         )
+        saved_advisor_handoff = saved_context.get("advisor_handoff_requested") is True
+        advisor_handoff_requested = advisor_ticket_enabled and (
+            is_advisor_request
+            or (
+                saved_advisor_handoff
+                and (
+                    resume_paused_draft
+                    or resume_after_authentication
+                    or (
+                        not paused_draft
+                        and current_draft.status
+                        in {
+                            ChatbotTicketDraftStatus.COLLECTING,
+                            ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                            ChatbotTicketDraftStatus.CONFIRMED,
+                        }
+                    )
+                )
+            )
+        )
+        advisor_summary = None
+        if advisor_handoff_requested:
+            saved_summary = saved_context.get("advisor_summary")
+            advisor_summary = (
+                saved_summary
+                if isinstance(saved_summary, str)
+                else self._conversation_summary(recent_messages, clean_content)
+            )
         start_ticket_draft = (
             is_ticket_request
             or advisor_handoff_requested
@@ -1567,7 +1585,9 @@ class ChatbotService:
         today = datetime.now(UTC).date()
 
         for message in messages:
-            trace = message.ai_trace_json if isinstance(message.ai_trace_json, dict) else {}
+            trace = (
+                message.ai_trace_json if isinstance(message.ai_trace_json, dict) else {}
+            )
             reason = trace.get("fallback_reason")
             if isinstance(reason, str) and reason:
                 fallback_by_reason[reason] = fallback_by_reason.get(reason, 0) + 1
@@ -1583,8 +1603,14 @@ class ChatbotService:
                 intent_counts[intent] = intent_counts.get(intent, 0) + 1
             if reason == "OUT_OF_CONTEXT" or intent == ChatbotIntent.OUT_OF_SCOPE.value:
                 subrule = trace.get("validation_subrule")
-                subrule = subrule if isinstance(subrule, str) and subrule else (
-                    reason if isinstance(reason, str) and reason else "OUT_OF_CONTEXT"
+                subrule = (
+                    subrule
+                    if isinstance(subrule, str) and subrule
+                    else (
+                        reason
+                        if isinstance(reason, str) and reason
+                        else "OUT_OF_CONTEXT"
+                    )
                 )
                 out_of_context_by_subrule[subrule] = (
                     out_of_context_by_subrule.get(subrule, 0) + 1
@@ -1609,7 +1635,11 @@ class ChatbotService:
                     if isinstance(value, int) and value >= 0
                 )
             cost = trace.get("estimated_cost_usd")
-            if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+            if (
+                isinstance(cost, int | float)
+                and not isinstance(cost, bool)
+                and cost >= 0
+            ):
                 estimated_cost_today += float(cost)
 
         total_messages = len(messages)
@@ -1621,7 +1651,8 @@ class ChatbotService:
             1
             for conversation in conversations
             if conversation.escalated_at is not None
-            or (conversation.context_json or {}).get("advisor_handoff_requested") is True
+            or (conversation.context_json or {}).get("advisor_handoff_requested")
+            is True
         )
         total_conversations = len(conversations)
         return ChatbotOperationalMetrics(
@@ -3917,9 +3948,7 @@ class ChatbotService:
         )
 
     @staticmethod
-    def _conversation_summary(
-        messages: list[ChatMessage], current_message: str
-    ) -> str:
+    def _conversation_summary(messages: list[ChatMessage], current_message: str) -> str:
         user_turns = [
             " ".join(minimize_provider_input(message.content).split())[:300]
             for message in messages
@@ -3965,7 +3994,8 @@ class ChatbotService:
                         ticket_id=ticket.id,
                         tracking_code=ticket.tracking_code,
                         message=(
-                            f"Tu ticket {ticket.tracking_code} espera una respuesta tuya."
+                            f"Tu ticket {ticket.tracking_code} espera "
+                            "una respuesta tuya."
                         ),
                     )
                 )

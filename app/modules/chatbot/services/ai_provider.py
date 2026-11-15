@@ -37,6 +37,7 @@ class AIProviderRequest:
 class AIGenerationResult:
     status: str
     text: str | None
+    raw_output: str | None
     source_ids: tuple[str, ...]
     provider: str
     model: str | None
@@ -52,6 +53,7 @@ class AIGenerationResult:
         cls,
         *,
         text: str,
+        raw_output: str | None = None,
         source_ids: list[str] | tuple[str, ...],
         provider: str,
         model: str | None,
@@ -64,6 +66,7 @@ class AIGenerationResult:
         return cls(
             status="GENERATED",
             text=text,
+            raw_output=raw_output,
             source_ids=tuple(source_ids),
             provider=provider,
             model=model,
@@ -87,6 +90,7 @@ class AIGenerationResult:
         return cls(
             status=status,
             text=None,
+            raw_output=None,
             source_ids=(),
             provider=provider,
             model=model,

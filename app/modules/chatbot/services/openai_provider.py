@@ -167,6 +167,7 @@ class OpenAIResponsesProvider:
 
         return AIGenerationResult.generated(
             text=text.strip(),
+            raw_output=output_text,
             source_ids=source_ids,
             provider=self.name,
             model=self.model,

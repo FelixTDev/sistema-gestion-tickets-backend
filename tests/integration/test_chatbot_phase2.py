@@ -288,9 +288,7 @@ def test_proactive_notices_are_authenticated_and_scoped_to_the_conversation_owne
     notices = owner_read.json()["proactive_notices"]
     assert {item["ticket_id"] for item in notices} == {pending_id, resolved_id}
     assert "espera una respuesta tuya" in next(
-        item["message"]
-        for item in notices
-        if item["type"] == "CLIENT_ACTION_REQUIRED"
+        item["message"] for item in notices if item["type"] == "CLIENT_ACTION_REQUIRED"
     )
     assert "¿Confirmas el cierre" in next(
         item["message"]
@@ -300,9 +298,7 @@ def test_proactive_notices_are_authenticated_and_scoped_to_the_conversation_owne
     assert "TCK-OTHER-CLIENT-0001" not in owner_read.text
 
     anonymous = client.post("/api/v1/chat/conversations").json()
-    anonymous_read = client.get(
-        f"/api/v1/chat/conversations/{anonymous['id']}"
-    )
+    anonymous_read = client.get(f"/api/v1/chat/conversations/{anonymous['id']}")
     assert anonymous_read.status_code == 200
     assert anonymous_read.json()["proactive_notices"] == []
 

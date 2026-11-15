@@ -139,6 +139,58 @@ def test_paused_draft_can_be_resumed_from_server_offered_menu_option(
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
 
+def test_advisor_context_survives_pausing_and_resuming_draft(phase3_client) -> None:
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    menu = send(client, conversation_id, "mostrar menú", headers)
+    assert menu.status_code == 200
+    assert menu.json()["ui"]["type"] == "MAIN_MENU"
+    handoff = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        headers=headers,
+        json={"option_id": "menu:advisor"},
+    )
+    initial_description = handoff.json()["ticket_draft"]["fields"]["description"]
+    assert handoff.status_code == 200
+    assert handoff.json()["bot_message"]["intent"] == "ADVISOR_TICKET_DRAFT"
+    assert initial_description.startswith(
+        "Resumen de conversación (extracto determinístico):"
+    )
+
+    paused = send(client, conversation_id, "mostrar menú", headers)
+    assert paused.status_code == 200
+    assert paused.json()["ticket_draft"]["paused"] is True
+    unrelated = send(client, conversation_id, "hola", headers)
+    assert unrelated.status_code == 200
+    assert unrelated.json()["ticket_draft"]["paused"] is True
+    menu_again = send(client, conversation_id, "mostrar menú", headers)
+    resume_option = next(
+        option
+        for option in menu_again.json()["ui"]["options"]
+        if option["id"] == "menu:resume_ticket_draft"
+    )
+    resumed = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        headers=headers,
+        json={"option_id": resume_option["id"]},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["ticket_draft"]["paused"] is False
+    assert resumed.json()["bot_message"]["intent"] == "ADVISOR_TICKET_DRAFT"
+
+    send(client, conversation_id, "Asunto: Revisión de una solicitud", headers)
+    description = send(
+        client,
+        conversation_id,
+        "Descripción: No puedo completar un trámite ficticio.",
+        headers,
+    )
+    saved_description = description.json()["ticket_draft"]["fields"]["description"]
+    assert saved_description.startswith(initial_description)
+    assert "Detalle comunicado por el cliente: No puedo completar" in saved_description
+    assert description.json()["bot_message"]["intent"] == "ADVISOR_TICKET_DRAFT"
+
+
 def test_faq_does_not_resume_paused_draft_but_explicit_resume_does(
     phase3_client,
 ) -> None:
@@ -386,13 +438,19 @@ def test_ticket_draft_suggests_the_category_from_the_previous_faq(
     client, engine = phase3_client
     conversation_id, headers = create_linked_conversation(client)
 
-    faq_answer = send(client, conversation_id, "¿Cómo me afilio a Banca Móvil?", headers)
+    faq_answer = send(
+        client, conversation_id, "¿Cómo me afilio a Banca Móvil?", headers
+    )
     assert faq_answer.status_code == 200
     assert faq_answer.json()["faq_id"]
     with Session(engine) as session:
-        expected_category_id = session.exec(
-            select(TicketCategory).where(TicketCategory.name == "BANCA_DIGITAL")
-        ).one().id
+        expected_category_id = (
+            session.exec(
+                select(TicketCategory).where(TicketCategory.name == "BANCA_DIGITAL")
+            )
+            .one()
+            .id
+        )
     suggested = send(client, conversation_id, "Quiero crear un ticket", headers)
 
     assert suggested.status_code == 200
@@ -653,12 +711,12 @@ def test_correction_resume_cancel_and_unrelated_question_preserve_draft(
     restarted = send(client, conversation_id, "Quiero crear otro ticket", headers)
     assert restarted.json()["ticket_draft"]["status"] == "COLLECTING"
     restarted_fields = restarted.json()["ticket_draft"]["fields"]
-    assert restarted_fields["category_id"] is None
+    assert restarted_fields["category_id"] is not None
+    assert restarted_fields["category_id"] != before["category_id"]
     assert restarted_fields["subject"] is None
     assert restarted_fields["description"] is None
     assert restarted_fields["priority"] is None
     assert restarted.json()["ticket_draft"]["missing_fields"] == [
-        "CATEGORY_ID",
         "SUBJECT",
         "DESCRIPTION",
         "PRIORITY",
@@ -858,7 +916,7 @@ def test_ticket_draft_collects_each_field_and_requires_explicit_confirmation(
     category = send(client, conversation_id, "Categoría: TARJETAS", headers)
     assert "¿Qué asunto" in category.json()["bot_message"]["content"]
     subject = send(client, conversation_id, "Asunto: Tarjeta no recibida", headers)
-    assert "Elige una prioridad" in subject.json()["bot_message"]["content"]
+    assert "Describe el problema" in subject.json()["bot_message"]["content"]
     description = send(
         client,
         conversation_id,
@@ -878,9 +936,7 @@ def test_ticket_draft_collects_each_field_and_requires_explicit_confirmation(
         assert payload["category_id"] == category_row.id
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
-    conversion_url = (
-        f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket"
-    )
+    conversion_url = f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket"
     unconfirmed = client.post(conversion_url, headers=headers, json=payload)
     assert unconfirmed.status_code == 409
 
@@ -944,14 +1000,13 @@ def test_advisor_request_creates_context_ticket_only_after_confirmation(phase3_c
     assert created.json()["description"].startswith(
         "Resumen de conversación (extracto determinístico):"
     )
-    assert "Detalle comunicado por el cliente: Necesito una revisión ficticia" in (
-        created.json()["description"]
+    assert (
+        "Detalle comunicado por el cliente: Necesito una revisión ficticia"
+        in (created.json()["description"])
     )
     assert created.json()["description"] == payload["description"]
 
-    advisor_headers = {
-        "Authorization": f"Bearer {login(client, 'asesor@demo.com')}"
-    }
+    advisor_headers = {"Authorization": f"Bearer {login(client, 'asesor@demo.com')}"}
     advisor_queue = client.get(
         "/api/v1/tickets/operations",
         params={"queue": "unassigned", "page": 1, "page_size": 20},
