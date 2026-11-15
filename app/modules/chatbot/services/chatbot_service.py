@@ -937,6 +937,13 @@ class ChatbotService:
                     "output_tokens": ai_outcome.trace.get("output_tokens"),
                     "total_tokens": ai_outcome.trace.get("total_tokens"),
                     "fallback": not ai_outcome.accepted,
+                    "fallback_reason": ai_outcome.trace.get("fallback_reason"),
+                    "validation_subrule": ai_outcome.trace.get("validation_subrule"),
+                    "response_source": ai_outcome.trace.get(
+                        "response_source",
+                        "AI" if ai_outcome.accepted else "DETERMINISTIC",
+                    ),
+                    "sources": ai_outcome.trace.get("sources", []),
                 },
                 dedupe_key=f"ai:{conversation.id}:{user_message.id}",
             )
@@ -2056,6 +2063,13 @@ class ChatbotService:
     @classmethod
     def _is_advisor_request(cls, content: str) -> bool:
         normalized = cls.normalize_text(content)
+        if re.search(
+            r"\b(?:horario|horarios|telefono|numero|contacto|canal|direccion)\b",
+            normalized,
+        ) and re.search(
+            r"\b(?:que|cual|como|donde|horario|telefono|contacto)\b", normalized
+        ):
+            return False
         return any(pattern.search(normalized) for pattern in _ADVISOR_REQUEST_PATTERNS)
 
     @classmethod
@@ -2070,7 +2084,8 @@ class ChatbotService:
         has_code_marker = bool(re.search(r"\btck-", normalized))
         code = codes[0] if len(codes) == 1 else None
         has_ticket_subject = bool(
-            re.search(r"\b(?:tickets?|casos?|solicitud(?:es)?|reclamos?)\b", normalized)
+            re.search(r"\b(?:tickets?|casos?|solicitud(?:es)?)\b", normalized)
+            or re.search(r"\b(?:mi|mis|mio|mia|mios|mias)\s+reclamos?\b", normalized)
         )
         page_match = re.search(r"\bpagina\s+(\d+)\b", normalized)
         page = min(int(page_match.group(1)), 10_000) if page_match else 1

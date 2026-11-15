@@ -96,6 +96,12 @@ def faq_id(engine: object) -> str:
         return faq.id
 
 
+def faq_id_for_question(engine: object, question: str) -> str:
+    with Session(engine) as session:
+        faq = session.exec(select(FAQ).where(FAQ.question == question)).one()
+        return faq.id
+
+
 def configure_fake(
     monkeypatch: pytest.MonkeyPatch,
     provider: FakeAIProvider,
@@ -138,10 +144,11 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
+    source_id = faq_id(engine)
     provider = FakeAIProvider(
         AIGenerationResult.generated(
             text="La información oficial indica requisitos para tarjetas.",
-            source_ids=[faq_id(engine)],
+            source_ids=[source_id],
             provider="fake",
             model="fake-test-model",
             input_tokens=81,
@@ -196,17 +203,69 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
         assert audit is not None
 
 
+def test_grounded_mobile_banking_paraphrase_is_returned_with_ai_trace(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase12_client
+    question = "¿Cómo me afilio a Banca Móvil?"
+    source_id = faq_id_for_question(engine, question)
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text="Sigue el procedimiento vigente de afiliación a Banca Móvil.",
+            source_ids=[source_id],
+            provider="fake",
+            model="fake-test-model",
+            input_tokens=90,
+            output_tokens=16,
+            total_tokens=106,
+            intent_classification="FAQ_QUERY",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": question},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["response_source"] == "AI"
+    assert body["fallback_reason"] is None
+    assert body["sources"][0]["title"] == question
+    assert body["sources"][0]["url"].startswith("https://www.bancognb.com.pe/")
+    assert len(provider.calls) == 1
+    assert provider.calls[0].context[0].source_id == source_id
+    with Session(engine) as session:
+        bot_message = session.exec(
+            select(ChatMessage)
+            .where(
+                ChatMessage.conversation_id == conversation["id"],
+                ChatMessage.sender_type == SenderType.BOT,
+            )
+            .order_by(ChatMessage.created_at.desc())
+        ).first()
+        assert bot_message is not None
+        assert bot_message.response_source == "AI"
+        assert bot_message.ai_trace_json["validated"] is True
+        assert bot_message.ai_trace_json["validation_reason"] is None
+        assert bot_message.ai_trace_json["fallback"] is False
+        assert bot_message.ai_trace_json.get("fallback_reason") is None
+
+
 def test_generated_but_rejected_ai_keeps_public_fallback_and_private_trace(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
+    source_id = faq_id(engine)
     provider = FakeAIProvider(
         AIGenerationResult.generated(
             text=(
                 "Las compras por internet pueden configurarse desde canales "
                 "digitales y el Banco aprobará automáticamente cada compra."
             ),
-            source_ids=[faq_id(engine)],
+            source_ids=[source_id],
             provider="fake",
             model="fake-test-model",
         )
@@ -251,6 +310,30 @@ def test_generated_but_rejected_ai_keeps_public_fallback_and_private_trace(
         assert bot_message.ai_trace_json["validation_reason"] == "OUT_OF_CONTEXT"
         assert bot_message.ai_trace_json["fallback"] is True
         assert bot_message.ai_trace_json["fallback_reason"] == "OUT_OF_CONTEXT"
+        assert bot_message.ai_trace_json["validation_subrule"]
+        assert bot_message.ai_trace_json["response_source"] == "DETERMINISTIC"
+        assert len(bot_message.ai_trace_json["sources"]) == 1
+        trace_source = bot_message.ai_trace_json["sources"][0]
+        assert trace_source["source_id"] == source_id
+        assert trace_source["version"] == 1
+        assert trace_source["url"].startswith("https://www.bancognb.com.pe/")
+        assert trace_source["verified_at"]
+        assert bot_message.ai_trace_json["cited_source_ids"] == [source_id]
+
+        audit = session.exec(
+            select(AuditLog).where(
+                AuditLog.action == "AI_GUARDRAIL_REJECTED",
+                AuditLog.resource_id == conversation["id"],
+            )
+        ).one()
+        assert audit.metadata_json is not None
+        assert audit.metadata_json["fallback_reason"] == "OUT_OF_CONTEXT"
+        assert (
+            audit.metadata_json["validation_subrule"]
+            == bot_message.ai_trace_json["validation_subrule"]
+        )
+        assert audit.metadata_json["response_source"] == "DETERMINISTIC"
+        assert audit.metadata_json["sources"] == bot_message.ai_trace_json["sources"]
 
 
 def test_hybrid_retrieval_reaches_existing_conversation_endpoint(

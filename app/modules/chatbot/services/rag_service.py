@@ -350,6 +350,13 @@ class RAGService:
     ) -> AIOutcome:
         settings = get_settings()
         context = self.build_context(matches) if grounding_required else []
+        if grounding_required and len(context) > 1:
+            score_gap = context[0].score - context[1].score
+            strong_winner_floor = settings.chatbot_ai_min_confidence + 0.10
+            if context[0].score >= strong_winner_floor and score_gap + 1e-9 >= 0.10:
+                # A clearly stronger, high-confidence FAQ can ground an answer
+                # without injecting a neighboring result into the prompt.
+                context = context[:1]
         cache_key = self._cache_key(
             conversation_id,
             user_message,
@@ -483,11 +490,31 @@ class RAGService:
                 self._record_failure()
             return self._fallback(trace, result.status)
         self._record_success()
-        intent_classification = result.intent_classification or (
+        cited_source_ids = tuple(dict.fromkeys(result.source_ids))
+        cited_source_id_set = set(cited_source_ids)
+        trace["cited_source_ids"] = list(cited_source_ids)
+        trace["sources"] = [
+            {
+                "source_id": chunk.source_id,
+                "version": chunk.version,
+                "url": chunk.source_url,
+                "verified_at": chunk.source_verified_at,
+            }
+            for chunk in context
+            if chunk.source_id in cited_source_id_set
+        ]
+        provider_intent_classification = result.intent_classification or (
             ChatbotIntent.FAQ_QUERY.value
             if grounding_required
             else ChatbotIntent.CLARIFICATION.value
         )
+        intent_classification = (
+            ChatbotIntent.FAQ_QUERY.value
+            if grounding_required
+            else provider_intent_classification
+        )
+        if grounding_required:
+            trace["provider_intent_classification"] = provider_intent_classification
         try:
             classified_intent = ChatbotIntent(intent_classification)
         except ValueError:
@@ -519,13 +546,16 @@ class RAGService:
         )
         trace["validated"] = decision.allowed
         trace["validation_reason"] = decision.reason
+        trace["validation_subrule"] = decision.subrule
         trace["intent_classification"] = classified_intent.value
         if not decision.allowed:
             return self._fallback(trace, decision.reason or "GUARDRAIL")
         selected_sources = tuple(
-            chunk for chunk in context if chunk.source_id in set(result.source_ids)
+            chunk for chunk in context if chunk.source_id in cited_source_id_set
         )
         trace["fallback"] = False
+        trace["fallback_reason"] = None
+        trace["response_source"] = "AI"
         outcome = AIOutcome(
             True,
             result.text.strip(),
@@ -666,11 +696,9 @@ class RAGService:
                 or match.score < settings.chatbot_ai_min_confidence
             ):
                 continue
-            content = "\n".join(
-                part
-                for part in (faq.title, faq.question, faq.summary, faq.answer)
-                if part
-            )
+            # A question describes what is being asked; it is not evidence that
+            # the proposed answer is true. The title remains provider metadata.
+            content = "\n".join(part for part in (faq.summary, faq.answer) if part)
             if remaining <= 0:
                 break
             content = content[:remaining]
@@ -853,6 +881,9 @@ class RAGService:
     def _fallback(trace: dict[str, object], reason: str) -> AIOutcome:
         trace["fallback"] = True
         trace["fallback_reason"] = reason
+        trace.setdefault("response_source", "DETERMINISTIC")
+        trace.setdefault("sources", [])
+        trace.setdefault("cited_source_ids", [])
         return AIOutcome(False, None, (), trace, reason)
 
 
