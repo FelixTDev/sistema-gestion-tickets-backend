@@ -66,6 +66,7 @@ DEMO_USERS = (
 )
 
 KNOWLEDGE_VERIFIED_AT = datetime(2026, 10, 10, tzinfo=UTC)
+PASSWORD_GUIDE_VERIFIED_AT = datetime(2026, 11, 16, tzinfo=UTC)
 
 DEMO_FAQS = (
     (
@@ -189,12 +190,20 @@ DEMO_FAQS = (
         "BANCA_DIGITAL",
         "¿Qué hago si olvidé mi contraseña de Banca Móvil?",
         (
-            "La sección oficial de Banca Móvil publica una guía de recuperación de "
-            "contraseña. Utiliza esa guía o los canales oficiales; este asistente no "
-            "puede restablecer credenciales ni debe recibirlas."
+            "Para recuperar tu contraseña, ingresa desde tu celular a la app oficial "
+            "Banca Móvil y elige «¿Olvidó su contraseña?». Selecciona el tipo de "
+            "documento DNI, registra el número y pulsa continuar. Valida tu identidad "
+            "con un selfie, sin lentes, gorra ni audífonos, con buena iluminación y "
+            "sin exceso de brillo, mirando de frente a la cámara. "
+            "Ingresa el código recibido en tu correo electrónico, crea una contraseña "
+            "segura que combine mayúsculas, minúsculas, números y símbolos y pulsa "
+            "continuar. Recibirás una notificación de confirmación. La guía indica "
+            "que tienes 3 intentos para generar el código. Nunca compartas aquí tu "
+            "contraseña ni códigos de seguridad."
         ),
-        "olvide,olvidé,contraseña,clave,recuperar,restablecer,banca movil",
-        "https://www.bancognb.com.pe/inicio/canales/canales-digitales/banca-movil-personas",
+        "olvide,olvidé,contraseña,clave,recuperar,restablecer,banca movil,dni,selfie",
+        "https://www.bancognb.com.pe/main/download?file=peru%2Fbanca_personas%2Fguia-cambio-de-contrasenia.pdf",
+        PASSWORD_GUIDE_VERIFIED_AT,
     ),
     (
         "CUENTAS",
@@ -990,7 +999,9 @@ def _seed_faq_catalog(
     categories: dict[str, TicketCategory],
     supervisor: User,
 ) -> int:
-    for category_name, question, answer, keywords, source_url in DEMO_FAQS:
+    for entry in DEMO_FAQS:
+        category_name, question, answer, keywords, source_url = entry[:5]
+        source_verified_at = entry[5] if len(entry) > 5 else KNOWLEDGE_VERIFIED_AT
         faq = session.exec(select(FAQ).where(FAQ.question == question)).first()
         legacy_faq = None
         if question in LEGACY_FAQ_QUESTIONS:
@@ -1019,7 +1030,7 @@ def _seed_faq_catalog(
             "normalized_title": normalize_text(question),
             "normalized_question": normalize_text(question),
             "source_url": source_url,
-            "source_verified_at": KNOWLEDGE_VERIFIED_AT,
+            "source_verified_at": source_verified_at,
             "status": FAQ.Status.PUBLISHED,
             "priority": 0,
             "display_order": 0,

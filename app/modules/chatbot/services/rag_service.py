@@ -347,6 +347,7 @@ class RAGService:
         responses_in_conversation: int,
         requests_by_actor_last_hour: int = 0,
         grounding_required: bool = True,
+        conversational_intent: ChatbotIntent | None = None,
     ) -> AIOutcome:
         settings = get_settings()
         context = self.build_context(matches) if grounding_required else []
@@ -363,6 +364,7 @@ class RAGService:
             user_message,
             context,
             grounding_required=grounding_required,
+            conversational_intent=conversational_intent,
         )
         base_trace: dict[str, object] = {
             "provider": getattr(self.provider, "name", "unknown"),
@@ -442,17 +444,53 @@ class RAGService:
                 "canales ni afirmaciones sobre productos o procesos bancarios."
             )
         )
+        if not grounding_required and conversational_intent is not None:
+            generation_policy += (
+                " El backend ya determinó la intención "
+                f"{conversational_intent.value}; redacta solo una respuesta "
+                "conversacional que corresponda a esa intención. No propongas "
+                "acciones ni alteres opciones estructuradas del backend."
+            )
+            conversational_guidance = {
+                ChatbotIntent.GREETING: (
+                    " Da una bienvenida breve y presenta el alcance del asistente; "
+                    "el menú visible lo construye el backend."
+                ),
+                ChatbotIntent.SHOW_MENU: (
+                    " Confirma brevemente que muestras el menú; no enumeres opciones, "
+                    "porque el backend las entrega como botones."
+                ),
+                ChatbotIntent.FAQ_DISCOVERY: (
+                    " Invita a elegir una pregunta frecuente; no inventes ni enumeres "
+                    "preguntas. El backend entrega las opciones disponibles."
+                ),
+                ChatbotIntent.FAQ_CATEGORY_DISCOVERY: (
+                    " Invita a elegir una categoría; no inventes ni enumeres nombres. "
+                    "El backend entrega las categorías disponibles."
+                ),
+                ChatbotIntent.FAQ_SUBCATEGORY_DISCOVERY: (
+                    " Invita a elegir una pregunta frecuente del tema solicitado; "
+                    "el backend entrega las opciones publicadas."
+                ),
+                ChatbotIntent.CLARIFICATION: (
+                    " Usa el contexto público reciente y pregunta de forma concreta "
+                    "qué parte falta; evita repetir una pregunta genérica."
+                ),
+                ChatbotIntent.OUT_OF_SCOPE: (
+                    " Reconoce la pregunta con empatía, indica que este asistente se "
+                    "especializa en orientación bancaria y seguimiento de solicitudes, "
+                    "y ofrece mostrar las categorías disponibles. No respondas el dato "
+                    "externo ni añadas otros hechos."
+                ),
+            }
+            generation_policy += conversational_guidance.get(conversational_intent, "")
         request = AIProviderRequest(
             user_message=minimize_provider_input(user_message),
             context=tuple(context),
             policy=generation_policy + intent_instruction,
             prompt_version=settings.chatbot_ai_prompt_version,
             max_output_chars=settings.chatbot_ai_max_output_chars,
-            max_output_tokens=(
-                min(settings.chatbot_ai_max_output_tokens, 128)
-                if getattr(self.provider, "name", None) == "openai"
-                else settings.chatbot_ai_max_output_tokens
-            ),
+            max_output_tokens=settings.chatbot_ai_max_output_tokens,
             timeout_seconds=settings.chatbot_ai_timeout_seconds,
             grounding_required=grounding_required,
         )
@@ -518,13 +556,17 @@ class RAGService:
             if chunk.source_id in cited_source_id_set
         ]
         provider_intent_classification = result.intent_classification or (
-            ChatbotIntent.FAQ_QUERY.value
+            conversational_intent.value
+            if not grounding_required and conversational_intent is not None
+            else ChatbotIntent.FAQ_QUERY.value
             if grounding_required
             else ChatbotIntent.CLARIFICATION.value
         )
         intent_classification = (
             ChatbotIntent.FAQ_QUERY.value
             if grounding_required
+            else conversational_intent.value
+            if conversational_intent is not None
             else provider_intent_classification
         )
         if grounding_required:
@@ -538,6 +580,13 @@ class RAGService:
             if grounding_required
             else {
                 ChatbotIntent.CLARIFICATION,
+                ChatbotIntent.FEEDBACK,
+                ChatbotIntent.GREETING,
+                ChatbotIntent.SHOW_MENU,
+                ChatbotIntent.FAQ_DISCOVERY,
+                ChatbotIntent.FAQ_CATEGORY_DISCOVERY,
+                ChatbotIntent.FAQ_SUBCATEGORY_DISCOVERY,
+                ChatbotIntent.NAVIGATION,
                 ChatbotIntent.OUT_OF_SCOPE,
                 ChatbotIntent.UNKNOWN,
             }
@@ -556,6 +605,7 @@ class RAGService:
                 result.text,
                 result.source_ids,
                 settings.chatbot_ai_max_output_chars,
+                intent_classification=classified_intent.value,
             )
         )
         trace["validated"] = decision.allowed
@@ -848,10 +898,15 @@ class RAGService:
         context: list[KnowledgeContext],
         *,
         grounding_required: bool,
+        conversational_intent: ChatbotIntent | None = None,
     ) -> str:
         sources = ",".join(f"{chunk.source_id}:{chunk.version}" for chunk in context)
         mode = "grounded" if grounding_required else "conversational"
-        return f"{conversation_id}:{mode}:{normalize_text(user_message)}:{sources}"
+        intent = conversational_intent.value if conversational_intent else "unknown"
+        return (
+            f"{conversation_id}:{mode}:{intent}:"
+            f"{normalize_text(user_message)}:{sources}"
+        )
 
     def _get_cached(self, key: str) -> AIOutcome | None:
         now = datetime.now(UTC)

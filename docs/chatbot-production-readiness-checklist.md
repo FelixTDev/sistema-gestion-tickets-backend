@@ -2,7 +2,9 @@
 
 Este checklist no autoriza una activación en producción. La IA está deshabilitada
 por defecto y la evaluación de esta demo usa solo datos sintéticos, SQLite
-temporal, `gpt-5.4-mini`, embeddings apagados y hasta 128 tokens de salida.
+temporal, `gpt-5.4-mini` y embeddings apagados. El backend permite una salida
+configurable de hasta 4096 tokens; la evaluación controlada de esta línea sigue
+reservando hasta 128 tokens por llamada y sus presupuestos globales.
 
 > **No usar con datos reales de clientes.** La corrida permitida en esta línea
 > usa un incentivo sujeto a compartir entradas y salidas con OpenAI. Las
@@ -23,7 +25,7 @@ imágenes, historial de comandos ni logs:
 | `OPENAI_API_KEY` | Secreto de proyecto | Clave del proyecto OpenAI con acceso a Responses API. |
 | `CHATBOT_AI_EMBEDDINGS_ENABLED` | `false` al inicio | Coincide con la configuración probada; habilitar embeddings requiere una validación y presupuesto aparte. |
 | `CHATBOT_AI_DAILY_BUDGET_USD` | `0.50` | Tope interno del backend; configurar además límites y alertas en OpenAI. |
-| `CHATBOT_AI_MAX_OUTPUT_TOKENS` | `128` | Límite aplicado por esta línea de evaluación; no aumentarlo para la demo. |
+| `CHATBOT_AI_MAX_OUTPUT_TOKENS` | `384` | Salida del backend para respuestas conversacionales completas; los límites globales de llamadas, tokens, costo y tiempo siguen activos. |
 | `CHATBOT_AI_TIMEOUT_SECONDS` | `15` | El backend debe responder con fallback ante timeout. |
 | `CHATBOT_AI_REQUESTS_PER_MINUTE` | `5` | Límite global del backend. |
 | `CHATBOT_AI_MAX_RESPONSES_PER_CONVERSATION` | `3` | Evita llamadas ilimitadas dentro de una conversación. |

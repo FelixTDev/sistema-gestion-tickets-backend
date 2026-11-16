@@ -202,7 +202,7 @@ def test_faq_discovery_lists_published_questions_and_selected_question_is_answer
 
     assert discovery.status_code == 200
     body = discovery.json()
-    options = body["clarification_options"]
+    options = [option["label"] for option in body["ui"]["options"]]
     assert body["bot_message"]["intent"] == "FAQ_DISCOVERY"
     assert body["resolved"] is False
     assert body["requires_clarification"] is True
@@ -210,6 +210,7 @@ def test_faq_discovery_lists_published_questions_and_selected_question_is_answer
     assert body["fallback_reason"] is None
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
     assert body["response_source"] == "DETERMINISTIC"
+    assert body["clarification_options"] == []
     assert 1 <= len(options) <= 5
 
     with Session(engine) as session:
@@ -252,7 +253,7 @@ def test_faq_discovery_accepts_ordinal_follow_up(chatbot_client):
     endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
 
     discovery = client.post(endpoint, json={"content": "¿Qué preguntas me puedes dar?"})
-    first_option = discovery.json()["clarification_options"][0]
+    first_option = discovery.json()["ui"]["options"][0]["label"]
     answer = client.post(endpoint, json={"content": "la primera"})
 
     assert answer.status_code == 200
@@ -275,9 +276,7 @@ def test_faq_discovery_exposes_stable_server_resolvable_option_ids(chatbot_clien
     body = discovery.json()
     assert body["ui"]["type"] == "FAQ_CHOICES"
     assert body["ui"]["menu_id"] == "faq_discovery"
-    assert [option["label"] for option in body["ui"]["options"]] == body[
-        "clarification_options"
-    ]
+    assert body["clarification_options"] == []
     assert all(option["action"] == "SELECT_FAQ" for option in body["ui"]["options"])
     option = body["ui"]["options"][0]
     assert option["id"].startswith("faq:")
@@ -655,7 +654,8 @@ def test_returns_unresolved_response_for_unknown_query(chatbot_client):
     assert response.json()["fallback_reason"] is None
     assert response.json()["conversation_status"] == "WAITING_CLARIFICATION"
     assert response.json()["response_source"] == "DETERMINISTIC"
-    assert response.json()["clarification_options"]
+    assert response.json()["ui"]["options"]
+    assert response.json()["clarification_options"] == []
     assert response.json()["available_actions"] == [
         "BROWSE_KNOWLEDGE",
         "CREATE_TICKET",
@@ -680,7 +680,8 @@ def test_repeated_unknown_query_returns_verified_options_and_next_actions(
     body = response.json()
     assert body["resolved"] is False
     assert body["fallback_reason"] == "LOW_CONFIDENCE"
-    assert body["clarification_options"]
+    assert body["ui"]["options"]
+    assert body["clarification_options"] == []
     assert body["available_actions"] == [
         "BROWSE_KNOWLEDGE",
         "CREATE_TICKET",

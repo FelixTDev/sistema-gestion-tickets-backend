@@ -75,3 +75,34 @@ def test_safe_knowledge_seed_is_source_traced_and_does_not_rewrite_tickets(
             ticket.id: (ticket.status, ticket.version, ticket.subject)
             for ticket in session.exec(select(Ticket)).all()
         } == tickets_before
+
+
+def test_password_recovery_faq_matches_the_official_guide() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        seed_demo_data(session, include_operational_data=False)
+        faq = session.exec(
+            select(FAQ).where(
+                FAQ.question == "¿Qué hago si olvidé mi contraseña de Banca Móvil?"
+            )
+        ).one()
+
+        assert faq.source_url == (
+            "https://www.bancognb.com.pe/main/download?file="
+            "peru%2Fbanca_personas%2Fguia-cambio-de-contrasenia.pdf"
+        )
+        assert faq.source_verified_at is not None
+        for detail in (
+            "¿Olvidó su contraseña?",
+            "DNI",
+            "selfie",
+            "código recibido en tu correo electrónico",
+            "notificación de confirmación",
+            "3 intentos",
+        ):
+            assert detail.casefold() in faq.answer.casefold()

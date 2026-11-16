@@ -3,32 +3,32 @@
     "id": "greeting",
     "message": "Hola",
     "expected_control_route": "GREETING",
-    "expected_ai_intent": null,
-    "ai_call_allowed": false,
-    "expected_ui_type": null
+    "expected_ai_intent": "GREETING",
+    "ai_call_allowed": true,
+    "expected_ui_type": "MAIN_MENU"
   },
   {
     "id": "main_menu",
     "message": "Muestrame el menu",
     "expected_control_route": "SHOW_MENU",
-    "expected_ai_intent": null,
-    "ai_call_allowed": false,
+    "expected_ai_intent": "SHOW_MENU",
+    "ai_call_allowed": true,
     "expected_ui_type": "MAIN_MENU"
   },
   {
     "id": "faq_discovery",
     "message": "Que preguntas frecuentes hay?",
     "expected_control_route": "FAQ_DISCOVERY",
-    "expected_ai_intent": null,
-    "ai_call_allowed": false,
+    "expected_ai_intent": "FAQ_DISCOVERY",
+    "ai_call_allowed": true,
     "expected_ui_type": "FAQ_CHOICES"
   },
   {
     "id": "faq_categories",
     "message": "Quiero ver las preguntas por categoria",
     "expected_control_route": "FAQ_CATEGORY_DISCOVERY",
-    "expected_ai_intent": null,
-    "ai_call_allowed": false,
+    "expected_ai_intent": "FAQ_CATEGORY_DISCOVERY",
+    "ai_call_allowed": true,
     "expected_ui_type": "FAQ_CATEGORY_CHOICES"
   },
   {
@@ -101,17 +101,17 @@
     "id": "out_of_scope_weather",
     "message": "Que clima habra manana?",
     "expected_control_route": "OUT_OF_SCOPE",
-    "expected_ai_intent": null,
-    "ai_call_allowed": false,
-    "expected_ui_type": null
+    "expected_ai_intent": "OUT_OF_SCOPE",
+    "ai_call_allowed": true,
+    "expected_ui_type": "FAQ_CATEGORY_CHOICES"
   },
   {
     "id": "arithmetic",
     "message": "Cuanto es 2 + 2?",
     "expected_control_route": "OUT_OF_SCOPE",
-    "expected_ai_intent": null,
-    "ai_call_allowed": false,
-    "expected_ui_type": null
+    "expected_ai_intent": "OUT_OF_SCOPE",
+    "ai_call_allowed": true,
+    "expected_ui_type": "FAQ_CATEGORY_CHOICES"
   },
   {
     "id": "sensitive_balance",

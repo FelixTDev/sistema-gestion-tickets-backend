@@ -140,6 +140,17 @@ _SAFE_FINANCIAL_WARNING_PATTERN = re.compile(
     r"sensible)\b",
     re.IGNORECASE,
 )
+_OUT_OF_SCOPE_REDIRECT_PATTERN = re.compile(
+    r"(?:(?:entiendo|comprendo|veo)\b[^.!?]{0,80}[.!?]\s*)?"
+    r"(?:soy\s+(?:un\s+)?asistente\s+especializad\w*\s+en|"
+    r"este\s+asistente\s+(?:se\s+especializ\w*|"
+    r"est[aá]\s+especializad\w*)\s+en)\s+"
+    r"orientacion\s+bancaria\s+y\s+seguimiento\s+de\s+solicitudes"
+    r"(?:[.!?]\s+(?:puedo|te\s+puedo)\s+"
+    r"(?:mostrarte|ofrecerte|indicarte)\s+(?:las\s+)?"
+    r"categorias\s+(?:y\s+opciones\s+)?disponibles[.!?])?",
+    re.IGNORECASE,
+)
 _CAPABILITY_ACTION_PATTERN = re.compile(
     r"\b(?:pued\w*|podr\w*)\s+(?:se\s+)?"
     r"(?P<action>afili\w*|solicit\w*|contact\w*|llam\w*|comunic\w*)\b",
@@ -562,6 +573,7 @@ def validate_conversational_output(
     text: str | None,
     source_ids: tuple[str, ...],
     max_output_chars: int,
+    intent_classification: str | None = None,
 ) -> GuardrailDecision:
     if not text or len(text.strip()) > min(max_output_chars, 500):
         return GuardrailDecision(False, "OUTPUT_SIZE")
@@ -577,6 +589,11 @@ def validate_conversational_output(
         for pattern in _SECRET_OUTPUT_PATTERNS
     ):
         return GuardrailDecision(False, "UNSAFE_OUTPUT")
+    if (
+        intent_classification == "OUT_OF_SCOPE"
+        and not _OUT_OF_SCOPE_REDIRECT_PATTERN.fullmatch(normalized.strip())
+    ):
+        return GuardrailDecision(False, "OUT_OF_SCOPE_REDIRECT_REQUIRED")
     return GuardrailDecision(True)
 
 

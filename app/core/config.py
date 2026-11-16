@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     chatbot_ai_prompt_version: str = "v1"
     chatbot_ai_timeout_seconds: float = 15.0
     chatbot_ai_max_output_chars: int = 1200
-    chatbot_ai_max_output_tokens: int = 128
+    chatbot_ai_max_output_tokens: int = 384
     chatbot_ai_total_max_calls: int = 150
     chatbot_ai_total_max_tokens: int = 500_000
     chatbot_ai_total_estimated_cost_usd: float = 0.50
@@ -292,7 +292,6 @@ class Settings(BaseSettings):
             raise ValueError("La salida máxima IA debe estar entre 1 y 10000")
         if not 1 <= self.chatbot_ai_max_output_tokens <= 4096:
             raise ValueError("Los tokens máximos de salida IA no son válidos")
-        self.chatbot_ai_max_output_tokens = min(self.chatbot_ai_max_output_tokens, 128)
         if not 1 <= self.chatbot_ai_max_documents <= 10:
             raise ValueError("La cantidad de documentos IA debe estar entre 1 y 10")
         if not 100 <= self.chatbot_ai_max_context_chars <= 50_000:

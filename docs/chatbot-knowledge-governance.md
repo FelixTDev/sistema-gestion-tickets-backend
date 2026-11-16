@@ -79,6 +79,9 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
 - `BotMessageResponse.suggested_action` y `conversation_status` son campos
   tipados. `requires_clarification`, `clarification_options`, `sources` y los
   estados existentes siguen disponibles para clientes anteriores.
+- Las opciones interactivas estructuradas se sirven por `ui.options`; cuando
+  existen, `clarification_options` queda vacío para evitar duplicados. El LLM
+  redacta la respuesta conversacional, mientras los IDs proceden del backend.
 - La conversión se confirma con el endpoint existente
   `POST /api/v1/chat/conversations/{conversation_id}/convert-to-ticket`: requiere
   autenticación de cliente, pertenencia de la conversación y el cuerpo completo

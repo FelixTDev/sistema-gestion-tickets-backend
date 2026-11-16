@@ -51,10 +51,11 @@ mensajes ni ejecutar acciones.
 
 | Caso | `bot_message.intent` | `suggested_action` | Resultado esperado |
 |---|---|---|---|
-| Saludo | `null` | `NONE` | Mostrar la respuesta y mantener la conversación activa. |
-| Descubrir preguntas por texto | `FAQ_DISCOVERY` | `ASK_CLARIFICATION` | Renderizar `ui.type=FAQ_CHOICES` y `clarification_options`; no abrir el menú global. |
-| Navegar FAQ desde el menú | `FAQ_CATEGORY_DISCOVERY` | `ASK_CLARIFICATION` | Renderizar `ui.type=FAQ_CATEGORY_CHOICES`; cada categoría proviene de FAQs publicadas con fuente verificada. |
+| Saludo | `GREETING` | `SHOW_MENU` | Mostrar la respuesta del asistente y el menú estructurado del backend; mantener la conversación activa. |
+| Descubrir preguntas por texto | `FAQ_DISCOVERY` | `ASK_CLARIFICATION` | Renderizar `ui.type=FAQ_CHOICES`; las preguntas proceden de FAQs publicadas y el LLM no crea opciones. |
+| Pedir categorías por texto | `FAQ_CATEGORY_DISCOVERY` | `ASK_CLARIFICATION` | Renderizar `ui.type=FAQ_CATEGORY_CHOICES`; cada categoría proviene de FAQs publicadas con fuente verificada. |
 | Volver o mostrar el menú | `CONVERSATION_MENU` | `SHOW_MENU` | Conservar mensajes y usar `menu_open=true` y `ui.type=MAIN_MENU`. |
+| Consulta fuera de alcance | `OUT_OF_SCOPE` | `ASK_CLARIFICATION` | Responder con empatía, explicar la especialidad bancaria y ofrecer categorías del backend. |
 | Finalizar | `CONVERSATION_ENDED` | `END_CONVERSATION` | Exigir `conversation_status=CLOSED` y deshabilitar nuevos envíos. |
 | Borrador pausado | `CONVERSATION_MENU` | `SHOW_MENU` | Conservar campos y mostrar una opción para retomarlo cuando `ticket_draft.paused=true`. |
 | FAQ resuelta | intent de la FAQ o `null` | `NONE` | Mostrar la respuesta y sus fuentes reales. |
@@ -73,6 +74,9 @@ mensajes ni ejecutar acciones.
 - `ChatbotSuggestedAction.SHOW_MENU`: muestra opciones sin borrar historial ni
   cerrar la conversación.
 - `ChatbotSuggestedAction.END_CONVERSATION`: acompaña una finalización explícita.
+- Cuando `ui.options` contiene opciones estructuradas, `clarification_options` se
+  devuelve vacío para evitar mostrar las mismas opciones dos veces. Los clientes
+  deben usar los `id` de `ui.options` al enviar una selección.
 - `BotMessageResponse.quick_replies`: acciones de texto sugeridas para el turno;
   el cliente puede enviarlas como contenido normal y el backend las vuelve a
   clasificar.

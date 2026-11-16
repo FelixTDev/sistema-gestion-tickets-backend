@@ -148,7 +148,7 @@ _ARITHMETIC_EXPRESSION_PATTERN = re.compile(
 )
 _OBVIOUS_OUT_OF_SCOPE_PATTERN = re.compile(
     r"\b(?:clima|chiste|cultura\s+general|programar|programaci[oó]n|receta|"
-    r"pel[ií]cula|canci[oó]n)\b|"
+    r"pel[ií]cula|canci[oó]n|presidente|presidenta|primer\s+ministro)\b|"
     r"\bcapital\s+de\s+(?:francia|per[uú]|espa[nñ]a|argentina|chile|colombia|"
     r"ecuador|bolivia|uruguay)\b",
     re.IGNORECASE,
@@ -183,7 +183,9 @@ _UNHELPFUL_FOLLOW_UP_PATTERN = re.compile(
     r"\b(?:no\s+me\s+(?:ayudo|sirvio|resolvio|respondio)|"
     r"no\s+fue\s+(?:util|suficiente)|no\s+me\s+ayuda|"
     r"no\s+(?:me\s+)?resuelves?\s*mi\s+duda|"
-    r"no\s+resolviste\s+mi\s+duda|sigo\s+sin\s+respuesta|"
+    r"no\s+resolviste\s+mi\s+duda|"
+    r"no\s+entiendes?\s+(?:mi\s+)?(?:duda|consulta|pregunta)|"
+    r"sigo\s+(?:confundid[oa]|sin\s+entender|sin\s+respuesta)|"
     r"eso\s+no\s+era\s+lo\s+que\s+(?:estaba\s+)?preguntando|"
     r"no\s+era\s+eso\s+lo\s+que\s+preguntaba)\b"
 )
@@ -215,6 +217,39 @@ _FAQ_DISCOVERY_PHRASES = (
     "que consultas puedes atender",
     "que puedes hacer",
     "como me puedes ayudar",
+)
+_FAQ_CATEGORY_DISCOVERY_PHRASES = (
+    "preguntas por categoria",
+    "ver las preguntas por categoria",
+    "que opciones hay",
+    "que opciones tengo",
+    "dame opciones",
+    "dame las opciones",
+    "que puedo consultar",
+    "que puedo preguntar",
+    "que categorias hay",
+    "que categorias puedo consultar",
+)
+_NEW_CONSULTATION_PHRASES = (
+    "otra consulta",
+    "otra pregunta",
+    "cambiar de tema",
+    "consulta diferente",
+    "empezar otra consulta",
+)
+_CATEGORY_HELP_TERMS = (
+    "ayuda",
+    "preguntas",
+    "frecuentes",
+    "faq",
+    "opciones",
+    "tema",
+    "temas",
+)
+_BANKING_TOPIC_PATTERN = re.compile(
+    r"\b(?:banco|banca|tarjetas?|cuentas?|cr[eé]ditos?|pr[eé]stamos?|"
+    r"claves?|contrase[nñ]as?|reclamos?|solicitudes?)\b",
+    re.IGNORECASE,
 )
 _FAQ_DISCOVERY_MAX_OPTIONS = 5
 _FAQ_DISCOVERY_CATEGORY_ORDER = (
@@ -451,19 +486,47 @@ class ChatbotService:
             if option_id is not None and option_id.startswith("category:")
             else None
         )
+        requested_faq_category_id = (
+            None
+            if selected_faq_category_id is not None
+            or selected_faq_subcategory is not None
+            else self._requested_faq_category_id(session, clean_content)
+        )
+        is_faq_category_discovery = (
+            requested_faq_category_id is None
+            and self._is_faq_category_discovery_request(clean_content)
+        )
+        is_new_consultation = self._is_new_consultation_request(clean_content)
         is_faq_discovery = (
             not is_faq_category_request
             and selected_faq_category_id is None
             and selected_faq_subcategory is None
+            and requested_faq_category_id is None
+            and not is_faq_category_discovery
+            and not is_new_consultation
             and navigation_target is None
             and self._is_faq_discovery_request(clean_content)
         )
         is_banking_operation = self._is_banking_operation_request(clean_content)
+        contains_arithmetic = self._contains_arithmetic_expression(clean_content)
+        has_banking_topic = bool(_BANKING_TOPIC_PATTERN.search(clean_content))
+        is_mixed_banking_arithmetic = contains_arithmetic and has_banking_topic
+        is_out_of_scope_request = not is_banking_operation and (
+            self._is_obviously_out_of_scope(clean_content)
+            or (contains_arithmetic and not has_banking_topic)
+        )
         lifecycle_action = (
             ChatbotSuggestedAction.SHOW_MENU
             if navigation_target == "main"
             else None
-            if navigation_target is not None or is_faq_discovery
+            if (
+                navigation_target is not None
+                or is_faq_discovery
+                or is_faq_category_discovery
+                or is_new_consultation
+                or requested_faq_category_id is not None
+                or is_out_of_scope_request
+            )
             else self._conversation_lifecycle_action(clean_content)
         )
         if lifecycle_action is None:
@@ -564,6 +627,10 @@ class ChatbotService:
             and (
                 is_greeting
                 or is_faq_discovery
+                or is_faq_category_discovery
+                or is_new_consultation
+                or requested_faq_category_id is not None
+                or is_out_of_scope_request
                 or is_faq_category_request
                 or selected_faq_category_id is not None
                 or is_unhelpful_follow_up
@@ -592,6 +659,17 @@ class ChatbotService:
         )
         search_content = clean_content
         ai_user_message = clean_content
+        if (
+            is_unhelpful_follow_up
+            and previous_user_message is not None
+            and previous_bot_message is not None
+            and self._is_public_context_message(previous_bot_message)
+        ):
+            ai_user_message = self._contextual_provider_input(
+                previous_user_message.content,
+                previous_bot_message.content,
+                clean_content,
+            )
         selected_match: FAQMatch | None = None
         matches: list[FAQMatch] = []
         retrieval_unavailable = False
@@ -712,8 +790,22 @@ class ChatbotService:
                     ticket_draft_reply,
                     advisor_handoff=advisor_handoff_requested,
                 )
+            elif is_out_of_scope_request:
+                result = self._out_of_scope_response(session)
+            elif is_new_consultation or is_faq_category_discovery:
+                result = self._faq_category_discovery_response(session)
+            elif requested_faq_category_id is not None:
+                result, matches = self._faq_subcategory_discovery_response(
+                    session, category_id=requested_faq_category_id
+                )
             elif is_unhelpful_follow_up:
-                result = self._unhelpful_follow_up_response(conversation)
+                result = self._unhelpful_follow_up_response(
+                    conversation,
+                    exhausted=(
+                        int(saved_context.get("clarification_attempts", 0))
+                        >= get_settings().chatbot_max_clarification_attempts
+                    ),
+                )
                 result["context_seed"] = (
                     previous_user_message.content
                     if previous_user_message is not None
@@ -813,13 +905,14 @@ class ChatbotService:
                 ChatbotAvailableAction.OFFICIAL_CHANNELS,
             ]
         elif result.get("intent") == "FOLLOW_UP_UNRESOLVED":
-            try:
-                discovery, _ = self._faq_discovery_response(session)
-                result["options"] = discovery["options"]
-                result["candidate_faq_ids"] = discovery["candidate_faq_ids"]
-                result["sources"] = discovery["sources"]
-            except Exception:
-                result["options"] = []
+            if result.get("requires_clarification"):
+                try:
+                    discovery, _ = self._faq_discovery_response(session)
+                    result["options"] = discovery["options"]
+                    result["candidate_faq_ids"] = discovery["candidate_faq_ids"]
+                    result["sources"] = discovery["sources"]
+                except Exception:
+                    result["options"] = []
             result["available_actions"] = [
                 ChatbotAvailableAction.BROWSE_KNOWLEDGE,
                 ChatbotAvailableAction.CREATE_TICKET,
@@ -849,11 +942,19 @@ class ChatbotService:
         result["sources"] = result.get("sources", self._public_sources(matches[:1]))
         conversational_ai = bool(
             is_unhelpful_follow_up
+            or is_greeting
+            or is_faq_discovery
+            or is_faq_category_discovery
+            or is_new_consultation
+            or requested_faq_category_id is not None
+            or is_out_of_scope_request
+            or (
+                lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
+                and option_id is None
+            )
             or (
                 result.get("requires_clarification")
                 and not matches
-                and not is_greeting
-                and not is_faq_discovery
                 and navigation_target is None
                 and lifecycle_action is None
             )
@@ -865,20 +966,11 @@ class ChatbotService:
             (is_advisor_request and is_ticket_request, "TICKET_ADVISOR_FLOW"),
             (is_advisor_request, "ADVISOR_FLOW"),
             (is_ticket_request, "TICKET_DRAFT_FLOW"),
-            (is_greeting, "GREETING"),
-            (is_faq_discovery, "FAQ_DISCOVERY"),
+            (is_mixed_banking_arithmetic, "MIXED_BANKING_AND_ARITHMETIC"),
             (is_faq_category_request, "FAQ_CATEGORY_DISCOVERY"),
             (selected_faq_category_id is not None, "FAQ_CATEGORY_SELECTION"),
             (selected_faq_subcategory is not None, "FAQ_SUBCATEGORY_SELECTION"),
             (navigation_target is not None, "FAQ_NAVIGATION"),
-            (
-                self._contains_arithmetic_expression(clean_content),
-                "ARITHMETIC_OUT_OF_SCOPE",
-            ),
-            (
-                self._is_obviously_out_of_scope(clean_content),
-                "OUT_OF_SCOPE",
-            ),
             (
                 not paused_draft
                 and current_draft.status
@@ -890,7 +982,10 @@ class ChatbotService:
                 "ACTIVE_TICKET_DRAFT",
             ),
             (ticket_draft_reply is not None, "TICKET_DRAFT_REPLY"),
-            (lifecycle_action is not None, "CONVERSATION_LIFECYCLE"),
+            (
+                lifecycle_action == ChatbotSuggestedAction.END_CONVERSATION,
+                "CONVERSATION_LIFECYCLE",
+            ),
         )
         ai_skip_reason = next(
             (reason for should_skip, reason in skip_ai_reasons if should_skip),
@@ -944,6 +1039,16 @@ class ChatbotService:
                 requests_by_actor_last_hour=provider_calls_by_actor_last_hour,
                 responses_in_conversation=responses_in_conversation,
                 grounding_required=not conversational_ai,
+                conversational_intent=(
+                    self._conversational_intent_for_result(
+                        result,
+                        lifecycle_action=lifecycle_action,
+                        is_greeting=is_greeting,
+                        is_out_of_scope_request=is_out_of_scope_request,
+                    )
+                    if conversational_ai
+                    else None
+                ),
             )
             ai_outcome.trace.update(retrieval_trace)
             result["ai_trace"] = ai_outcome.trace
@@ -952,6 +1057,8 @@ class ChatbotService:
                 result["response_source"] = "AI"
                 result["intent_classification"] = ai_outcome.intent_classification
                 result["sources"] = self._public_sources(ai_outcome.sources)
+                if conversational_ai:
+                    result["fallback_reason"] = None
                 if not conversational_ai:
                     selected_source_ids = {
                         source.source_id for source in ai_outcome.sources
@@ -996,6 +1103,7 @@ class ChatbotService:
                         "OUT_OF_CONTEXT",
                         "OUTPUT_SIZE",
                         "UNGROUNDED_CLAIM",
+                        "OUT_OF_SCOPE_REDIRECT_REQUIRED",
                     }
                     else "AI_FALLBACK"
                 )
@@ -1072,6 +1180,9 @@ class ChatbotService:
                 else "Cuéntame un poco más sobre lo que necesitas."
             )
         context = dict(conversation.context_json or {})
+        if is_new_consultation:
+            for key in _TRANSIENT_CONVERSATION_CONTEXT_KEYS:
+                context.pop(key, None)
         if ticket_draft_reply is not None:
             if ticket_draft_reply.draft.status in {
                 ChatbotTicketDraftStatus.COLLECTING,
@@ -1144,7 +1255,9 @@ class ChatbotService:
                 context.pop(key, None)
             context.pop("clarification_context", None)
         else:
-            if result["requires_clarification"] and result.get(
+            if result.get("clear_clarification_attempts"):
+                context.pop("clarification_attempts", None)
+            elif result["requires_clarification"] and result.get(
                 "counts_as_clarification", True
             ):
                 context["clarification_attempts"] = (
@@ -1248,7 +1361,7 @@ class ChatbotService:
             conversation.category_id = None
             conversation.pending_question = None
         else:
-            context["menu_open"] = False
+            context["menu_open"] = is_greeting
             if resume_paused_draft or start_ticket_draft:
                 context.pop("ticket_draft_paused", None)
         conversation.context_json = context
@@ -1338,6 +1451,7 @@ class ChatbotService:
         session.commit()
         session.refresh(conversation)
         draft = self._read_ticket_draft(session, conversation.context_json or {})
+        ui = self._ui_for_result(session, result, conversation.context_json or {})
         return BotMessageResponse(
             user_message=self._message_read(user_message),
             bot_message=self._message_read(bot_message),
@@ -1347,9 +1461,9 @@ class ChatbotService:
             faq_id=result["faq_id"],
             source_category=result["category_name"],
             requires_clarification=result["requires_clarification"],
-            clarification_options=result["options"],
+            clarification_options=result["options"] if ui is None else [],
             intent_classification=result.get("intent_classification"),
-            ui=self._ui_for_result(session, result, conversation.context_json or {}),
+            ui=ui,
             suggested_action=result.get(
                 "suggested_action", self._suggested_action(result)
             ),
@@ -2193,6 +2307,44 @@ class ChatbotService:
             return True
         return any(phrase in normalized for phrase in _FAQ_DISCOVERY_PHRASES)
 
+    @staticmethod
+    def _is_faq_category_discovery_request(content: str) -> bool:
+        normalized = normalize_text(content).strip(" .!?¿¡")
+        return any(phrase in normalized for phrase in _FAQ_CATEGORY_DISCOVERY_PHRASES)
+
+    @staticmethod
+    def _is_new_consultation_request(content: str) -> bool:
+        normalized = normalize_text(content).strip(" .!?¿¡")
+        return any(phrase in normalized for phrase in _NEW_CONSULTATION_PHRASES)
+
+    def _requested_faq_category_id(self, session: Session, content: str) -> str | None:
+        normalized = normalize_text(content)
+        if re.search(r"\b(?:categoria|category)\s*[:=]", normalized):
+            return None
+        if not any(
+            re.search(rf"\b{re.escape(term)}\b", normalized)
+            for term in _CATEGORY_HELP_TERMS
+        ):
+            return None
+
+        category_matches: list[tuple[int, str]] = []
+        for category_id, label in self._available_faq_categories(session):
+            words = normalize_text(label.replace("_", " ")).split()
+            if not words:
+                continue
+            patterns = []
+            for word in words:
+                singular = word[:-1] if len(word) > 4 and word.endswith("s") else word
+                patterns.append(
+                    rf"\b(?:{re.escape(singular)}|{re.escape(singular + 's')})\b"
+                )
+            if all(re.search(pattern, normalized) for pattern in patterns):
+                category_matches.append((len(words), category_id))
+        if not category_matches:
+            return None
+        category_matches.sort(reverse=True)
+        return category_matches[0][1]
+
     def _resolve_pending_selection(
         self, session: Session, conversation: Conversation, content: str
     ) -> FAQMatch | None:
@@ -2385,6 +2537,101 @@ class ChatbotService:
                 ChatbotAvailableAction.CREATE_TICKET,
             ],
         }
+
+    def _out_of_scope_response(self, session: Session) -> dict[str, object]:
+        category_response = self._faq_category_discovery_response(session)
+        return {
+            "answer": (
+                "Entiendo tu pregunta. Este asistente se especializa en orientación "
+                "bancaria y seguimiento de solicitudes. Puedo mostrarte las "
+                "categorías disponibles."
+            ),
+            "intent": ChatbotIntent.OUT_OF_SCOPE.value,
+            "intent_classification": ChatbotIntent.OUT_OF_SCOPE,
+            "faq_id": None,
+            "category_name": None,
+            "confidence": 1.0,
+            "resolved": False,
+            "offers_ticket": False,
+            "requires_clarification": bool(category_response["options"]),
+            "options": category_response["options"],
+            "candidate_faq_ids": [],
+            "candidate_faq_category_ids": category_response[
+                "candidate_faq_category_ids"
+            ],
+            "fallback_reason": "OUT_OF_SCOPE",
+            "escalated": False,
+            "match": None,
+            "response_source": "DETERMINISTIC",
+            "sources": [],
+            "ai_trace": {
+                "fallback": True,
+                "fallback_reason": "OUT_OF_SCOPE",
+                "validation_subrule": "OUT_OF_SCOPE_REDIRECT_REQUIRED",
+                "response_source": "DETERMINISTIC",
+            },
+            "suggested_action": ChatbotSuggestedAction.ASK_CLARIFICATION,
+            "available_actions": [
+                ChatbotAvailableAction.BROWSE_KNOWLEDGE,
+                ChatbotAvailableAction.CREATE_TICKET,
+                ChatbotAvailableAction.CONTACT_ADVISOR,
+            ],
+            "counts_as_clarification": False,
+        }
+
+    @staticmethod
+    def _conversational_intent_for_result(
+        result: dict[str, object],
+        *,
+        lifecycle_action: ChatbotSuggestedAction | None,
+        is_greeting: bool,
+        is_out_of_scope_request: bool,
+    ) -> ChatbotIntent:
+        if is_out_of_scope_request:
+            return ChatbotIntent.OUT_OF_SCOPE
+        if is_greeting:
+            return ChatbotIntent.GREETING
+        if lifecycle_action == ChatbotSuggestedAction.SHOW_MENU:
+            return ChatbotIntent.SHOW_MENU
+        intent = result.get("intent")
+        if intent == "FOLLOW_UP_UNRESOLVED":
+            return ChatbotIntent.CLARIFICATION
+        try:
+            classification = ChatbotIntent(str(intent))
+        except ValueError:
+            return ChatbotIntent.CLARIFICATION
+        if classification in {
+            ChatbotIntent.CLARIFICATION,
+            ChatbotIntent.FEEDBACK,
+            ChatbotIntent.FAQ_DISCOVERY,
+            ChatbotIntent.FAQ_CATEGORY_DISCOVERY,
+            ChatbotIntent.FAQ_SUBCATEGORY_DISCOVERY,
+            ChatbotIntent.NAVIGATION,
+            ChatbotIntent.OUT_OF_SCOPE,
+            ChatbotIntent.UNKNOWN,
+        }:
+            return classification
+        return ChatbotIntent.CLARIFICATION
+
+    @staticmethod
+    def _is_public_context_message(message: ChatMessage) -> bool:
+        private_or_ticket_intents = {
+            "AUTHENTICATION_REQUIRED",
+            "TICKET_QUERY",
+            "TICKET_LIST",
+            "TICKET_COUNT",
+            "TICKET_STATUS",
+            "TICKET_DETAIL",
+            "ADVISOR_RESPONSE_STATUS",
+            "LATEST_ADVISOR_RESPONSE",
+            "CLIENT_ACTION_REQUIRED",
+            "TICKET_DRAFT_UPDATE",
+            "TICKET_CREATION_AUTHENTICATION_REQUIRED",
+            "ADVISOR_REQUEST_AUTHENTICATION_REQUIRED",
+        }
+        return not ChatbotService._is_ticket_query_intent(message.intent) and (
+            message.intent not in private_or_ticket_intents
+        )
 
     @classmethod
     def _is_feedback_request(cls, content: str) -> bool:
@@ -3176,7 +3423,37 @@ class ChatbotService:
     @staticmethod
     def _unhelpful_follow_up_response(
         conversation: Conversation,
+        *,
+        exhausted: bool = False,
     ) -> dict[str, object]:
+        if exhausted:
+            return {
+                "answer": (
+                    "Siento que aún no haya quedado claro. Puedes explorar las "
+                    "categorías de preguntas frecuentes, solicitar atención de un "
+                    "asesor o iniciar un ticket cuando decidas confirmarlo."
+                ),
+                "intent": "FOLLOW_UP_UNRESOLVED",
+                "faq_id": conversation.last_faq_id,
+                "category_name": None,
+                "confidence": conversation.last_confidence or 0.0,
+                "resolved": False,
+                "offers_ticket": False,
+                "requires_clarification": False,
+                "options": [],
+                "candidate_faq_ids": [],
+                "fallback_reason": None,
+                "escalated": False,
+                "match": None,
+                "response_source": "DETERMINISTIC",
+                "preserve_context": True,
+                "clear_clarification_attempts": True,
+                "available_actions": [
+                    ChatbotAvailableAction.BROWSE_KNOWLEDGE,
+                    ChatbotAvailableAction.CREATE_TICKET,
+                    ChatbotAvailableAction.CONTACT_ADVISOR,
+                ],
+            }
         return {
             "answer": (
                 "Entiendo. Mi respuesta anterior no resolvió lo que necesitas. "
@@ -3243,12 +3520,19 @@ class ChatbotService:
         previous_budget = remaining // 5
         assistant_budget = remaining // 5
         current_budget = remaining - previous_budget - assistant_budget
+
+        def safe_public_text(value: str) -> str:
+            without_ticket_codes = _TICKET_CODE_PATTERN.sub(
+                "[código de solicitud omitido]", value
+            )
+            return minimize_provider_input(without_ticket_codes)
+
         value = (
             f"{policy}{labels[0]}"
-            f"{minimize_provider_input(previous_user_message)[:previous_budget]}\n"
+            f"{safe_public_text(previous_user_message)[:previous_budget]}\n"
             f"{labels[1]}"
-            f"{minimize_provider_input(previous_bot_message)[:assistant_budget]}\n"
-            f"{labels[2]}{minimize_provider_input(current_message)[:current_budget]}"
+            f"{safe_public_text(previous_bot_message)[:assistant_budget]}\n"
+            f"{labels[2]}{safe_public_text(current_message)[:current_budget]}"
         )
         return value[:limit]
 
@@ -3493,7 +3777,8 @@ class ChatbotService:
         category_ids = result.get("candidate_faq_category_ids")
         category_labels = result.get("options")
         if (
-            result.get("intent") == "FAQ_CATEGORY_DISCOVERY"
+            result.get("intent")
+            in {"FAQ_CATEGORY_DISCOVERY", ChatbotIntent.OUT_OF_SCOPE.value}
             and isinstance(category_ids, list)
             and isinstance(category_labels, list)
             and all(isinstance(value, str) for value in category_ids)
@@ -3796,7 +4081,7 @@ class ChatbotService:
                     "preguntas frecuentes o el seguimiento de una solicitud."
                 ),
             ),
-            "intent": None,
+            "intent": ChatbotIntent.GREETING.value,
             "faq_id": None,
             "category_name": None,
             "confidence": 1.0,
@@ -3808,6 +4093,7 @@ class ChatbotService:
             "escalated": False,
             "match": None,
             "response_source": "DETERMINISTIC",
+            "suggested_action": ChatbotSuggestedAction.SHOW_MENU,
         }
 
     @staticmethod

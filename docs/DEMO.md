@@ -60,7 +60,7 @@ proactivos funcionan con respuestas determinísticas.
 
 Para la variante con IA, configura antes de iniciar el API `CHATBOT_AI_ENABLED=true`,
 `CHATBOT_AI_PROVIDER=openai`, `CHATBOT_AI_MODEL=gpt-5.4-mini`,
-`CHATBOT_AI_EMBEDDINGS_ENABLED=false` y `CHATBOT_AI_MAX_OUTPUT_TOKENS=128`.
+`CHATBOT_AI_EMBEDDINGS_ENABLED=false` y `CHATBOT_AI_MAX_OUTPUT_TOKENS=384`.
 Inyecta la clave mediante el almacén de secretos local aprobado; no la guardes
 en este documento, el repositorio ni el historial de comandos. Usa únicamente
 las frases sintéticas de este guion. La modalidad de incentivo de esta corrida

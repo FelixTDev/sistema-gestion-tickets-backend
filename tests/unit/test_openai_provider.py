@@ -128,7 +128,7 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
     assert payload["model"] == "gpt-5.4-mini"
     assert payload["store"] is False
     assert payload["reasoning"] == {"effort": "none"}
-    assert payload["max_output_tokens"] == 128
+    assert payload["max_output_tokens"] == 384
     assert payload["instructions"] == "Responde únicamente con el contexto autorizado."
     sent_input = json.loads(payload["input"])
     assert sent_input["user_message"] == "¿Cómo bloqueo mi tarjeta?"

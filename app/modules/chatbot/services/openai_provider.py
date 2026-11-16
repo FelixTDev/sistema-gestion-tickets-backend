@@ -197,7 +197,7 @@ class OpenAIResponsesProvider:
             "store": False,
             "instructions": request.policy,
             "input": json.dumps(input_payload, ensure_ascii=False),
-            "max_output_tokens": min(request.max_output_tokens, 128),
+            "max_output_tokens": request.max_output_tokens,
             "text": {
                 "format": {
                     "type": "json_schema",
