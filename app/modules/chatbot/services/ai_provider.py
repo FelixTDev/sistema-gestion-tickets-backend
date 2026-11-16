@@ -22,6 +22,19 @@ class KnowledgeContext:
 
 
 @dataclass(frozen=True)
+class AIProviderTool:
+    name: str
+    description: str
+    parameters: dict[str, object]
+
+
+@dataclass(frozen=True)
+class AIProviderToolCall:
+    name: str
+    arguments: dict[str, object]
+
+
+@dataclass(frozen=True)
 class AIProviderRequest:
     user_message: str
     context: tuple[KnowledgeContext, ...]
@@ -31,6 +44,10 @@ class AIProviderRequest:
     max_output_tokens: int
     timeout_seconds: float
     grounding_required: bool = True
+    tools: tuple[AIProviderTool, ...] = ()
+    conversation_context: tuple[dict[str, str], ...] = ()
+    authorized_ticket_data: tuple[dict[str, object], ...] = ()
+    response_mode: str = "standard"
 
 
 @dataclass(frozen=True)
@@ -47,6 +64,7 @@ class AIGenerationResult:
     output_tokens: int | None = None
     total_tokens: int | None = None
     intent_classification: str | None = None
+    tool_call: AIProviderToolCall | None = None
 
     @classmethod
     def generated(
@@ -62,6 +80,7 @@ class AIGenerationResult:
         output_tokens: int | None = None,
         total_tokens: int | None = None,
         intent_classification: str | None = None,
+        tool_call: AIProviderToolCall | None = None,
     ) -> "AIGenerationResult":
         return cls(
             status="GENERATED",
@@ -75,6 +94,7 @@ class AIGenerationResult:
             output_tokens=output_tokens,
             total_tokens=total_tokens,
             intent_classification=intent_classification,
+            tool_call=tool_call,
         )
 
     @classmethod
@@ -126,8 +146,8 @@ class HttpJsonAIProvider:
     """Optional adapter for an approved internal JSON AI gateway.
 
     The gateway contract is intentionally small and provider-neutral:
-    request fields are ``model``, ``input``, ``policy``, ``prompt_version`` and
-    authorized ``context``; the response must contain ``text`` and ``source_ids``.
+    request fields include ``model``, ``input``, ``policy``, ``prompt_version``,
+    explicitly allowed tools, authorized ticket projections and public ``context``.
     """
 
     name = "http_json"
@@ -144,9 +164,20 @@ class HttpJsonAIProvider:
         payload = {
             "model": self.model,
             "input": request.user_message,
+            "conversation_context": list(request.conversation_context),
             "policy": request.policy,
             "prompt_version": request.prompt_version,
             "grounding_required": request.grounding_required,
+            "response_mode": request.response_mode,
+            "available_tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+                for tool in request.tools
+            ],
+            "authorized_ticket_data": list(request.authorized_ticket_data),
             "context": [
                 {
                     "source_id": chunk.source_id,
@@ -179,7 +210,14 @@ class HttpJsonAIProvider:
             decoded = json.loads(body.decode("utf-8"))
             text = decoded.get("text")
             source_ids = decoded.get("source_ids")
-            if not isinstance(text, str) or not isinstance(source_ids, list):
+            tool_call, tool_output_valid = parse_tool_call_output(
+                decoded.get("tool_calls"), request.tools
+            )
+            if (
+                not isinstance(text, str)
+                or not isinstance(source_ids, list)
+                or not tool_output_valid
+            ):
                 return AIGenerationResult.failed(
                     status="ERROR",
                     provider=self.name,
@@ -196,6 +234,7 @@ class HttpJsonAIProvider:
                     if isinstance(decoded.get("intent_classification"), str)
                     else None
                 ),
+                tool_call=tool_call,
             )
         except TimeoutError:
             return AIGenerationResult.failed(
@@ -211,6 +250,30 @@ class HttpJsonAIProvider:
                 model=self.model,
                 error_code="provider_error",
             )
+
+
+def parse_tool_call_output(
+    value: object,
+    allowed_tools: tuple[AIProviderTool, ...],
+) -> tuple[AIProviderToolCall | None, bool]:
+    if value is None and not allowed_tools:
+        return None, True
+    if not isinstance(value, dict):
+        return None, False
+    allowed_names = {tool.name for tool in allowed_tools}
+    if set(value) != allowed_names:
+        return None, False
+    selected = [
+        (name, arguments) for name, arguments in value.items() if arguments is not None
+    ]
+    if not selected:
+        return None, True
+    if len(selected) != 1:
+        return None, False
+    name, arguments = selected[0]
+    if not isinstance(name, str) or not isinstance(arguments, dict):
+        return None, False
+    return AIProviderToolCall(name=name, arguments=arguments), True
 
 
 def build_ai_provider() -> AIProvider:

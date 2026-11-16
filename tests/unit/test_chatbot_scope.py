@@ -260,6 +260,7 @@ def test_ticket_tracking_code_is_not_treated_as_arithmetic() -> None:
         ("mi contrasena es Secreta123", "Secreta123"),
         ("mi clave de acceso es Secreta123", "Secreta123"),
         ("tarjeta 4111 1111 1111 1111", "4111 1111 1111 1111"),
+        ("mi teléfono es 987 654 321", "987 654 321"),
         ("cliente@example.com", "cliente@example.com"),
     ],
 )

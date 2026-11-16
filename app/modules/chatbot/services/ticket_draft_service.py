@@ -130,6 +130,7 @@ class TicketDraftService:
         start_requested: bool,
         suggested_category_id: str | None = None,
         initial_description: str | None = None,
+        extracted_fields: dict[str, object] | None = None,
     ) -> TicketDraftReply:
         existing = self.read(session, saved_value)
         if self._is_cancel(content) and existing.status in {
@@ -188,8 +189,11 @@ class TicketDraftService:
         categories = self.categories.list_active(session)
         errors = {item.field: item.message for item in draft.validation_errors}
         explicit = self._labeled_values(content)
+        extracted = extracted_fields or {}
 
-        category_text = explicit.get("category_id")
+        category_text = explicit.get("category_id") or self._supported_extracted_text(
+            extracted.get("category_name"), content
+        )
         category_was_provided = category_text is not None
         category_candidates = self._matching_categories(
             category_text if category_was_provided else content, categories
@@ -210,9 +214,11 @@ class TicketDraftService:
                     )
 
         priority_text = explicit.get("priority")
+        if priority_text is None:
+            priority_text = self._explicit_priority_selection(content, draft)
         priority_was_provided = priority_text is not None
         priority_candidates = self._matching_priorities(
-            priority_text if priority_was_provided else content
+            priority_text if priority_was_provided else ""
         )
         if priority_candidates or priority_was_provided:
             if len(priority_candidates) == 1:
@@ -242,13 +248,16 @@ class TicketDraftService:
         ):
             value = explicit.get(field_name)
             if value is None:
+                value = self._supported_extracted_text(
+                    extracted.get(field_name), content
+                )
+            if value is None:
                 continue
             value = " ".join(value.split())
             if field_name == "description" and initial_description is not None:
                 summary = " ".join(initial_description.split())
                 value = f"{summary}\n\nDetalle comunicado por el cliente: {value}"
             if not minimum <= len(value) <= maximum:
-                draft.fields.__setattr__(draft_field, None)
                 errors[enum_field] = (
                     f"El campo debe tener entre {minimum} y {maximum} caracteres."
                 )
@@ -260,7 +269,12 @@ class TicketDraftService:
             incident = self._incident_text(content)
             if incident:
                 self._set_text_field(draft, "description", incident, errors)
-        elif not explicit and not category_candidates and not priority_candidates:
+        elif (
+            not explicit
+            and not extracted
+            and not category_candidates
+            and not priority_candidates
+        ):
             next_field = self._next_missing_field(draft)
             if next_field == ChatbotTicketDraftField.CATEGORY_ID:
                 errors[ChatbotTicketDraftField.CATEGORY_ID] = (
@@ -376,6 +390,35 @@ class TicketDraftService:
         incident = incident.strip(" .,:;-\t")
         return incident if len(incident) >= 5 else None
 
+    @classmethod
+    def _explicit_priority_selection(
+        cls, content: str, draft: ChatbotTicketDraft
+    ) -> str | None:
+        normalized = normalize_text(content).strip(" .,!?:;¿¡")
+        if re.search(r"\b(?:prioridad|priority)\b", normalize_text(content)):
+            selected = cls._matching_priorities(content)
+            return selected[0].value if len(selected) == 1 else content
+        if cls._next_missing_field(draft) != ChatbotTicketDraftField.PRIORITY:
+            return None
+        for priority in TicketPriority:
+            if normalized in {
+                priority.value.casefold(),
+                _PRIORITY_LABELS[priority].casefold(),
+            }:
+                return priority.value
+        return None
+
+    @staticmethod
+    def _supported_extracted_text(value: object, content: str) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        candidate = " ".join(value.split())
+        normalized_candidate = normalize_text(candidate).strip(" .,!?:;¿¡")
+        normalized_content = normalize_text(content)
+        if not normalized_candidate or normalized_candidate not in normalized_content:
+            return None
+        return candidate
+
     @staticmethod
     def _set_text_field(
         draft: ChatbotTicketDraft,
@@ -391,7 +434,6 @@ class TicketDraftService:
         )
         minimum, maximum = (3, 200) if field_name == "subject" else (5, 10000)
         if not minimum <= len(clean_value) <= maximum:
-            setattr(draft.fields, field_name, None)
             errors[field] = (
                 f"El campo debe tener entre {minimum} y {maximum} caracteres."
             )
@@ -556,7 +598,10 @@ class TicketDraftService:
             names = ", ".join(item.name for item in draft.category_options)
             answer = f"¿Qué categoría activa corresponde? Puedes elegir: {names}."
         elif draft.fields.subject is None:
-            answer = "¿Qué asunto breve deseas colocar en el ticket?"
+            answer = (
+                "¿Qué necesitas solicitar? Escribe un asunto breve. "
+                "Ej.: solicitar una tarjeta de crédito."
+            )
         elif draft.fields.description is None:
             answer = (
                 "Describe el problema o la solicitud con tus propias palabras. "

@@ -396,7 +396,7 @@ def test_explicit_faq_selection_rejects_unsupported_ai_output(
     assert len(provider.calls) == 2
 
 
-def test_private_ticket_queries_never_reach_ai_provider(
+def test_private_ticket_queries_send_only_sanitized_turn_for_orchestration(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _ = phase12_client
@@ -426,7 +426,10 @@ def test_private_ticket_queries_never_reach_ai_provider(
             "CREATE_TICKET",
         }
 
-    assert provider.calls == []
+    assert len(provider.calls) == 2
+    assert all(call.tools for call in provider.calls)
+    assert all(call.authorized_ticket_data == () for call in provider.calls)
+    assert all("TCK-20261115-AB12CD34EF" not in repr(call) for call in provider.calls)
 
 
 def test_public_statement_question_is_not_classified_as_private_ticket_lookup(
@@ -500,7 +503,9 @@ def test_adversarial_scenario_corpus_never_accepts_ai_output(
         assert response.status_code == 200, scenario["id"]
         assert response.json()["response_source"] != "AI", scenario["id"]
 
-    assert provider.calls == []
+    assert all(request.authorized_ticket_data == () for request in provider.calls)
+    assert all("api_key" not in repr(request).casefold() for request in provider.calls)
+    assert len(provider.calls) < len(adversarial)
 
 
 def test_grounded_mobile_banking_paraphrase_is_returned_with_ai_trace(
@@ -742,7 +747,14 @@ def test_private_and_injection_turns_bypass_both_ai_providers(
     )
 
     assert response.status_code == 200
-    assert provider.calls == []
+    if "ticket" in message.casefold():
+        assert len(provider.calls) == 1
+        request = provider.calls[0]
+        assert request.tools
+        assert request.authorized_ticket_data == ()
+        assert "TCK-20261112-ABCD" not in repr(request)
+    else:
+        assert provider.calls == []
     assert embeddings.calls == []
 
 
@@ -825,7 +837,10 @@ def test_frustration_uses_public_recent_context_and_keeps_the_topic(
     configure_fake(monkeypatch, provider)
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
-    first = client.post(endpoint, json={"content": "TARJETAS y REQUISITOS"})
+    first = client.post(
+        endpoint,
+        json={"content": "TARJETAS y REQUISITOS; mi teléfono es 987 654 321"},
+    )
 
     response = client.post(endpoint, json={"content": frustration})
 
@@ -842,6 +857,8 @@ def test_frustration_uses_public_recent_context_and_keeps_the_topic(
         first.json()["bot_message"]["content"][:60] in provider.calls[-1].user_message
     )
     assert "TCK-" not in provider.calls[-1].user_message
+    assert all("987 654 321" not in request.user_message for request in provider.calls)
+    assert "[dato-sensible-redactado]" in provider.calls[-1].user_message
     assert "¿Qué parte" in body["bot_message"]["content"]
 
     clarified = client.post(
@@ -1087,7 +1104,7 @@ def test_unsafe_conversational_ai_keeps_deterministic_fallback(
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
 
 
-def test_private_ticket_query_never_reaches_ai_provider(
+def test_private_ticket_query_requires_authentication_before_ticket_data_reaches_ai(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _ = phase12_client
@@ -1110,7 +1127,11 @@ def test_private_ticket_query_never_reaches_ai_provider(
     assert response.status_code == 200
     assert response.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
     assert response.json()["ticket_query"]["authentication_required"] is True
-    assert provider.calls == []
+    assert len(provider.calls) == 1
+    request = provider.calls[0]
+    assert request.tools
+    assert request.authorized_ticket_data == ()
+    assert "user_id" not in repr(request)
 
 
 @pytest.mark.parametrize(
@@ -1124,7 +1145,7 @@ def test_private_ticket_query_never_reaches_ai_provider(
         "Quiero conversar con alguien",
     ],
 )
-def test_natural_ticket_and_advisor_intents_never_reach_ai_provider(
+def test_natural_ticket_and_advisor_intents_use_safe_orchestration(
     phase12_client, monkeypatch: pytest.MonkeyPatch, content: str
 ) -> None:
     client, _ = phase12_client
@@ -1146,7 +1167,11 @@ def test_natural_ticket_and_advisor_intents_never_reach_ai_provider(
 
     assert response.status_code == 200
     assert response.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
-    assert provider.calls == []
+    assert len(provider.calls) == 1
+    request = provider.calls[0]
+    assert request.tools
+    assert request.authorized_ticket_data == ()
+    assert "user_id" not in repr(request)
 
 
 def test_arithmetic_embedded_in_a_banking_query_never_reaches_ai_provider(

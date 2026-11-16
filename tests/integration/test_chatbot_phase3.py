@@ -12,17 +12,24 @@ from app.main import app
 from app.modules.auditoria.models.audit_log import AuditLog
 from app.modules.chatbot.api.router import get_chatbot_service
 from app.modules.chatbot.models.conversation import Conversation, ConversationStatus
+from app.modules.chatbot.services import chatbot_service as chatbot_service_module
 from app.modules.chatbot.services import rag_service as rag_service_module
 from app.modules.chatbot.services.ai_provider import (
     AIGenerationResult,
     AIProviderRequest,
+    AIProviderToolCall,
 )
 from app.modules.chatbot.services.chatbot_service import ChatbotService
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.notificaciones.models.notification import Notification
 from app.modules.tickets.models.history import TicketHistory
 from app.modules.tickets.models.sla import TicketSla
-from app.modules.tickets.models.ticket import Ticket
+from app.modules.tickets.models.ticket import (
+    Ticket,
+    TicketPriority,
+    TicketSource,
+)
+from app.modules.tickets.repositories.ticket_repository import TicketRepository
 from app.modules.usuarios.api.auth_router import get_email_provider
 from app.modules.usuarios.services.email_provider import NoopEmailProvider
 from app.seed.demo_data import seed_demo_data
@@ -432,6 +439,71 @@ def test_progressive_draft_is_typed_persisted_and_only_conversion_creates_ticket
         assert ticket.priority.value == payload["priority"]
 
 
+def test_conversion_recovers_a_ticket_when_unique_conflict_occurs_during_flush(
+    phase3_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+
+    fields = {
+        "category_id": category.id,
+        "subject": "Tarjeta no recibida",
+        "description": "No recibí la tarjeta solicitada.",
+        "priority": "ALTA",
+    }
+    draft = send(
+        client,
+        conversation_id,
+        "Quiero crear un ticket. Categoría: TARJETAS. "
+        "Asunto: Tarjeta no recibida. "
+        "Descripción: No recibí la tarjeta solicitada. Prioridad: ALTA.",
+        headers,
+    )
+    assert draft.json()["ticket_draft"]["fields"] == fields
+    send(client, conversation_id, "Confirmo", headers)
+    with Session(engine) as session:
+        conversation = session.get(Conversation, conversation_id)
+        assert conversation is not None
+        ticket = Ticket(
+            tracking_code="TCK-RACE-RECOVERY",
+            client_id=conversation.user_id,
+            conversation_id=conversation_id,
+            category_id=category.id,
+            subject=fields["subject"],
+            description=fields["description"],
+            priority=TicketPriority.ALTA,
+            source=TicketSource.CHATBOT,
+        )
+        session.add(ticket)
+        session.commit()
+
+    original_get = TicketRepository.get_by_conversation
+    calls = 0
+
+    def hide_once(repository, session, requested_conversation_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        return original_get(repository, session, requested_conversation_id)
+
+    monkeypatch.setattr(TicketRepository, "get_by_conversation", hide_once)
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/convert-to-ticket",
+        headers=headers,
+        json=fields,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tracking_code"] == "TCK-RACE-RECOVERY"
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 1
+
+
 def test_ticket_draft_suggests_the_category_from_the_previous_faq(
     phase3_client,
 ) -> None:
@@ -656,6 +728,138 @@ def test_start_message_reuses_incident_description_and_requests_priority(
     assert draft["missing_fields"] == ["SUBJECT", "PRIORITY"]
 
 
+def test_urgent_word_in_subject_does_not_set_priority(phase3_client) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+    send(client, conversation_id, "Categoría: TARJETAS", headers)
+    response = send(client, conversation_id, "ASUNTO URGENTE", headers)
+
+    assert response.status_code == 200, response.text
+    draft = response.json()["ticket_draft"]
+    assert draft["fields"]["category_id"] == category.id
+    assert draft["fields"]["subject"] == "ASUNTO URGENTE"
+    assert draft["fields"]["priority"] is None
+    assert "PRIORITY" in draft["missing_fields"]
+
+
+def test_invalid_description_correction_preserves_existing_draft_value(
+    phase3_client,
+) -> None:
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+
+    first = send(
+        client,
+        conversation_id,
+        "Quiero crear un ticket. Categoría: TARJETAS. "
+        "Asunto: Tarjeta no recibida. "
+        "Descripción: No recibí la tarjeta solicitada.",
+        headers,
+    )
+    correction = send(client, conversation_id, "Descripción: No", headers)
+
+    assert first.status_code == 200, first.text
+    assert correction.status_code == 200, correction.text
+    draft = correction.json()["ticket_draft"]
+    assert draft["fields"]["category_id"] == category.id
+    assert draft["fields"]["subject"] == "Tarjeta no recibida"
+    assert draft["fields"]["description"] == "No recibí la tarjeta solicitada."
+    assert draft["fields"]["priority"] is None
+    assert draft["validation_errors"] == [
+        {
+            "field": "DESCRIPTION",
+            "message": "El campo debe tener entre 5 y 10000 caracteres.",
+        }
+    ]
+
+
+def test_llm_extracts_explicit_draft_fields_without_inferring_priority(
+    phase3_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, engine = phase3_client
+    settings = rag_service_module.get_settings()
+    enabled_settings = settings.model_copy(update={"chatbot_ai_enabled": True})
+    monkeypatch.setattr(rag_service_module, "get_settings", lambda: enabled_settings)
+    monkeypatch.setattr(
+        chatbot_service_module, "get_settings", lambda: enabled_settings
+    )
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+
+    class DraftToolProvider:
+        name = "draft-tool-provider"
+        model = "test"
+
+        def __init__(self) -> None:
+            self.requests: list[AIProviderRequest] = []
+
+        def generate(self, request: AIProviderRequest) -> AIGenerationResult:
+            self.requests.append(request)
+            return AIGenerationResult.generated(
+                text="Prepararé el borrador con esos datos.",
+                source_ids=[],
+                provider=self.name,
+                model=self.model,
+                intent_classification="TICKET_DRAFT_UPDATE",
+                tool_call=(
+                    AIProviderToolCall(
+                        name="start_ticket_draft",
+                        arguments={
+                            "category_name": "TARJETAS",
+                            "subject": "No llegó mi tarjeta",
+                            "description": "No recibí la tarjeta solicitada",
+                            "priority": "URGENTE",
+                        },
+                    )
+                    if request.tools
+                    else None
+                ),
+            )
+
+    provider = DraftToolProvider()
+    app.dependency_overrides[get_chatbot_service] = lambda: ChatbotService(
+        ai_provider=provider
+    )
+    conversation_id, headers = create_linked_conversation(client)
+
+    response = send(
+        client,
+        conversation_id,
+        "Quiero crear un ticket. Categoría TARJETAS. "
+        "ASUNTO URGENTE: No llegó mi tarjeta. "
+        "Descripción: No recibí la tarjeta solicitada.",
+        headers,
+    )
+
+    draft = response.json()["ticket_draft"]
+    assert response.status_code == 200, response.text
+    assert draft["fields"] == {
+        "category_id": category.id,
+        "subject": "No llegó mi tarjeta",
+        "description": "No recibí la tarjeta solicitada.",
+        "priority": None,
+    }
+    assert draft["missing_fields"] == ["PRIORITY"]
+    assert len(provider.requests) == 1
+    tool_names = {tool.name for tool in provider.requests[0].tools}
+    assert "start_ticket_draft" in tool_names
+    assert "update_ticket_draft" in tool_names
+    assert "create_ticket" not in tool_names
+    assert "convert_to_ticket" not in tool_names
+
+
 def test_correction_resume_cancel_and_unrelated_question_preserve_draft(
     phase3_client,
 ) -> None:
@@ -723,13 +927,18 @@ def test_correction_resume_cancel_and_unrelated_question_preserve_draft(
     ]
 
 
-def test_ticket_draft_never_reaches_external_ai_provider(
+def test_ticket_draft_orchestration_receives_no_ticket_or_user_data(
     phase3_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _ = phase3_client
     settings = rag_service_module.get_settings()
     monkeypatch.setattr(
         rag_service_module,
+        "get_settings",
+        lambda: settings.model_copy(update={"chatbot_ai_enabled": True}),
+    )
+    monkeypatch.setattr(
+        chatbot_service_module,
         "get_settings",
         lambda: settings.model_copy(update={"chatbot_ai_enabled": True}),
     )
@@ -763,7 +972,12 @@ def test_ticket_draft_never_reaches_external_ai_provider(
         headers,
     )
 
-    assert provider.requests == []
+    assert len(provider.requests) == 2
+    for request in provider.requests:
+        assert request.tools
+        assert request.authorized_ticket_data == ()
+        assert "TCK-PRIVATE-001" not in repr(request)
+        assert "create_ticket" not in {tool.name for tool in request.tools}
 
 
 def test_openapi_exposes_ticket_draft_status_fields_and_real_enums() -> None:
@@ -914,7 +1128,10 @@ def test_ticket_draft_collects_each_field_and_requires_explicit_confirmation(
     assert "¿Qué categoría" in started.json()["bot_message"]["content"]
 
     category = send(client, conversation_id, "Categoría: TARJETAS", headers)
-    assert "¿Qué asunto" in category.json()["bot_message"]["content"]
+    assert "¿Qué necesitas solicitar?" in category.json()["bot_message"]["content"]
+    assert (
+        "solicitar una tarjeta de crédito" in category.json()["bot_message"]["content"]
+    )
     subject = send(client, conversation_id, "Asunto: Tarjeta no recibida", headers)
     assert "Describe el problema" in subject.json()["bot_message"]["content"]
     description = send(
@@ -925,6 +1142,13 @@ def test_ticket_draft_collects_each_field_and_requires_explicit_confirmation(
     )
     assert description.json()["ticket_draft"]["status"] == "COLLECTING"
     assert "Elige una prioridad" in description.json()["bot_message"]["content"]
+    assert {item["id"] for item in description.json()["quick_replies"]} == {
+        "draft-priority-baja",
+        "draft-priority-media",
+        "draft-priority-alta",
+        "draft-priority-urgente",
+        "draft-cancel",
+    }
     priority = send(client, conversation_id, "Prioridad: MEDIA", headers)
     assert priority.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
     payload = priority.json()["ticket_draft"]["fields"]

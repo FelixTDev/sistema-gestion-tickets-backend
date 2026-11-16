@@ -144,11 +144,16 @@ class ConversationRepository:
 
     @staticmethod
     def _count_provider_attempts(traces: list[object]) -> int:
-        return sum(
-            1
-            for trace in traces
-            if isinstance(trace, dict) and trace.get("provider_called") is True
-        )
+        total = 0
+        for trace in traces:
+            if not isinstance(trace, dict):
+                continue
+            call_count = trace.get("provider_call_count")
+            if isinstance(call_count, int) and not isinstance(call_count, bool):
+                total += max(call_count, 0)
+            elif trace.get("provider_called") is True:
+                total += 1
+        return total
 
     def category_name(self, session: Session, category_id: str | None) -> str | None:
         if category_id is None:

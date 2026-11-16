@@ -7,6 +7,8 @@ from app.modules.chatbot.schemas.chatbot import ChatbotIntent
 from app.modules.chatbot.services.ai_provider import (
     AIGenerationResult,
     AIProviderRequest,
+    AIProviderTool,
+    parse_tool_call_output,
 )
 
 _RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -20,8 +22,14 @@ _OUTPUT_SCHEMA = {
             "type": "string",
             "enum": [intent.value for intent in ChatbotIntent],
         },
+        "tool_calls": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
     },
-    "required": ["text", "source_ids", "intent_classification"],
+    "required": ["text", "source_ids", "intent_classification", "tool_calls"],
     "additionalProperties": False,
 }
 
@@ -149,6 +157,9 @@ class OpenAIResponsesProvider:
         text = structured_output.get("text")
         source_ids = structured_output.get("source_ids")
         intent_classification = structured_output.get("intent_classification")
+        tool_call, tool_output_valid = parse_tool_call_output(
+            structured_output.get("tool_calls"), request.tools
+        )
         if (
             not isinstance(text, str)
             or not text.strip()
@@ -158,6 +169,7 @@ class OpenAIResponsesProvider:
             or any(not isinstance(source_id, str) for source_id in source_ids)
             or not isinstance(intent_classification, str)
             or intent_classification not in {intent.value for intent in ChatbotIntent}
+            or not tool_output_valid
         ):
             return self._failed(
                 status="ERROR",
@@ -176,12 +188,24 @@ class OpenAIResponsesProvider:
             output_tokens=self._usage_count(decoded, "output_tokens"),
             total_tokens=self._usage_count(decoded, "total_tokens"),
             intent_classification=intent_classification,
+            tool_call=tool_call,
         )
 
     def _request_payload(self, request: AIProviderRequest) -> dict[str, object]:
         input_payload = {
             "user_message": request.user_message,
+            "conversation_context": list(request.conversation_context),
             "grounding_required": request.grounding_required,
+            "response_mode": request.response_mode,
+            "available_tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+                for tool in request.tools
+            ],
+            "authorized_ticket_data": list(request.authorized_ticket_data),
             "sources": [
                 {
                     "id": source.source_id,
@@ -203,7 +227,7 @@ class OpenAIResponsesProvider:
                     "type": "json_schema",
                     "name": "grounded_banking_answer",
                     "strict": True,
-                    "schema": _OUTPUT_SCHEMA,
+                    "schema": _output_schema(request.tools),
                 }
             },
         }
@@ -273,3 +297,23 @@ class OpenAIResponsesProvider:
             return None
         count = usage.get(name)
         return count if type(count) is int and count >= 0 else None
+
+
+def _output_schema(tools: tuple[AIProviderTool, ...]) -> dict[str, object]:
+    schema = json.loads(json.dumps(_OUTPUT_SCHEMA))
+    properties = {
+        tool.name: {
+            "type": ["object", "null"],
+            "properties": tool.parameters.get("properties", {}),
+            "required": tool.parameters.get("required", []),
+            "additionalProperties": False,
+        }
+        for tool in tools
+    }
+    schema["properties"]["tool_calls"] = {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+    return schema

@@ -12,6 +12,7 @@ from app.modules.chatbot.services.ai_provider import (
     KnowledgeContext,
     NoopAIProvider,
 )
+from app.modules.chatbot.services.ai_tools import available_chatbot_tools
 from app.modules.chatbot.services.openai_provider import OpenAIResponsesProvider
 
 
@@ -45,8 +46,12 @@ def response_body(
     status: str = "completed",
     usage: object | None = None,
 ) -> bytes:
-    if isinstance(payload, dict) and "intent_classification" not in payload:
-        payload = {**payload, "intent_classification": "FAQ_QUERY"}
+    if isinstance(payload, dict):
+        payload = {
+            **payload,
+            "intent_classification": payload.get("intent_classification", "FAQ_QUERY"),
+            "tool_calls": payload.get("tool_calls", {}),
+        }
     response: dict[str, object] = {
         "status": status,
         "output": [
@@ -113,6 +118,7 @@ def test_responses_provider_sends_stateless_grounded_structured_request(monkeypa
         "text": "Comunícate con el canal oficial para bloquearla.",
         "source_ids": ["faq-card-block"],
         "intent_classification": "FAQ_QUERY",
+        "tool_calls": {},
     }
     assert result.source_ids == ("faq-card-block",)
     assert result.intent_classification == "FAQ_QUERY"
@@ -185,7 +191,90 @@ def test_openai_provider_schema_closes_intent_classification_enum(monkeypatch):
         "UNKNOWN",
     }
     assert set(schema["properties"]["intent_classification"]["enum"]) == expected
-    assert schema["required"] == ["text", "source_ids", "intent_classification"]
+    assert schema["required"] == [
+        "text",
+        "source_ids",
+        "intent_classification",
+        "tool_calls",
+    ]
+
+
+def test_openai_provider_schema_and_output_use_only_available_strict_tools(monkeypatch):
+    captured: dict[str, object] = {}
+    tools = available_chatbot_tools()
+
+    def fake_urlopen(request, *, timeout: float):
+        captured["payload"] = json.loads(request.data)
+        return FakeResponse(
+            response_body(
+                {
+                    "text": "Revisaré tus solicitudes.",
+                    "source_ids": [],
+                    "intent_classification": "TICKET_QUERY",
+                    "tool_calls": {
+                        "query_my_tickets": {
+                            "operation": "LIST",
+                            "status": "ALL",
+                            "tracking_code": None,
+                            "position": None,
+                            "fields": ["CODE", "SUBJECT", "STATUS"],
+                            "page": 1,
+                        },
+                        **{
+                            tool.name: None
+                            for tool in tools
+                            if tool.name != "query_my_tickets"
+                        },
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(openai_provider, "urlopen", fake_urlopen)
+    request = replace(
+        provider_request(),
+        context=(),
+        grounding_required=False,
+        tools=tools,
+    )
+    result = OpenAIResponsesProvider(
+        api_key="openai-secret-test",
+        model="gpt-5.4-mini",
+    ).generate(request)
+
+    assert result.status == "GENERATED"
+    assert result.tool_call is not None
+    assert result.tool_call.name == "query_my_tickets"
+    assert result.tool_call.arguments["operation"] == "LIST"
+    schema = captured["payload"]["text"]["format"]["schema"]
+    tool_schema = schema["properties"]["tool_calls"]
+    assert set(tool_schema["properties"]) == {tool.name for tool in tools}
+    assert tool_schema["required"] == [tool.name for tool in tools]
+    assert tool_schema["additionalProperties"] is False
+    assert (
+        tool_schema["properties"]["query_my_tickets"]["additionalProperties"] is False
+    )
+    assert "create_ticket" not in tool_schema["properties"]
+
+
+def test_tool_output_rejects_multiple_or_unknown_actions():
+    tools = available_chatbot_tools()
+    valid_none = {tool.name: None for tool in tools}
+    multiple = dict(valid_none)
+    multiple["query_my_tickets"] = {"operation": "LIST"}
+    multiple["show_options"] = {}
+
+    parsed_multiple, multiple_valid = ai_provider.parse_tool_call_output(
+        multiple, tools
+    )
+    parsed_unknown, unknown_valid = ai_provider.parse_tool_call_output(
+        {**valid_none, "execute_sql": {}}, tools
+    )
+
+    assert parsed_multiple is None
+    assert multiple_valid is False
+    assert parsed_unknown is None
+    assert unknown_valid is False
 
 
 def test_openai_provider_rejects_intent_outside_closed_enum(monkeypatch):

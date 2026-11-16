@@ -424,6 +424,7 @@ def minimize_provider_input(value: str) -> str:
     minimized = _LABELED_SECRET_PATTERN.sub(_REDACTED, value)
     minimized = _CARD_NUMBER_PATTERN.sub(_REDACTED, minimized)
     minimized = _EMAIL_PATTERN.sub(_REDACTED, minimized)
+    minimized = _FORMATTED_PHONE_PATTERN.sub(_REDACTED, minimized)
     minimized = _LONG_NUMBER_PATTERN.sub(_REDACTED, minimized)
     return minimized
 
@@ -594,6 +595,130 @@ def validate_conversational_output(
         and not _OUT_OF_SCOPE_REDIRECT_PATTERN.fullmatch(normalized.strip())
     ):
         return GuardrailDecision(False, "OUT_OF_SCOPE_REDIRECT_REQUIRED")
+    return GuardrailDecision(True)
+
+
+def validate_ticket_response(
+    text: str | None,
+    authorized_ticket_data: tuple[dict[str, object], ...],
+    max_output_chars: int,
+) -> GuardrailDecision:
+    if not text or len(text.strip()) > min(max_output_chars, 700):
+        return GuardrailDecision(False, "OUTPUT_SIZE")
+    if not authorized_ticket_data:
+        return GuardrailDecision(False, "EMPTY_TICKET_CONTEXT")
+    normalized = normalize_text(text)
+    if _URL_PATTERN.search(text):
+        return GuardrailDecision(False, "UNSAFE_OUTPUT", "URL_IN_TICKET_RESPONSE")
+    if any(
+        re.search(pattern, normalized, re.IGNORECASE)
+        for pattern in _SECRET_OUTPUT_PATTERNS
+    ):
+        return GuardrailDecision(False, "UNSAFE_OUTPUT", "SECRET_IN_TICKET_RESPONSE")
+
+    context_values = [
+        str(value)
+        for record in authorized_ticket_data
+        for value in record.values()
+        if isinstance(value, str | int)
+        and not isinstance(value, bool)
+        and str(value).strip()
+    ]
+    context_text = " ".join(context_values)
+    if detect_prompt_injection(context_text):
+        return GuardrailDecision(False, "CONTEXT_INJECTION")
+    context_numbers = set(_NUMBER_PATTERN.findall(context_text))
+    if not set(_NUMBER_PATTERN.findall(text)) <= context_numbers:
+        return GuardrailDecision(False, "UNSAFE_OUTPUT", "UNAUTHORIZED_NUMBER")
+
+    ticket_codes = {
+        code
+        for value in context_values
+        for code in re.findall(r"\bTCK-[A-Z0-9]+(?:-[A-Z0-9]+)*\b", value, re.I)
+    }
+    output_codes = set(re.findall(r"\bTCK-[A-Z0-9]+(?:-[A-Z0-9]+)*\b", text, re.I))
+    if not output_codes <= ticket_codes:
+        return GuardrailDecision(False, "UNSAFE_OUTPUT", "UNAUTHORIZED_TICKET_CODE")
+
+    status_labels = {
+        "NUEVO": "nuevo",
+        "ASIGNADO": "asignado",
+        "EN_PROCESO": "en proceso",
+        "PENDIENTE_CLIENTE": "pendiente del cliente",
+        "RESUELTO": "resuelto",
+        "CERRADO": "cerrado",
+        "CANCELADO": "cancelado",
+    }
+    status_tokens = {
+        status
+        for status, label in status_labels.items()
+        if status in text.upper() or normalize_text(label) in normalized
+    }
+    authorized_statuses = {
+        value.upper()
+        for record in authorized_ticket_data
+        for key, value in record.items()
+        if key == "status" and isinstance(value, str)
+    }
+    if not status_tokens <= authorized_statuses:
+        return GuardrailDecision(False, "UNSAFE_OUTPUT", "UNAUTHORIZED_STATUS")
+
+    normalized_context = normalize_text(context_text)
+    authorized_terms = set(_WORD_PATTERN.findall(normalized_context))
+    output_terms = set(_WORD_PATTERN.findall(normalized))
+    authorized_status_terms = {
+        term
+        for status, label in status_labels.items()
+        if status in authorized_statuses
+        for term in _WORD_PATTERN.findall(normalize_text(label))
+    }
+    factual_terms = {
+        term
+        for term in output_terms
+        if len(term) >= 5 and term not in _GROUNDING_STOP_WORDS
+    }
+    unsupported_terms = (
+        factual_terms
+        - authorized_terms
+        - authorized_status_terms
+        - {
+            "ticket",
+            "tickets",
+            "solicitud",
+            "solicitudes",
+            "estado",
+            "asunto",
+            "codigo",
+            "tienes",
+            "tiene",
+            "tengo",
+            "tus",
+            "mis",
+            "este",
+            "esta",
+            "claro",
+            "revisado",
+            "revisar",
+            "encuentro",
+            "encuentran",
+            "aqui",
+            "segun",
+            "aparece",
+            "aparecen",
+            "pendiente",
+            "pendientes",
+            "abierto",
+            "abiertos",
+            "reciente",
+            "recientes",
+            "primero",
+            "primera",
+            "segundo",
+            "segunda",
+        }
+    )
+    if unsupported_terms:
+        return GuardrailDecision(False, "OUT_OF_CONTEXT", "UNSUPPORTED_TICKET_TERM")
     return GuardrailDecision(True)
 
 

@@ -148,15 +148,25 @@ class TicketService:
                 status_code=409,
                 detail="La conversación aún no tiene una respuesta para convertir",
             )
-        ticket = self._create(
-            session,
-            data,
-            actor.user.id,
-            actor,
-            TicketSource.CHATBOT,
-            conversation_id,
-            commit=False,
-        )
+        try:
+            ticket = self._create(
+                session,
+                data,
+                actor.user.id,
+                actor,
+                TicketSource.CHATBOT,
+                conversation_id,
+                commit=False,
+            )
+        except IntegrityError as error:
+            session.rollback()
+            return self._recover_after_conversion_conflict(
+                session,
+                conversation_id=conversation_id,
+                data=data,
+                actor=actor,
+                original_error=error,
+            )
         now = datetime.now(UTC)
         conversation.status = ConversationStatus.CONVERTED_TO_TICKET
         conversation.converted_at = now
@@ -189,31 +199,46 @@ class TicketService:
         )
         try:
             session.commit()
-        except IntegrityError:
+        except IntegrityError as error:
             session.rollback()
-            recovered_conversation = self.repository.conversation_for_update(
-                session, conversation_id
+            return self._recover_after_conversion_conflict(
+                session,
+                conversation_id=conversation_id,
+                data=data,
+                actor=actor,
+                original_error=error,
             )
-            if recovered_conversation is None:
-                raise HTTPException(
-                    status_code=404, detail="Conversación no encontrada"
-                ) from None
-            if recovered_conversation.user_id != actor.user.id:
-                raise HTTPException(
-                    status_code=403, detail="Conversación no autorizada"
-                ) from None
-            existing_ticket = self.repository.get_by_conversation(
-                session, conversation_id
-            )
-            if existing_ticket is not None:
-                return self._recover_conversation_ticket(
-                    session, existing_ticket, data, actor
-                )
-            raise
         session.refresh(ticket)
         return TicketConversionResult(
             ticket=self._ticket_read(session, ticket), created=True
         )
+
+    def _recover_after_conversion_conflict(
+        self,
+        session: Session,
+        *,
+        conversation_id: str,
+        data: TicketCreate,
+        actor: AuthenticatedUser,
+        original_error: IntegrityError,
+    ) -> TicketConversionResult:
+        recovered_conversation = self.repository.conversation_for_update(
+            session, conversation_id
+        )
+        if recovered_conversation is None:
+            raise HTTPException(
+                status_code=404, detail="Conversación no encontrada"
+            ) from None
+        if recovered_conversation.user_id != actor.user.id:
+            raise HTTPException(
+                status_code=403, detail="Conversación no autorizada"
+            ) from None
+        existing_ticket = self.repository.get_by_conversation(session, conversation_id)
+        if existing_ticket is not None:
+            return self._recover_conversation_ticket(
+                session, existing_ticket, data, actor
+            )
+        raise original_error
 
     def _recover_conversation_ticket(
         self,

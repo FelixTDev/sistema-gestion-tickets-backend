@@ -181,8 +181,46 @@ defecto), y el contexto no puede tener resultados demasiado cercanos entre sí.
 Debajo de ese corte, el backend mantiene la aclaración o respuesta determinística;
 el proveedor no recibe una FAQ de baja confianza. `CHATBOT_AI_ENABLED=false`, una
 falla del proveedor o una salida rechazada por validación conservan el fallback
-determinístico. Las consultas privadas de tickets, creación de tickets, saldo y
-otras operaciones bancarias permanecen en ramas de backend sin proveedor.
+determinístico. En los flujos conversacionales y de tickets, el proveedor puede
+proponer una herramienta de un catálogo cerrado (aclarar, consultar tickets
+propios, responder, buscar FAQ pública, mostrar opciones o iniciar/actualizar un
+borrador). El frontend no ejecuta esas herramientas ni debe tratar una
+respuesta del modelo como autorización. El backend valida otra vez intención,
+texto del usuario, estado de conversación, permisos y propiedad antes de actuar.
+El catálogo no contiene una herramienta para crear o convertir tickets; la
+conversión sigue requiriendo la confirmación del borrador y el endpoint
+autenticado.
+
+Una consulta privada exige una sesión de cliente. Antes de consultar el ticket,
+el backend resuelve el código entre los tickets del propietario autenticado; un
+código ajeno y uno inexistente producen la misma respuesta pública. El primer
+turno de orquestación no recibe datos de tickets. Si la consulta se autoriza y
+se necesita redactar una respuesta, el segundo turno puede recibir solo los
+campos solicitados que el backend ya autorizó: código, asunto, estado o
+descripción. La proyección del ticket no incluye IDs internos, identidad del
+cliente, prioridad, datos de asignación ni comentarios del asesor. Si un asunto
+o descripción contiene
+patrones de inyección, ese campo se omite. El contexto conversacional enviado al
+proveedor se limita a los dos mensajes recientes del usuario, con códigos de
+ticket reemplazados, y un resumen de estado del borrador y referencias
+disponibles. El mensaje actual y ese contexto pasan por minimización de
+credenciales comunes, correos, teléfonos formateados y números largos sensibles.
+Las FAQ públicas solo se envían como contexto cuando el retrieval determina que
+son elegibles. Saldo, movimientos y operaciones bancarias no se delegan al
+modelo.
+
+Al convertir un borrador, la primera solicitud devuelve `201`; un reintento con
+el mismo propietario, conversación y payload devuelve `200` con el ticket
+original. Un reintento con otro payload devuelve `409`. Si una colisión de
+unicidad ocurre mientras se guarda la conversión, el backend solo la recupera
+cuando puede verificar esos mismos datos; los demás conflictos se propagan como
+error. `GET /api/v1/chat/conversations/{conversation_id}` expone
+`converted_ticket` para restaurar el resultado después de una respuesta perdida.
+
+En el borrador, una prioridad se guarda solo cuando el cliente indica una
+prioridad explícita y no ambigua. Palabras como “urgente” dentro del asunto o de
+la descripción no seleccionan automáticamente `URGENTE`; el frontend debe
+mostrar la prioridad recogida y pedir su confirmación antes de convertir.
 
 El retest real del 2026-11-15 confirmó esta condición: 1 de 60 consultas
 legítimas alcanzó IA con fuente verificada; 59 quedaron bajo el corte de contexto

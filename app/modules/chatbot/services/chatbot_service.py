@@ -56,6 +56,7 @@ from app.modules.chatbot.schemas.chatbot import (
     ChatMessageRead,
     ConversationRead,
 )
+from app.modules.chatbot.services.ai_tools import available_chatbot_tools
 from app.modules.chatbot.services.guardrails import (
     detect_prompt_injection,
     has_verified_official_source,
@@ -337,6 +338,7 @@ class TicketQueryRequest:
     tracking_code: str | None = None
     statuses: frozenset[TicketStatus] | None = None
     page: int = 1
+    requested_fields: frozenset[str] | None = None
     clarification_action: ChatbotSuggestedAction | None = None
     clarification_query_type: ChatbotTicketQueryType | None = None
 
@@ -362,6 +364,9 @@ _TICKET_PRIORITY_LABELS = {
     TicketPriority.URGENTE: "Urgente",
 }
 _TICKET_CODE_PATTERN = re.compile(r"\bTCK-[A-Z0-9]+(?:-[A-Z0-9]+)*\b", re.IGNORECASE)
+_PROVIDER_TICKET_REFERENCE_PATTERN = re.compile(
+    r"\bTCK-(?:[A-Z0-9]+(?:-[A-Z0-9]+)*|[.…-]+)?", re.IGNORECASE
+)
 _MAX_CHAT_TICKETS = 5
 
 
@@ -566,7 +571,7 @@ class ChatbotService:
             and get_settings().chatbot_contextual_followups_enabled
         ):
             ticket_query_request = self._contextual_ticket_query_request(
-                clean_content, saved_context, previous_bot_message
+                clean_content, saved_context
             )
         is_unhelpful_follow_up = bool(
             previous_bot_message and self._is_unhelpful_follow_up(clean_content)
@@ -649,6 +654,177 @@ class ChatbotService:
             )
         )
 
+        orchestration_outcome = None
+        orchestration_tool_name: str | None = None
+        orchestration_applied = False
+        extracted_draft_fields: dict[str, object] | None = None
+        search_query_override: str | None = None
+        confirmation_text = normalize_text(clean_content).strip(" .,!?:;¿¡")
+        orchestration_user_message = clean_content
+        if (
+            is_unhelpful_follow_up
+            and previous_user_message is not None
+            and previous_bot_message is not None
+            and self._is_public_context_message(previous_bot_message)
+        ):
+            orchestration_user_message = self._contextual_provider_input(
+                previous_user_message.content,
+                previous_bot_message.content,
+                clean_content,
+            )
+        ticket_domain_message = bool(
+            re.search(
+                r"\b(?:tickets?|solicitudes?|reclamos?|casos?)\b",
+                normalize_text(clean_content),
+            )
+        )
+        orchestration_intent = (
+            ChatbotIntent.TICKET_DRAFT_UPDATE
+            if ticket_draft_flow or start_ticket_draft
+            else ChatbotIntent.TICKET_QUERY
+            if ticket_query_request is not None or ticket_domain_message
+            else ChatbotIntent.GREETING
+            if is_greeting
+            else ChatbotIntent.SHOW_MENU
+            if lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
+            else ChatbotIntent.FAQ_DISCOVERY
+            if is_faq_discovery
+            else ChatbotIntent.FAQ_CATEGORY_DISCOVERY
+            if is_faq_category_discovery or is_faq_category_request
+            else ChatbotIntent.FAQ_SUBCATEGORY_DISCOVERY
+            if requested_faq_category_id is not None
+            or selected_faq_category_id is not None
+            or selected_faq_subcategory is not None
+            else ChatbotIntent.CLARIFICATION
+            if is_unhelpful_follow_up
+            else ChatbotIntent.OUT_OF_SCOPE
+            if is_out_of_scope_request
+            else ChatbotIntent.REQUEST_ADVISOR
+            if is_advisor_request
+            else None
+        )
+        orchestration_should_run = (
+            get_settings().chatbot_ai_enabled
+            and option_id is None
+            and lifecycle_action != ChatbotSuggestedAction.END_CONVERSATION
+            and not is_banking_operation
+            and not is_mixed_banking_arithmetic
+            and orchestration_intent is not None
+            and not (
+                current_draft.status == ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION
+                and confirmation_text
+                in {"si", "ok", "de acuerdo", "listo", "confirmo", "correcto"}
+            )
+        )
+        if orchestration_should_run:
+            recent_provider_calls = (
+                self.conversations.count_recent_ai_provider_attempts(
+                    session,
+                    conversation.id,
+                    datetime.now(UTC) - timedelta(minutes=1),
+                )
+            )
+            actor_provider_calls = (
+                self.conversations.count_recent_ai_provider_attempts_for_actor(
+                    session,
+                    user_id=conversation.user_id,
+                    anonymous_key=conversation.anonymous_key,
+                    since=datetime.now(UTC) - timedelta(hours=1),
+                )
+            )
+            prior_ai_responses = self.conversations.count_ai_provider_attempts(
+                session, conversation.id
+            )
+            provider_turn = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
+                "referencia de ticket", orchestration_user_message
+            )
+            orchestration_outcome = self.rag.generate(
+                conversation_id=conversation.id,
+                user_message=provider_turn,
+                matches=[],
+                requests_last_minute=recent_provider_calls,
+                requests_by_actor_last_hour=actor_provider_calls,
+                responses_in_conversation=prior_ai_responses,
+                grounding_required=False,
+                tools=available_chatbot_tools(),
+                conversation_context=self._provider_dialogue_context(
+                    recent_messages, saved_context, current_draft
+                ),
+                response_mode="orchestration",
+                conversational_intent=orchestration_intent,
+            )
+            if orchestration_outcome.accepted and orchestration_outcome.tool_call:
+                orchestration_tool_name = orchestration_outcome.tool_call.name
+                tool_arguments = orchestration_outcome.tool_call.arguments
+                if orchestration_tool_name == "query_my_tickets":
+                    proposed_query = self._ticket_query_from_tool_call(
+                        clean_content,
+                        tool_arguments,
+                        saved_context,
+                        ticket_query_request,
+                    )
+                    if proposed_query is not None:
+                        ticket_query_request = proposed_query
+                        ticket_draft_flow = False
+                        start_ticket_draft = False
+                        lifecycle_action = None
+                        orchestration_applied = True
+                elif orchestration_tool_name in {
+                    "start_ticket_draft",
+                    "update_ticket_draft",
+                }:
+                    may_update_draft = (
+                        ticket_draft_flow
+                        or start_ticket_draft
+                        or (
+                            orchestration_tool_name == "start_ticket_draft"
+                            and self._explicit_ticket_creation_request(clean_content)
+                        )
+                    )
+                    if may_update_draft:
+                        start_ticket_draft = start_ticket_draft or (
+                            orchestration_tool_name == "start_ticket_draft"
+                        )
+                        is_ticket_request = True
+                        ticket_draft_flow = True
+                        lifecycle_action = None
+                        extracted_draft_fields = tool_arguments
+                        orchestration_applied = True
+                elif orchestration_tool_name == "show_options":
+                    may_show_options = bool(
+                        lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
+                        or is_faq_discovery
+                        or is_faq_category_discovery
+                        or is_faq_category_request
+                        or is_new_consultation
+                        or requested_faq_category_id is not None
+                        or selected_faq_category_id is not None
+                        or selected_faq_subcategory is not None
+                        or re.search(
+                            r"\b(?:opciones?|menu|ayuda|temas|categorias)\b",
+                            normalize_text(clean_content),
+                        )
+                    )
+                    if may_show_options:
+                        lifecycle_action = ChatbotSuggestedAction.SHOW_MENU
+                        ticket_draft_flow = False
+                        orchestration_applied = True
+                elif orchestration_tool_name in {"respond", "ask_clarification"}:
+                    orchestration_applied = True
+                elif orchestration_tool_name == "search_public_faq":
+                    query = tool_arguments.get("query")
+                    if isinstance(query, str) and self._supported_provider_query(
+                        query, clean_content
+                    ):
+                        search_query_override = query
+
+        if (
+            current_user is not None
+            and conversation.user_id is None
+            and (ticket_query_request is not None or ticket_draft_flow)
+        ):
+            self.link_user(session, conversation.id, current_user)
+
         user_message = self.conversations.add_message(
             session,
             ChatMessage(
@@ -657,7 +833,7 @@ class ChatbotService:
                 content=clean_content,
             ),
         )
-        search_content = clean_content
+        search_content = search_query_override or clean_content
         ai_user_message = clean_content
         if (
             is_unhelpful_follow_up
@@ -782,6 +958,7 @@ class ChatbotService:
                         else None
                     ),
                     initial_description=advisor_summary,
+                    extracted_fields=extracted_draft_fields,
                 )
                 if ticket_draft_reply.cancelled:
                     advisor_handoff_requested = False
@@ -826,7 +1003,7 @@ class ChatbotService:
                 if selected_match is not None:
                     matches = [selected_match]
                 else:
-                    matches = self._find_matches(session, clean_content)
+                    matches = self._find_matches(session, search_content)
                     previous_clarification = (conversation.context_json or {}).get(
                         "clarification_context", []
                     )
@@ -959,6 +1136,62 @@ class ChatbotService:
                 and lifecycle_action is None
             )
         )
+        orchestration_text_action = bool(
+            orchestration_outcome is not None
+            and orchestration_outcome.accepted
+            and orchestration_outcome.answer
+            and (
+                (
+                    orchestration_tool_name in {"respond", "ask_clarification"}
+                    and conversational_ai
+                )
+                or (
+                    orchestration_tool_name == "show_options"
+                    and (
+                        lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
+                        or bool(result.get("options"))
+                    )
+                )
+                or (
+                    orchestration_tool_name
+                    in {"start_ticket_draft", "update_ticket_draft"}
+                    and ticket_draft_reply is not None
+                    and self._draft_answer_matches_missing_field(
+                        orchestration_outcome.answer,
+                        ticket_draft_reply.draft,
+                    )
+                )
+                or (orchestration_tool_name is None and conversational_ai)
+            )
+        )
+        ticket_provider_data = result.get("ticket_provider_data")
+        authorized_ticket_data = (
+            tuple(item for item in ticket_provider_data if isinstance(item, dict))
+            if isinstance(ticket_provider_data, (list, tuple))
+            else ()
+        )
+        ticket_synthesis_requested = bool(
+            orchestration_applied
+            and orchestration_tool_name == "query_my_tickets"
+            and ticket_query_request is not None
+            and result.get("resolved") is True
+            and authorized_ticket_data
+        )
+        orchestration_primary_response = bool(
+            orchestration_should_run
+            and orchestration_intent
+            in {
+                ChatbotIntent.GREETING,
+                ChatbotIntent.SHOW_MENU,
+                ChatbotIntent.FAQ_DISCOVERY,
+                ChatbotIntent.FAQ_CATEGORY_DISCOVERY,
+                ChatbotIntent.FAQ_SUBCATEGORY_DISCOVERY,
+                ChatbotIntent.CLARIFICATION,
+                ChatbotIntent.OUT_OF_SCOPE,
+                ChatbotIntent.REQUEST_ADVISOR,
+            }
+            and search_query_override is None
+        )
         skip_ai_reasons = (
             (retrieval_unavailable, "KNOWLEDGE_UNAVAILABLE"),
             (is_banking_operation, "BANKING_OPERATION_OUT_OF_SCOPE"),
@@ -986,14 +1219,20 @@ class ChatbotService:
                 lifecycle_action == ChatbotSuggestedAction.END_CONVERSATION,
                 "CONVERSATION_LIFECYCLE",
             ),
+            (orchestration_text_action, "ORCHESTRATION_RESPONSE"),
+            (orchestration_primary_response, "ORCHESTRATION_RESPONSE"),
         )
         ai_skip_reason = next(
             (reason for should_skip, reason in skip_ai_reasons if should_skip),
             None,
         )
         skip_ai = ai_skip_reason is not None
+        ai_outcomes = [
+            orchestration_outcome for _ in (0,) if orchestration_outcome is not None
+        ]
+        ai_outcome = None
         if skip_ai:
-            result["ai_trace"] = {
+            deterministic_trace: dict[str, object] = {
                 "provider_called": False,
                 "routing_decision": "DETERMINISTIC_SKIP",
                 "routing_reason": ai_skip_reason,
@@ -1003,6 +1242,76 @@ class ChatbotService:
                     else {}
                 ),
             }
+            if orchestration_tool_name is not None:
+                deterministic_trace["orchestration_tool"] = orchestration_tool_name
+            if ticket_synthesis_requested:
+                orchestration_calls = self._provider_call_count(
+                    orchestration_outcome.trace
+                    if orchestration_outcome is not None
+                    else None
+                )
+                provider_calls_by_actor_last_hour = (
+                    self.conversations.count_recent_ai_provider_attempts_for_actor(
+                        session,
+                        user_id=conversation.user_id,
+                        anonymous_key=conversation.anonymous_key,
+                        since=datetime.now(UTC) - timedelta(hours=1),
+                    )
+                )
+                provider_calls_by_actor_last_hour += orchestration_calls
+                requests_last_minute = (
+                    self.conversations.count_recent_ai_provider_attempts(
+                        session,
+                        conversation.id,
+                        datetime.now(UTC) - timedelta(minutes=1),
+                    )
+                    + orchestration_calls
+                )
+                responses_in_conversation = (
+                    self.conversations.count_ai_provider_attempts(
+                        session, conversation.id
+                    )
+                    + orchestration_calls
+                )
+                provider_turn = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
+                    "referencia de ticket", clean_content
+                )
+                ai_outcome = self.rag.generate(
+                    conversation_id=conversation.id,
+                    user_message=provider_turn,
+                    matches=[],
+                    requests_last_minute=requests_last_minute,
+                    requests_by_actor_last_hour=provider_calls_by_actor_last_hour,
+                    responses_in_conversation=responses_in_conversation,
+                    grounding_required=False,
+                    conversation_context=self._provider_dialogue_context(
+                        recent_messages, saved_context, current_draft
+                    ),
+                    authorized_ticket_data=authorized_ticket_data,
+                    response_mode="ticket",
+                )
+                ai_outcomes.append(ai_outcome)
+                if ai_outcome.accepted:
+                    result["answer"] = ai_outcome.answer
+                    result["response_source"] = "AI"
+                    result["sources"] = []
+                    result["fallback_reason"] = None
+                elif ai_outcome.trace.get("provider_status") == "GENERATED":
+                    result["fallback_reason"] = ai_outcome.reason
+            elif orchestration_text_action and orchestration_outcome is not None:
+                result["answer"] = orchestration_outcome.answer
+                result["response_source"] = "AI"
+                result["sources"] = []
+                result["fallback_reason"] = None
+            if orchestration_tool_name is not None:
+                deterministic_trace["orchestration_tool"] = orchestration_tool_name
+            result["ai_trace"] = self._merge_ai_traces(
+                deterministic_trace,
+                orchestration_outcome.trace
+                if orchestration_outcome is not None
+                else None,
+                ai_outcome.trace if ai_outcome is not None else None,
+            )
         else:
             provider_calls_by_actor_last_hour = (
                 self.conversations.count_recent_ai_provider_attempts_for_actor(
@@ -1020,6 +1329,14 @@ class ChatbotService:
             responses_in_conversation = self.conversations.count_ai_provider_attempts(
                 session, conversation.id
             )
+            orchestration_calls = self._provider_call_count(
+                orchestration_outcome.trace
+                if orchestration_outcome is not None
+                else None
+            )
+            requests_last_minute += orchestration_calls
+            provider_calls_by_actor_last_hour += orchestration_calls
+            responses_in_conversation += orchestration_calls
             retrieval_trace: dict[str, object] = {}
             if not conversational_ai and self.rag.embedding_provider is not None:
                 retrieval_candidates = self._retrieval_candidates(session, matches)
@@ -1050,8 +1367,16 @@ class ChatbotService:
                     else None
                 ),
             )
+            ai_outcomes.append(ai_outcome)
             ai_outcome.trace.update(retrieval_trace)
-            result["ai_trace"] = ai_outcome.trace
+            if orchestration_tool_name is not None:
+                ai_outcome.trace["orchestration_tool"] = orchestration_tool_name
+            result["ai_trace"] = self._merge_ai_traces(
+                orchestration_outcome.trace
+                if orchestration_outcome is not None
+                else None,
+                ai_outcome.trace,
+            )
             if ai_outcome.accepted:
                 result["answer"] = ai_outcome.answer
                 result["response_source"] = "AI"
@@ -1088,12 +1413,15 @@ class ChatbotService:
                     result["available_actions"] = []
             elif ai_outcome.trace.get("provider_status") == "GENERATED":
                 result["fallback_reason"] = ai_outcome.reason
+
+        if ai_outcomes:
+            audit_outcome = ai_outcomes[-1]
             action = (
                 "AI_ACCEPTED"
-                if ai_outcome.accepted
+                if audit_outcome.accepted
                 else (
                     "AI_GUARDRAIL_REJECTED"
-                    if ai_outcome.reason
+                    if audit_outcome.reason
                     in {
                         "USER_INJECTION",
                         "SENSITIVE_REQUEST",
@@ -1117,23 +1445,24 @@ class ChatbotService:
                 resource_type="CONVERSATION",
                 resource_id=conversation.id,
                 target_user_id=conversation.user_id,
-                success=ai_outcome.accepted or action == "AI_FALLBACK",
-                error_code=None if ai_outcome.accepted else ai_outcome.reason,
+                success=audit_outcome.accepted or action == "AI_FALLBACK",
+                error_code=None if audit_outcome.accepted else audit_outcome.reason,
                 metadata={
-                    "provider": ai_outcome.trace.get("provider"),
-                    "model": ai_outcome.trace.get("model"),
-                    "source_count": len(ai_outcome.sources),
-                    "input_tokens": ai_outcome.trace.get("input_tokens"),
-                    "output_tokens": ai_outcome.trace.get("output_tokens"),
-                    "total_tokens": ai_outcome.trace.get("total_tokens"),
-                    "fallback": not ai_outcome.accepted,
-                    "fallback_reason": ai_outcome.trace.get("fallback_reason"),
-                    "validation_subrule": ai_outcome.trace.get("validation_subrule"),
-                    "response_source": ai_outcome.trace.get(
+                    "provider": audit_outcome.trace.get("provider"),
+                    "model": audit_outcome.trace.get("model"),
+                    "source_count": len(audit_outcome.sources),
+                    "input_tokens": result["ai_trace"].get("input_tokens"),
+                    "output_tokens": result["ai_trace"].get("output_tokens"),
+                    "total_tokens": result["ai_trace"].get("total_tokens"),
+                    "fallback": not audit_outcome.accepted,
+                    "fallback_reason": audit_outcome.trace.get("fallback_reason"),
+                    "validation_subrule": audit_outcome.trace.get("validation_subrule"),
+                    "response_source": result["ai_trace"].get(
                         "response_source",
-                        "AI" if ai_outcome.accepted else "DETERMINISTIC",
+                        "AI" if audit_outcome.accepted else "DETERMINISTIC",
                     ),
-                    "sources": ai_outcome.trace.get("sources", []),
+                    "sources": result["ai_trace"].get("sources", []),
+                    "tool_name": orchestration_tool_name,
                 },
                 dedupe_key=f"ai:{conversation.id}:{user_message.id}",
             )
@@ -1226,6 +1555,18 @@ class ChatbotService:
             ):
                 context["last_ticket_query_codes"] = stored_codes
                 context["last_ticket_query_index"] = stored_codes.index(selected_code)
+            elif isinstance(result.get("ticket_reference_codes"), list):
+                codes = [
+                    code
+                    for code in result["ticket_reference_codes"]
+                    if isinstance(code, str)
+                ]
+                if codes:
+                    context["last_ticket_query_codes"] = codes[:_MAX_CHAT_TICKETS]
+                    context["last_ticket_query_index"] = None
+                else:
+                    context.pop("last_ticket_query_codes", None)
+                    context.pop("last_ticket_query_index", None)
             elif ticket_query_payload.query_type in {
                 ChatbotTicketQueryType.TICKET_LIST,
                 ChatbotTicketQueryType.LATEST_TICKET,
@@ -1752,7 +2093,12 @@ class ChatbotService:
             if created_at.date() != today:
                 continue
             if trace.get("provider_called") is True:
-                provider_calls_today += 1
+                call_count = trace.get("provider_call_count")
+                provider_calls_today += (
+                    max(call_count, 0)
+                    if isinstance(call_count, int) and not isinstance(call_count, bool)
+                    else 1
+                )
             input_tokens = trace.get("input_tokens")
             output_tokens = trace.get("output_tokens")
             total_tokens = trace.get("total_tokens")
@@ -2854,6 +3200,8 @@ class ChatbotService:
             statuses = (
                 _OPEN_TICKET_STATUSES
                 if re.search(r"\b(?:abiertos?|activas?)\b", normalized)
+                else frozenset({TicketStatus.PENDIENTE_CLIENTE})
+                if re.search(r"\bpendientes?\b", normalized)
                 else None
             )
             return TicketQueryRequest(
@@ -2882,6 +3230,8 @@ class ChatbotService:
             statuses = (
                 _OPEN_TICKET_STATUSES
                 if re.search(r"\b(?:abiertos?|activas?)\b", normalized)
+                else frozenset({TicketStatus.PENDIENTE_CLIENTE})
+                if re.search(r"\bpendientes?\b", normalized)
                 else None
             )
             return TicketQueryRequest(
@@ -2892,6 +3242,8 @@ class ChatbotService:
             )
 
         if has_code_marker:
+            return cls._clarify_ticket_code_request(page)
+        if has_ticket_subject and re.search(r"\b(?:codigo|numero)\b", normalized):
             return cls._clarify_ticket_code_request(page)
         return None
 
@@ -2956,24 +3308,34 @@ class ChatbotService:
         cls,
         content: str,
         context: dict[str, object],
-        previous_bot_message: ChatMessage | None,
     ) -> TicketQueryRequest | None:
-        if previous_bot_message is None or not cls._is_ticket_query_intent(
-            previous_bot_message.intent
-        ):
-            return None
         normalized = normalize_text(content).strip(" .,!?:;¿¡")
-        is_other = bool(re.fullmatch(r"(?:y\s+)?el\s+otro", normalized))
-        is_reference = bool(
-            re.fullmatch(r"(?:ese|este|el)\s+(?:ticket|caso|solicitud)", normalized)
-        )
-        if not (is_other or is_reference):
-            return None
         codes = context.get("last_ticket_query_codes")
         if not isinstance(codes, list):
             return None
         safe_codes = [code for code in codes if isinstance(code, str)]
         if not safe_codes:
+            return None
+        asks_code = bool(re.search(r"\b(?:codigo|numero)\b", normalized))
+        asks_ticket_field = bool(
+            re.search(
+                r"\b(?:asunto|estado|situacion|seguimiento|codigo|numero)\b", normalized
+            )
+        )
+        is_other = bool(re.search(r"\b(?:el|la)\s+otro\b", normalized))
+        ordinal_match = re.search(
+            r"\b(?:el|la|del)?\s*(primer[oa]?|segund[oa]?|tercer[oa]?|"
+            r"cuart[oa]?|quint[oa]?|[1-5](?:ro|do|er|to)?)\b",
+            normalized,
+        )
+        is_reference = bool(
+            re.search(
+                r"\b(?:ese|este|el|la)\s+(?:ticket|caso|solicitud)\b|"
+                r"\b(?:el|la)\s+(?:primero|primera|segundo|segunda)\b",
+                normalized,
+            )
+        )
+        if not (asks_ticket_field or is_other or is_reference or ordinal_match):
             return None
         current_index = context.get("last_ticket_query_index")
         current_index = (
@@ -2981,7 +3343,42 @@ class ChatbotService:
             if isinstance(current_index, int) and 0 <= current_index < len(safe_codes)
             else None
         )
-        if is_other:
+        if ordinal_match is not None:
+            ordinal = normalize_text(ordinal_match.group(1))
+            ordinal_to_index = {
+                "primero": 0,
+                "primera": 0,
+                "primer": 0,
+                "1ro": 0,
+                "1er": 0,
+                "segundo": 1,
+                "segunda": 1,
+                "2do": 1,
+                "tercero": 2,
+                "tercera": 2,
+                "tercer": 2,
+                "3er": 2,
+                "3ro": 2,
+                "cuarto": 3,
+                "cuarta": 3,
+                "4to": 3,
+                "quinto": 4,
+                "quinta": 4,
+                "5to": 4,
+            }
+            index = ordinal_to_index.get(ordinal)
+            selected_index = index if index is not None else 0
+            if selected_index >= len(safe_codes):
+                return cls._clarify_ticket_code_request(1)
+        elif asks_code and len(safe_codes) > 1 and current_index is None:
+            clarification = cls._clarify_ticket_code_request(1)
+            return TicketQueryRequest(
+                action=clarification.action,
+                query_type=clarification.query_type,
+                clarification_action=ChatbotSuggestedAction.TICKET_STATUS,
+                clarification_query_type=ChatbotTicketQueryType.TICKET_STATUS,
+            )
+        elif is_other:
             if len(safe_codes) < 2:
                 return None
             selected_index = (
@@ -2989,11 +3386,367 @@ class ChatbotService:
             )
         else:
             selected_index = current_index if current_index is not None else 0
+        requested_fields = cls._requested_ticket_fields(
+            content,
+            default=frozenset({"CODE", "SUBJECT", "STATUS"}),
+        )
         return TicketQueryRequest(
             action=ChatbotSuggestedAction.TICKET_STATUS,
             query_type=ChatbotTicketQueryType.TICKET_STATUS,
             tracking_code=safe_codes[selected_index],
+            requested_fields=requested_fields,
         )
+
+    @staticmethod
+    def _provider_dialogue_context(
+        recent_messages: list[ChatMessage],
+        context: dict[str, object],
+        draft: ChatbotTicketDraft,
+    ) -> tuple[dict[str, str], ...]:
+        turns: list[dict[str, str]] = []
+        for message in recent_messages:
+            if message.sender_type != SenderType.USER:
+                continue
+            content = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
+                "referencia de ticket", message.content
+            )
+            content = minimize_provider_input(content).strip()[:300]
+            if content:
+                turns.append({"role": "user", "content": content})
+        turns = turns[-2:]
+        references = context.get("last_ticket_query_codes")
+        reference_count = (
+            sum(isinstance(code, str) for code in references)
+            if isinstance(references, list)
+            else 0
+        )
+        state_parts = [f"referencias_de_ticket_disponibles={reference_count}"]
+        if draft.status in {
+            ChatbotTicketDraftStatus.COLLECTING,
+            ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+        }:
+            missing = ",".join(item.value for item in draft.missing_fields)
+            state_parts.append(f"borrador_activo=true;campos_pendientes={missing}")
+        turns.append({"role": "state", "content": ";".join(state_parts)})
+        return tuple(turns)
+
+    @staticmethod
+    def _merge_ai_traces(*traces: dict[str, object] | None) -> dict[str, object]:
+        useful = [trace for trace in traces if isinstance(trace, dict)]
+        merged: dict[str, object] = {}
+        for trace in useful:
+            merged.update(trace)
+        call_count = 0
+        for trace in useful:
+            current = trace.get("provider_call_count")
+            if isinstance(current, int) and not isinstance(current, bool):
+                call_count += max(current, 0)
+            elif trace.get("provider_called") is True:
+                call_count += 1
+        merged["provider_call_count"] = call_count
+        merged["provider_called"] = call_count > 0
+        for token_field in ("input_tokens", "output_tokens", "total_tokens"):
+            values = [
+                trace.get(token_field)
+                for trace in useful
+                if isinstance(trace.get(token_field), int)
+                and not isinstance(trace.get(token_field), bool)
+            ]
+            if values:
+                merged[token_field] = sum(values)
+        costs = [
+            trace.get("estimated_cost_usd")
+            for trace in useful
+            if isinstance(trace.get("estimated_cost_usd"), int | float)
+            and not isinstance(trace.get("estimated_cost_usd"), bool)
+        ]
+        if costs:
+            merged["estimated_cost_usd"] = sum(float(value) for value in costs)
+        stages = [
+            {
+                "provider_status": trace.get("provider_status"),
+                "error_code": trace.get("error_code"),
+                "cache_hit": trace.get("cache_hit") is True,
+            }
+            for trace in useful
+            if trace.get("provider_called") is True
+            or trace.get("provider_status") is not None
+        ]
+        if stages:
+            merged["provider_stages"] = stages
+        return merged
+
+    @staticmethod
+    def _provider_call_count(trace: dict[str, object] | None) -> int:
+        if not isinstance(trace, dict):
+            return 0
+        count = trace.get("provider_call_count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            return max(count, 0)
+        return 1 if trace.get("provider_called") is True else 0
+
+    @staticmethod
+    def _draft_answer_matches_missing_field(
+        answer: str,
+        draft: ChatbotTicketDraft,
+    ) -> bool:
+        if draft.validation_errors or not draft.missing_fields:
+            return False
+        field = draft.missing_fields[0]
+        normalized = normalize_text(answer)
+        patterns = {
+            ChatbotTicketDraftField.CATEGORY_ID: r"\bcategoria\b",
+            ChatbotTicketDraftField.SUBJECT: r"\b(?:asunto|solicitar|necesitas)\b",
+            ChatbotTicketDraftField.DESCRIPTION: (
+                r"\b(?:describe|descripcion|problema|detalle)\b"
+            ),
+            ChatbotTicketDraftField.PRIORITY: r"\bprioridad\b",
+        }
+        pattern = patterns.get(field)
+        return bool(pattern and re.search(pattern, normalized))
+
+    @staticmethod
+    def _explicit_ticket_creation_request(content: str) -> bool:
+        normalized = normalize_text(content)
+        return bool(
+            re.search(
+                r"\b(?:crear|abrir|registrar|generar|iniciar|levantar|presentar)\b"
+                r".{0,45}\b(?:tickets?|solicitudes?|reclamos?|casos?)\b",
+                normalized,
+            )
+        )
+
+    @classmethod
+    def _ticket_query_from_tool_call(
+        cls,
+        content: str,
+        arguments: dict[str, object],
+        context: dict[str, object],
+        existing: TicketQueryRequest | None,
+    ) -> TicketQueryRequest | None:
+        operation = arguments.get("operation")
+        if operation not in {"LIST", "COUNT", "GET"}:
+            return None
+        normalized = cls.normalize_text(content)
+        asks_count = bool(re.search(r"\b(?:cuantos?|cuantas?)\b", normalized))
+        asks_list = bool(
+            re.search(
+                r"\b(?:muestrame|mostrar|lista|listar|ver|recientes?)\b|"
+                r"\b(?:mis|mios|mias)\s+(?:tickets?|solicitudes?|casos?)\b",
+                normalized,
+            )
+        )
+        asks_detail = bool(
+            re.search(
+                r"\b(?:codigo|numero|asunto|titulo|estado|situacion|seguimiento|"
+                r"descripcion|detalle|primero|primera|segundo|segunda|tercero|"
+                r"tercera|cuarto|cuarta|quinto|quinta)\b",
+                normalized,
+            )
+        )
+        if (
+            operation == "COUNT"
+            and not asks_count
+            or operation == "LIST"
+            and asks_count
+            or operation == "LIST"
+            and not asks_list
+            and existing is None
+            or operation == "GET"
+            and not asks_detail
+        ):
+            if existing is None:
+                return None
+            operation = (
+                "COUNT"
+                if existing.query_type == ChatbotTicketQueryType.TICKET_COUNT
+                else "LIST"
+                if existing.query_type
+                in {
+                    ChatbotTicketQueryType.TICKET_LIST,
+                    ChatbotTicketQueryType.LATEST_TICKET,
+                }
+                else "GET"
+            )
+
+        status_value = arguments.get("status")
+        statuses = cls._requested_tool_statuses(status_value, content, existing)
+        page_value = arguments.get("page")
+        page = (
+            existing.page
+            if existing is not None
+            else page_value
+            if isinstance(page_value, int) and 1 <= page_value <= 10_000
+            else 1
+        )
+        if existing is not None and existing.page != 1:
+            page = existing.page
+
+        if operation == "LIST":
+            return TicketQueryRequest(
+                action=ChatbotSuggestedAction.LIST_MY_TICKETS,
+                query_type=ChatbotTicketQueryType.TICKET_LIST,
+                statuses=statuses,
+                page=page,
+                requested_fields=frozenset({"CODE", "SUBJECT", "STATUS"}),
+            )
+        if operation == "COUNT":
+            return TicketQueryRequest(
+                action=ChatbotSuggestedAction.COUNT_MY_TICKETS,
+                query_type=ChatbotTicketQueryType.TICKET_COUNT,
+                statuses=statuses,
+                page=page,
+            )
+
+        direct_codes = list(
+            dict.fromkeys(
+                code.upper() for code in _TICKET_CODE_PATTERN.findall(content)
+            )
+        )
+        if len(direct_codes) > 1:
+            return cls._clarify_ticket_code_request(page)
+        stored_codes = context.get("last_ticket_query_codes")
+        stored_codes = (
+            [code for code in stored_codes if isinstance(code, str)]
+            if isinstance(stored_codes, list)
+            else []
+        )
+        tracking_code = direct_codes[0] if direct_codes else None
+        proposed_code = arguments.get("tracking_code")
+        if (
+            tracking_code is None
+            and isinstance(proposed_code, str)
+            and proposed_code in stored_codes
+        ):
+            tracking_code = proposed_code
+
+        position = arguments.get("position")
+        if not isinstance(position, int) or not 1 <= position <= _MAX_CHAT_TICKETS:
+            position = cls._ticket_position(content)
+        asks_code = bool(re.search(r"\b(?:codigo|numero)\b", normalized))
+        if tracking_code is None and position is not None and stored_codes:
+            if position <= len(stored_codes):
+                tracking_code = stored_codes[position - 1]
+            else:
+                return cls._clarify_ticket_code_request(page)
+        elif tracking_code is None and asks_code and len(stored_codes) == 1:
+            tracking_code = stored_codes[0]
+        elif tracking_code is None and asks_code and len(stored_codes) > 1:
+            clarification = cls._clarify_ticket_code_request(page)
+            return TicketQueryRequest(
+                action=clarification.action,
+                query_type=clarification.query_type,
+                page=page,
+            )
+        if tracking_code is None and existing is not None:
+            tracking_code = existing.tracking_code
+        if tracking_code is None:
+            return cls._clarify_ticket_code_request(
+                page,
+                action=ChatbotSuggestedAction.TICKET_STATUS,
+                query_type=ChatbotTicketQueryType.TICKET_STATUS,
+            )
+
+        requested_fields = cls._requested_ticket_fields(
+            content,
+            default=frozenset({"CODE", "SUBJECT", "STATUS"}),
+        )
+        proposed_fields = arguments.get("fields")
+        if isinstance(proposed_fields, list) and proposed_fields:
+            selected_fields = requested_fields & set(proposed_fields)
+            if selected_fields:
+                requested_fields = frozenset(selected_fields)
+        return TicketQueryRequest(
+            action=ChatbotSuggestedAction.TICKET_STATUS,
+            query_type=ChatbotTicketQueryType.TICKET_STATUS,
+            tracking_code=tracking_code,
+            page=page,
+            requested_fields=requested_fields,
+        )
+
+    @classmethod
+    def _requested_tool_statuses(
+        cls,
+        value: object,
+        content: str,
+        existing: TicketQueryRequest | None,
+    ) -> frozenset[TicketStatus] | None:
+        normalized = cls.normalize_text(content)
+        if existing is not None and existing.statuses is not None:
+            return existing.statuses
+        if value in (None, "ALL"):
+            if re.search(r"\bpendientes?\b", normalized):
+                return frozenset({TicketStatus.PENDIENTE_CLIENTE})
+            if re.search(r"\b(?:abiertos?|activas?)\b", normalized):
+                return _OPEN_TICKET_STATUSES
+            return None
+        if value == "OPEN":
+            return (
+                _OPEN_TICKET_STATUSES
+                if re.search(r"\b(?:abiertos?|activas?)\b", normalized)
+                else None
+            )
+        try:
+            selected = TicketStatus(str(value))
+        except ValueError:
+            return None
+        labels = {
+            TicketStatus.PENDIENTE_CLIENTE: r"\bpendientes?\b",
+        }
+        pattern = labels.get(selected, rf"\b{normalize_text(selected.value)}\b")
+        if re.search(pattern, normalized):
+            return frozenset({selected})
+        return None
+
+    @staticmethod
+    def _ticket_position(content: str) -> int | None:
+        normalized = normalize_text(content)
+        ordinals = (
+            (r"\b(?:el|la|del)?\s*primer[oa]?\b", 1),
+            (r"\b(?:el|la|del)?\s*segund[oa]?\b", 2),
+            (r"\b(?:el|la|del)?\s*tercer[oa]?\b", 3),
+            (r"\b(?:el|la|del)?\s*cuart[oa]?\b", 4),
+            (r"\b(?:el|la|del)?\s*quint[oa]?\b", 5),
+        )
+        return next(
+            (
+                position
+                for pattern, position in ordinals
+                if re.search(pattern, normalized)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _supported_provider_query(query: str, content: str) -> bool:
+        normalized_query = normalize_text(query).strip()
+        normalized_content = normalize_text(content)
+        if not normalized_query:
+            return False
+        if normalized_query in normalized_content:
+            return True
+        query_terms = {term for term in normalized_query.split() if len(term) > 3}
+        content_terms = set(normalized_content.split())
+        return bool(query_terms) and query_terms <= content_terms
+
+    @classmethod
+    def _requested_ticket_fields(
+        cls,
+        content: str,
+        *,
+        default: frozenset[str],
+    ) -> frozenset[str]:
+        normalized = cls.normalize_text(content)
+        fields: set[str] = set()
+        if re.search(r"\b(?:codigo|numero)\b", normalized):
+            fields.add("CODE")
+        if re.search(r"\b(?:asunto|titulo)\b", normalized):
+            fields.add("SUBJECT")
+        if re.search(r"\b(?:estado|situacion|seguimiento)\b", normalized):
+            fields.add("STATUS")
+        if re.search(r"\b(?:descripcion|detalle)\b", normalized):
+            fields.add("DESCRIPTION")
+        return frozenset(fields) if fields else default
 
     @staticmethod
     def _is_ticket_query_intent(intent: str | None) -> bool:
@@ -3053,11 +3806,7 @@ class ChatbotService:
             ChatbotTicketQueryType.TICKET_COUNT,
             ChatbotTicketQueryType.CLIENT_ACTION_REQUIRED,
         }:
-            page_size = (
-                1
-                if request.query_type == ChatbotTicketQueryType.TICKET_COUNT
-                else _MAX_CHAT_TICKETS
-            )
+            page_size = _MAX_CHAT_TICKETS
             result_page = self.tickets.list_mine(
                 session,
                 current_user,
@@ -3073,6 +3822,11 @@ class ChatbotService:
                 if request.statuses == _OPEN_TICKET_STATUSES:
                     answer = (
                         f"Tienes {total} ticket{'' if total == 1 else 's'} abiertos."
+                    )
+                elif request.statuses == frozenset({TicketStatus.PENDIENTE_CLIENTE}):
+                    answer = (
+                        f"Tienes {total} ticket{'' if total == 1 else 's'} "
+                        "pendiente" + ("." if total == 1 else "s.")
                     )
                 payload = ChatbotTicketQuery(
                     query_type=request.query_type,
@@ -3110,9 +3864,23 @@ class ChatbotService:
                         total_pages=result_page.total_pages,
                     ),
                 )
-            return self._ticket_query_result(
+            result = self._ticket_query_result(
                 answer, request.action, payload, resolved=True
             )
+            result["ticket_reference_codes"] = [
+                item.tracking_code for item in result_page.items
+            ]
+            if request.query_type == ChatbotTicketQueryType.TICKET_COUNT:
+                result["ticket_provider_data"] = ({"count": total},)
+            else:
+                requested_fields = request.requested_fields or frozenset(
+                    {"CODE", "SUBJECT", "STATUS"}
+                )
+                result["ticket_provider_data"] = tuple(
+                    self._ticket_provider_projection(item, requested_fields)
+                    for item in result_page.items
+                )
+            return result
 
         if request.query_type == ChatbotTicketQueryType.LATEST_TICKET:
             page_result = self.tickets.list_mine(
@@ -3129,9 +3897,24 @@ class ChatbotService:
                 if ticket is not None
                 else "No tienes tickets registrados."
             )
-            return self._ticket_query_result(
+            result = self._ticket_query_result(
                 answer, request.action, payload, resolved=True
             )
+            result["ticket_reference_codes"] = (
+                [ticket.tracking_code] if ticket is not None else []
+            )
+            result["ticket_provider_data"] = (
+                (
+                    self._ticket_provider_projection(
+                        ticket,
+                        request.requested_fields
+                        or frozenset({"CODE", "SUBJECT", "STATUS"}),
+                    ),
+                )
+                if ticket is not None
+                else ()
+            )
+            return result
 
         ticket = self._find_ticket_for_query(session, current_user, request)
         if ticket is None:
@@ -3160,9 +3943,18 @@ class ChatbotService:
                 f"El ticket {ticket.tracking_code} está en estado "
                 f"{card.status_label}. {self._ticket_assignment_message(ticket)}"
             )
-            return self._ticket_query_result(
+            result = self._ticket_query_result(
                 answer, request.action, payload, resolved=True
             )
+            result["ticket_reference_codes"] = [ticket.tracking_code]
+            result["ticket_provider_data"] = (
+                self._ticket_provider_projection(
+                    ticket,
+                    request.requested_fields
+                    or frozenset({"CODE", "SUBJECT", "STATUS"}),
+                ),
+            )
+            return result
 
         advisor_comments = [
             comment
@@ -3249,6 +4041,35 @@ class ChatbotService:
                 else ChatbotTicketAssignmentStatus.UNASSIGNED
             ),
         )
+
+    @staticmethod
+    def _status_filter_value(request: TicketQueryRequest) -> str:
+        if request.statuses is None:
+            return "ALL"
+        if request.statuses == _OPEN_TICKET_STATUSES:
+            return "OPEN"
+        if request.statuses == frozenset({TicketStatus.PENDIENTE_CLIENTE}):
+            return TicketStatus.PENDIENTE_CLIENTE.value
+        return next(iter(request.statuses)).value
+
+    @staticmethod
+    def _ticket_provider_projection(
+        ticket: TicketRead,
+        requested_fields: frozenset[str],
+    ) -> dict[str, object]:
+        projected: dict[str, object] = {}
+        if "CODE" in requested_fields:
+            projected["tracking_code"] = ticket.tracking_code
+        if "SUBJECT" in requested_fields and not detect_prompt_injection(
+            ticket.subject
+        ):
+            projected["subject"] = minimize_provider_input(ticket.subject)
+        if "STATUS" in requested_fields:
+            projected["status"] = ticket.status.value
+        if "DESCRIPTION" in requested_fields:
+            if not detect_prompt_injection(ticket.description):
+                projected["description"] = minimize_provider_input(ticket.description)
+        return projected
 
     @staticmethod
     def _ticket_assignment_message(ticket: TicketRead) -> str:
@@ -3522,7 +4343,7 @@ class ChatbotService:
         current_budget = remaining - previous_budget - assistant_budget
 
         def safe_public_text(value: str) -> str:
-            without_ticket_codes = _TICKET_CODE_PATTERN.sub(
+            without_ticket_codes = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
                 "[código de solicitud omitido]", value
             )
             return minimize_provider_input(without_ticket_codes)
