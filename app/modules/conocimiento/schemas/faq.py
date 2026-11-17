@@ -7,6 +7,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.modules.conocimiento.models.faq import FAQ
 
 FAQStatus = FAQ.Status
+_OFFICIAL_FAQ_SOURCE_HOSTS = frozenset(
+    {
+        "bancognb.com.pe",
+        "www.bancognb.com.pe",
+        "sbs.gob.pe",
+        "www.sbs.gob.pe",
+        "intranet2.sbs.gob.pe",
+    }
+)
 
 
 def _terms(value: object, *, allow_none: bool = False) -> list[str] | None:
@@ -243,18 +252,20 @@ def _official_source_url(value: str | None) -> str | None:
         port = parsed.port
     except ValueError as error:
         raise ValueError(
-            "La fuente debe ser una URL HTTPS oficial de Banco GNB"
+            "La fuente debe ser una URL HTTPS de un dominio oficial autorizado"
         ) from error
     if (
         parsed.scheme != "https"
-        or parsed.hostname not in {"www.bancognb.com.pe", "bancognb.com.pe"}
+        or parsed.hostname not in _OFFICIAL_FAQ_SOURCE_HOSTS
         or parsed.username is not None
         or parsed.password is not None
         or port is not None
         or not parsed.path.startswith("/")
         or any(character.isspace() for character in value)
     ):
-        raise ValueError("La fuente debe ser una URL HTTPS oficial de Banco GNB")
+        raise ValueError(
+            "La fuente debe ser una URL HTTPS de un dominio oficial autorizado"
+        )
     return value
 
 

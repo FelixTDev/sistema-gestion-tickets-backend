@@ -15,6 +15,9 @@ from app.modules.chatbot.services import chatbot_service as chatbot_service_modu
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.conocimiento.models.faq import FAQ
 from app.modules.conocimiento.models.feedback import FAQFeedback
+from app.modules.conocimiento.services.faq_content_policy import (
+    FAQ_CARD_REQUIREMENTS_ANSWER,
+)
 from app.modules.tickets.models.ticket import Ticket
 from app.modules.tickets.services import ticket_service as ticket_service_module
 from app.seed.demo_data import seed_demo_data
@@ -67,9 +70,7 @@ def test_high_confidence_unverified_faq_has_no_source_or_bank_specific_context(
     assert body["faq_id"]
     assert body["source_category"]
     assert body["sources"] == []
-    assert body["bot_message"]["content"] == (
-        "No tengo información verificada para responder esta consulta financiera."
-    )
+    assert body["bot_message"]["content"] == FAQ_CARD_REQUIREMENTS_ANSWER
     assert body["requires_clarification"] is False
     assert body["conversation_status"] == "ACTIVE"
 

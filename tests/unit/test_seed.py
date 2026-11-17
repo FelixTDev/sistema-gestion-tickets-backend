@@ -79,6 +79,10 @@ def test_demo_seed_populates_operational_data_without_forbidden_text():
         TicketHistory,
         User,
     )
+    from app.modules.conocimiento.services.faq_content_policy import (
+        APPROVED_SOURCELESS_ANSWERS,
+        FAQ_CLAIM_VS_REQUEST_ANSWER,
+    )
     from app.modules.tickets.models.ticket import (
         TicketPriority,
         TicketSource,
@@ -104,10 +108,10 @@ def test_demo_seed_populates_operational_data_without_forbidden_text():
             "messages": len(session.exec(select(ChatMessage)).all()),
         }
         tickets = session.exec(select(Ticket)).all()
+        faqs = session.exec(select(FAQ)).all()
         visible_values = []
         for model in (
             TicketCategory,
-            FAQ,
             Ticket,
             TicketComment,
             TicketHistory,
@@ -146,6 +150,23 @@ def test_demo_seed_populates_operational_data_without_forbidden_text():
         TicketSource.MANUAL,
         TicketSource.CHATBOT,
     }
+    assert {faq.question for faq in faqs if faq.is_active} == {
+        entry[1] for entry in DEMO_FAQS
+    }
+    assert "¿Cómo me afilio a Banca Móvil?" not in {
+        faq.question for faq in faqs if faq.is_active
+    }
+    assert all(
+        faq.answer in APPROVED_SOURCELESS_ANSWERS for faq in faqs if faq.is_active
+    )
+    claim_faq = next(
+        faq
+        for faq in faqs
+        if faq.question == "¿Cuál es la diferencia entre un reclamo y un requerimiento?"
+    )
+    assert claim_faq.answer == FAQ_CLAIM_VS_REQUEST_ANSWER
+    assert claim_faq.source_url is not None
+    assert claim_faq.source_verified_at is not None
     assert all(
         not any(
             term in value.casefold()

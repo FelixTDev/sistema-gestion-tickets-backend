@@ -29,10 +29,27 @@ from app.db.session import engine
 from app.modules.chatbot.models.conversation import ConversationStatus
 from app.modules.chatbot.models.message import SenderType
 from app.modules.conocimiento.services.faq_content_policy import (
-    SAFE_UNVERIFIED_CARD_ACTIVITY,
-    SAFE_UNVERIFIED_CLAIM_STATUS,
-    SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-    SAFE_UNVERIFIED_LOAN_APPROVAL,
+    APPROVED_SOURCELESS_ANSWERS,
+    FAQ_ACCOUNT_BALANCE_ANSWER,
+    FAQ_ACCOUNT_STATEMENT_ANSWER,
+    FAQ_ACCOUNT_TYPES_ANSWER,
+    FAQ_ADVISOR_CONTACT_ANSWER,
+    FAQ_BLOCKED_CARD_ANSWER,
+    FAQ_CARD_REQUIREMENTS_ANSWER,
+    FAQ_CLAIM_STATUS_ANSWER,
+    FAQ_CLAIM_VS_REQUEST_ANSWER,
+    FAQ_CREDIT_INFORMATION_ANSWER,
+    FAQ_FORMAL_CLAIM_ANSWER,
+    FAQ_FORMAL_CLAIM_TIMING_ANSWER,
+    FAQ_LOAN_APPROVAL_ANSWER,
+    FAQ_ONLINE_CARD_PURCHASES_ANSWER,
+    FAQ_PHONE_SUPPORT_ANSWER,
+    FAQ_PORTAL_ACCESS_ANSWER,
+    FAQ_PORTAL_PASSWORD_ANSWER,
+    FAQ_SAVINGS_ACCOUNT_ANSWER,
+    FAQ_UNRECOGNIZED_CARD_ACTIVITY_ANSWER,
+    SBS_CLAIMS_REGULATION_URL,
+    SBS_CLAIMS_REGULATION_VERIFIED_AT,
 )
 from app.modules.tickets.models.sla import SlaStatus
 from app.modules.tickets.models.ticket import TicketPriority, TicketSource, TicketStatus
@@ -75,134 +92,132 @@ DEMO_FAQS = (
     (
         "TARJETAS",
         "¿Qué requisitos necesito para solicitar una tarjeta?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "tarjeta,requisitos,solicitud,crédito,debito",
+        FAQ_CARD_REQUIREMENTS_ANSWER,
+        "tarjeta,requisitos,solicitud,solicitar,emisor,producto,condiciones,costos,evaluación",
         None,
     ),
     (
         "BANCA_DIGITAL",
-        "¿Cómo ingreso a la banca digital?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "banca,aplicacion,acceso,ingreso,clave,contraseña,afiliación",
+        "¿Cómo ingreso al portal de solicitudes?",
+        FAQ_PORTAL_ACCESS_ANSWER,
+        "portal,solicitudes,ingresar,acceso,cuenta,banca,digital,aplicación,afiliación",
         None,
     ),
     (
         "CUENTAS",
         "¿Cómo consulto el saldo de mi cuenta?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "cuenta,saldo,movimientos,consulta,ahorros",
+        FAQ_ACCOUNT_BALANCE_ANSWER,
+        "cuenta,saldo,movimientos,consulta,consultar,ver",
         None,
     ),
     (
         "TARJETAS",
         "¿Qué hago si mi tarjeta está bloqueada?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "bloqueada,bloqueo,desbloqueo,perdida,robo,urgente",
+        FAQ_BLOCKED_CARD_ANSWER,
+        "tarjeta,bloqueada,bloqueo,desbloqueo,perdida,robo",
         None,
     ),
     (
         "CREDITOS",
         "¿Cómo solicito información sobre un crédito?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "credito,crédito,prestamo,préstamo,cuota,requisitos,tasa",
+        FAQ_CREDIT_INFORMATION_ANSWER,
+        "credito,crédito,prestamo,préstamo,oferta,condiciones,costos",
         None,
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cómo consulto el estado de un reclamo?",
-        SAFE_UNVERIFIED_CLAIM_STATUS,
-        "reclamo,estado,seguimiento,incidencia,queja,código",
+        FAQ_CLAIM_STATUS_ANSWER,
+        "reclamo,estado,seguimiento,incidencia,queja,código,solicitud",
         None,
     ),
     (
         "CUENTAS",
         "¿Cómo solicito un estado de cuenta?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        FAQ_ACCOUNT_STATEMENT_ANSWER,
         "estado,cuenta,documento,periodo,duplicado,extracto",
         None,
     ),
     (
         "SOLICITUDES_INFORMACION",
         "¿Cómo puedo contactar a un asesor?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        FAQ_ADVISOR_CONTACT_ANSWER,
         "asesor,atencion,ayuda,telefono,contacto",
         None,
     ),
     (
         "TARJETAS",
         "¿Puedo habilitar o deshabilitar compras por internet en mi tarjeta?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        FAQ_ONLINE_CARD_PURCHASES_ANSWER,
         "tarjeta,internet,compras,habilitar,deshabilitar,configurar,seguridad",
         None,
     ),
     (
         "BANCA_DIGITAL",
-        "¿Cómo me afilio a Banca Móvil?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "banca movil,activar,acceso,afiliacion,registro,aplicacion,app",
-        None,
-    ),
-    (
-        "BANCA_DIGITAL",
-        "¿Qué hago si olvidé mi contraseña de Banca Móvil?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "olvide,olvidé,contraseña,clave,recuperar,restablecer,banca movil",
+        "¿Qué hago si olvidé mi contraseña del portal?",
+        FAQ_PORTAL_PASSWORD_ANSWER,
+        (
+            "contraseña,clave,olvidé,recuperar,restablecer,portal,acceso,"
+            "aplicación,banca móvil"
+        ),
         None,
     ),
     (
         "CUENTAS",
-        "¿Qué necesito para abrir una Cuenta de Ahorro?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "cuenta ahorro abrir requisitos documento dni soles dolares",
+        "¿Qué necesito para abrir una cuenta de ahorro?",
+        FAQ_SAVINGS_ACCOUNT_ANSWER,
+        "cuenta ahorro abrir requisitos proveedor condiciones",
         None,
     ),
     (
         "CUENTAS",
         "¿Qué tipos de cuentas ofrece una entidad financiera?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "tipos cuenta corriente sueldo cts ahorro plazo opciones",
+        FAQ_ACCOUNT_TYPES_ANSWER,
+        "tipos cuentas depósitos disponibilidad costos condiciones proveedor",
         None,
     ),
     (
         "CREDITOS",
         "¿El asistente puede decirme si me aprobarán un préstamo?",
-        SAFE_UNVERIFIED_LOAN_APPROVAL,
-        "prestamo credito aprobacion evaluar oferta calificacion",
+        FAQ_LOAN_APPROVAL_ANSWER,
+        "préstamo crédito aprobación evaluar anticipar evaluación",
         None,
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cuál es la diferencia entre un reclamo y un requerimiento?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "reclamo requerimiento diferencia consulta insatisfaccion solicitud",
+        FAQ_CLAIM_VS_REQUEST_ANSWER,
+        "reclamo requerimiento diferencia consulta información acción insatisfacción",
+        SBS_CLAIMS_REGULATION_URL,
+        SBS_CLAIMS_REGULATION_VERIFIED_AT,
         None,
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cómo presento un reclamo formal ante una entidad financiera?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        FAQ_FORMAL_CLAIM_ANSWER,
         "presentar reclamo formal formulario queja canal",
         None,
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cuánto tarda la respuesta de un reclamo formal?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        FAQ_FORMAL_CLAIM_TIMING_ANSWER,
         "plazo tiempo respuesta reclamo requerimiento dias habiles demora",
         None,
     ),
     (
         "SOLICITUDES_INFORMACION",
-        "¿Cuál es el horario de Banca por Teléfono?",
-        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
-        "horario telefono atencion canal",
+        "¿El portal ofrece atención telefónica?",
+        FAQ_PHONE_SUPPORT_ANSWER,
+        "horario teléfono banca canal atención llamada transferencia",
         None,
     ),
     (
         "TARJETAS",
         "¿Qué hago si no reconozco una operación con mi tarjeta?",
-        SAFE_UNVERIFIED_CARD_ACTIVITY,
-        "operacion no reconocida tarjeta fraude consumo desconocido reclamo",
+        FAQ_UNRECOGNIZED_CARD_ACTIVITY_ANSWER,
+        "operación no reconocida tarjeta fraude consumo cargo emisor",
         None,
     ),
 )
@@ -211,7 +226,25 @@ LEGACY_FAQ_QUESTIONS = {
     "¿Qué requisitos necesito para solicitar una tarjeta?": (
         "¿Qué requisitos necesito para una tarjeta?"
     ),
+    "¿Cómo ingreso al portal de solicitudes?": "¿Cómo ingreso a la banca digital?",
+    "¿Qué hago si olvidé mi contraseña del portal?": (
+        "¿Qué hago si olvidé mi contraseña de Banca Móvil?"
+    ),
+    "¿Qué necesito para abrir una cuenta de ahorro?": (
+        "¿Qué necesito para abrir una Cuenta de Ahorro?"
+    ),
+    "¿Qué tipos de cuentas ofrece una entidad financiera?": (
+        "¿Qué tipos de cuentas ofrece Banco GNB?"
+    ),
+    "¿Cómo presento un reclamo formal ante una entidad financiera?": (
+        "¿Cómo presento un reclamo formal a Banco GNB?"
+    ),
+    "¿El portal ofrece atención telefónica?": (
+        "¿Cuál es el horario de Banca por Teléfono?"
+    ),
 }
+
+RETIRED_FAQ_QUESTIONS = (("BANCA_DIGITAL", "¿Cómo me afilio a Banca Móvil?"),)
 
 OPERATIONAL_TICKETS = (
     {
@@ -363,7 +396,8 @@ def _clean_existing_visible_text(session: Session) -> None:
         row.description = _clean_visible_text(row.description) or row.description
     for row in session.exec(select(FAQ)).all():
         row.question = _clean_visible_text(row.question) or row.question
-        row.answer = _clean_visible_text(row.answer) or row.answer
+        if row.answer not in APPROVED_SOURCELESS_ANSWERS:
+            row.answer = _clean_visible_text(row.answer) or row.answer
         row.keywords = _clean_visible_text(row.keywords) or row.keywords
     for row in session.exec(select(Ticket)).all():
         row.subject = _clean_visible_text(row.subject) or row.subject
@@ -908,18 +942,27 @@ def _seed_faq_catalog(
     for entry in DEMO_FAQS:
         category_name, question, answer, keywords, source_url = entry[:5]
         source_verified_at = entry[5] if len(entry) > 5 else None
-        faq = session.exec(select(FAQ).where(FAQ.question == question)).first()
+        category_id = categories[category_name].id
+        faq = session.exec(
+            select(FAQ).where(
+                FAQ.category_id == category_id,
+                FAQ.question == question,
+            )
+        ).first()
         legacy_faq = None
         if question in LEGACY_FAQ_QUESTIONS:
             legacy_faq = session.exec(
-                select(FAQ).where(FAQ.question == LEGACY_FAQ_QUESTIONS[question])
+                select(FAQ).where(
+                    FAQ.category_id == category_id,
+                    FAQ.question == LEGACY_FAQ_QUESTIONS[question],
+                )
             ).first()
             if faq is None:
                 faq = legacy_faq
             elif legacy_faq is not None and legacy_faq.id != faq.id:
-                legacy_faq.is_active = False
+                _archive_seed_faq(session, legacy_faq, supervisor.id)
         values = {
-            "category_id": categories[category_name].id,
+            "category_id": category_id,
             "title": question,
             "question": question,
             "answer": answer,
@@ -998,7 +1041,65 @@ def _seed_faq_catalog(
                     changed_at=faq.updated_at,
                 )
             )
+    for category_name, question in RETIRED_FAQ_QUESTIONS:
+        retired_rows = session.exec(
+            select(FAQ)
+            .join(TicketCategory, FAQ.category_id == TicketCategory.id)
+            .where(
+                TicketCategory.name == category_name,
+                FAQ.question == question,
+            )
+        ).all()
+        for faq in retired_rows:
+            _archive_seed_faq(session, faq, supervisor.id)
     return len(DEMO_FAQS)
+
+
+def _archive_seed_faq(session: Session, faq: FAQ, actor_id: str) -> None:
+    if faq.status == FAQ.Status.ARCHIVED and not faq.is_active:
+        return
+    now = datetime.now(UTC)
+    faq.status = FAQ.Status.ARCHIVED
+    faq.is_active = False
+    faq.unpublished_at = now
+    faq.version += 1
+    faq.updated_by = actor_id
+    faq.updated_at = now
+    session.add(faq)
+    version_exists = session.exec(
+        select(FAQVersion).where(
+            FAQVersion.faq_id == faq.id,
+            FAQVersion.version == faq.version,
+        )
+    ).first()
+    if version_exists is None:
+        session.add(
+            FAQVersion(
+                faq_id=faq.id,
+                version=faq.version,
+                category_id=faq.category_id,
+                title=faq.title,
+                question=faq.question,
+                answer=faq.answer,
+                summary=faq.summary,
+                keywords=faq.keywords,
+                tags=faq.tags,
+                synonyms=faq.synonyms,
+                normalized_content=faq.normalized_content,
+                intent=faq.intent,
+                source_url=faq.source_url,
+                source_verified_at=faq.source_verified_at,
+                status=faq.status,
+                priority=faq.priority,
+                display_order=faq.display_order,
+                is_active=faq.is_active,
+                published_at=faq.published_at,
+                unpublished_at=faq.unpublished_at,
+                changed_by=actor_id,
+                action="ARCHIVED",
+                changed_at=now,
+            )
+        )
 
 
 def _same_seed_value(existing: object, expected: object) -> bool:

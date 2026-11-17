@@ -57,6 +57,7 @@ from app.modules.chatbot.schemas.chatbot import (
     ConversationRead,
 )
 from app.modules.chatbot.services.ai_tools import available_chatbot_tools
+from app.modules.chatbot.services.faq_aliases import FAQ_SEARCH_ALIASES
 from app.modules.chatbot.services.guardrails import (
     detect_prompt_injection,
     has_verified_official_source,
@@ -2345,6 +2346,7 @@ class ChatbotService:
                         *self._keywords(faq.keywords),
                         *self._json_terms(faq.tags),
                         *self._json_terms(faq.synonyms),
+                        *FAQ_SEARCH_ALIASES.get(faq.question, ()),
                     ]
                 )
             )

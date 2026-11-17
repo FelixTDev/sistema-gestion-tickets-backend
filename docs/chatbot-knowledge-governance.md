@@ -20,8 +20,9 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
   clasifican como baja confianza ni ofrecen un ticket por sí solos. La respuesta
   aclara que se trata de un prototipo académico y no de un canal bancario oficial.
 - El menú principal expone IDs estables para acciones reales. La navegación FAQ
-  presenta solo categorías con preguntas publicadas, activas y con fuente oficial
-  verificada; la selección de categoría ofrece las FAQ de esa categoría.
+  presenta solo categorías con preguntas publicadas y activas que tienen una
+  fuente oficial verificada o una respuesta exacta incluida en la política
+  explícita de contenido seguro; la selección ofrece las FAQ elegibles.
 - `FAQ_DISCOVERY` es una intención distinta de `SHOW_MENU`. Las categorías FAQ y
   las preguntas usan `ui` tipado con IDs; el servidor solo acepta IDs ofrecidos
   en el estado vigente y los vuelve a validar antes de procesarlos.
@@ -121,45 +122,39 @@ plazos como universales cuando dependan de evaluación o cambien con el tiempo.
 
 ## Fuente y vigencia de cada FAQ
 
-`faqs` y `faq_versions` guardan `source_url` y `source_verified_at`. El contrato
-acepta únicamente HTTPS en `bancognb.com.pe` o `www.bancognb.com.pe`; no acepta
-subdominios imitadores, credenciales, puertos ni HTTP. El chatbot devuelve
-`sources[]` con título, categoría, URL y fecha de verificación para que el
-frontend pueda mostrar la atribución.
+`faqs` y `faq_versions` guardan `source_url` y `source_verified_at`. La
+validación mantiene una lista explícita de hosts HTTPS oficiales y rechaza
+credenciales, puertos, HTTP y dominios imitadores. Cuando una respuesta
+generada usa una FAQ con fuente verificada, el contrato actual devuelve
+`sources[]` con título, categoría, URL y fecha de verificación.
 
-Toda FAQ nueva o modificada debe:
+El catálogo demo tiene 18 respuestas revisadas. Solo la FAQ sobre la diferencia
+general entre reclamo y requerimiento usa fuente externa; apunta al texto
+consolidado del Reglamento de Gestión de Reclamos y Requerimientos de la SBS:
 
-1. Citar una página oficial que respalde la respuesta; registrar fecha de
-   verificación en UTC.
-2. Usar lenguaje de orientación y enlazar al canal oficial para condiciones
-   variables, evaluación crediticia, disponibilidad, tarifas y requisitos.
-3. Excluir credenciales, códigos de un solo uso, números completos de tarjeta,
-   datos de cuenta, información de clientes, decisiones financieras o promesas
-   de resultado.
-4. Ser revisada y publicada por un Supervisor. Si cambia el contenido publicado,
-   queda inactiva en estado `REVIEW` hasta que se revise y publique de nuevo.
-5. Si cambia la URL, su fecha de verificación previa se elimina, a menos que la
-   nueva fuente se vuelva a verificar expresamente en la misma actualización.
-6. Mantener versiones históricas para auditoría; una actualización no debe
-   sobrescribir la procedencia de la versión anterior.
+<https://intranet2.sbs.gob.pe/dv_int_cn/2230/v6.0/Adjuntos/4036-2022.R%20.pdf>
 
-Las URLs de las FAQs iniciales se seleccionaron de páginas oficiales del Banco:
+El catálogo registra la verificación de esa fuente el 17 de noviembre de 2026.
+En el contrato público existente, el registro de esa FAQ expone `source_url` y
+`source_verified_at`; una respuesta generada y validada puede incluir la fuente
+SBS en el arreglo `sources[]`. La forma de estos campos no cambia y no requiere
+cambios de interfaz.
 
-| Tema | Fuente |
-| --- | --- |
-| Tarjetas | <https://www.bancognb.com.pe/inicio/banca-personas/tarjetas> |
-| Bloqueo de tarjeta/canal | <https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta-24hr> |
-| Cuentas de ahorro | <https://www.bancognb.com.pe/inicio/banca-personas/cuentas/cuenta-ahorro> |
-| Cuentas | <https://www.bancognb.com.pe/inicio/banca-personas/cuentas> |
-| Banca Móvil y guías | <https://www.bancognb.com.pe/inicio/canales/canales-digitales/banca-movil-personas> |
-| Banca por Teléfono y horarios | <https://www.bancognb.com.pe/inicio/canales/banca-por-telefono> |
-| Préstamo personal | <https://www.bancognb.com.pe/inicio/banca-personas/prestamos/prestamo-personal> |
-| Reclamos y requerimientos | <https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta> |
-| Reclamo formal | <https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones> |
+Las demás respuestas demo sin fuente solo están disponibles si coinciden
+exactamente con una respuesta aprobada en `faq_content_policy.py`. Esa lista no
+autoriza respuestas arbitrarias ni modifica el fallback para preguntas no
+reconocidas. Los alias de búsqueda de acceso digital, contraseñas y teléfono
+viven en el servicio del chatbot, no como títulos ni sinónimos públicos del FAQ.
+La antigua pregunta de afiliación se conserva archivada y deja de mostrarse en
+el catálogo público.
 
-Las páginas pueden cambiar después de su revisión. La fecha guardada es una
-señal de procedencia, no una garantía de vigencia futura; el responsable debe
-volver a verificar el contenido antes de mantenerlo publicado.
+Las FAQs creadas o editadas por el flujo administrativo deben citar una fuente
+oficial que respalde la respuesta y registrar su fecha de verificación en UTC.
+Los cambios administrativos publicados pasan a revisión; la migración de
+catálogo crea una nueva versión de cada FAQ afectada y conserva las versiones
+históricas previas. La fecha guardada es una señal de procedencia, no una garantía
+de vigencia futura; el responsable debe volver a verificar la fuente antes de
+mantener la respuesta publicada.
 
 ## Feedback y medición
 

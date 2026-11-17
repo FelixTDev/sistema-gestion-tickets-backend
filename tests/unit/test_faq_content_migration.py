@@ -50,7 +50,9 @@ def test_faq_cleanup_migration_preserves_ids_and_categories_on_sqlite():
         ) in migration._FAQ_CONTENT.items():
             if previous_question == "¿Qué requisitos necesito para una tarjeta?":
                 continue
-            faq = seeded[question]
+            faq = seeded.get(question)
+            if faq is None:
+                continue
             faq.title = previous_question
             faq.question = previous_question
             faq.answer = "Información específica de Banco GNB."

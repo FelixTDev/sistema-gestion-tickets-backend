@@ -225,7 +225,15 @@ _EMERGENCY_LINE_CODE_PATTERN = re.compile(
     r"\b(?:l[ií]nea\s+(?:de\s+)?emergencia)\s+(?P<number>\d{3,6})\b",
     re.IGNORECASE,
 )
-_OFFICIAL_SOURCE_HOSTS = frozenset({"bancognb.com.pe", "www.bancognb.com.pe"})
+_OFFICIAL_SOURCE_HOSTS = frozenset(
+    {
+        "bancognb.com.pe",
+        "www.bancognb.com.pe",
+        "sbs.gob.pe",
+        "www.sbs.gob.pe",
+        "intranet2.sbs.gob.pe",
+    }
+)
 _GROUNDING_STOP_WORDS = frozenset(
     {
         "a",

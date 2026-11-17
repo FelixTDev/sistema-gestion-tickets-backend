@@ -9,6 +9,9 @@ from app.db import models  # noqa: F401
 from app.db.session import get_session
 from app.main import app
 from app.modules.conocimiento.models.faq import FAQ
+from app.modules.conocimiento.services.faq_content_policy import (
+    SBS_CLAIMS_REGULATION_URL,
+)
 from app.modules.tickets.models.ticket import Ticket
 from app.seed.demo_data import seed_demo_data
 
@@ -93,8 +96,15 @@ def test_public_active_faq_api_does_not_return_gnb_references(chatbot_client):
         serialized = str(faq).casefold()
         assert "gnb" not in serialized
         assert "bancognb.com.pe" not in serialized
-        assert faq["source_url"] is None
-        assert faq["source_verified_at"] is None
+        if (
+            faq["question"]
+            == "¿Cuál es la diferencia entre un reclamo y un requerimiento?"
+        ):
+            assert faq["source_url"] == SBS_CLAIMS_REGULATION_URL
+            assert faq["source_verified_at"] is not None
+        else:
+            assert faq["source_url"] is None
+            assert faq["source_verified_at"] is None
 
 
 def test_chatbot_does_not_retrieve_removed_bank_specific_faq_content(chatbot_client):

@@ -22,6 +22,9 @@ from app.modules.chatbot.services.rag_service import RAGService, _RuntimeState
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.conocimiento.models.faq import FAQ
 from app.modules.conocimiento.repositories.faq_repository import FAQRepository
+from app.modules.conocimiento.services.faq_content_policy import (
+    FAQ_CARD_REQUIREMENTS_ANSWER,
+)
 from app.modules.tickets.models.ticket import Ticket
 from app.modules.tickets.services import ticket_service as ticket_service_module
 from app.modules.tickets.services.ticket_service import TicketService
@@ -472,9 +475,7 @@ def test_referential_follow_up_to_unverified_faq_keeps_safe_answer(
     assert follow_up.status_code == 200
     assert provider.requests == []
     assert follow_up.json()["sources"] == []
-    assert "información verificada" in (
-        follow_up.json()["bot_message"]["content"].casefold()
-    )
+    assert follow_up.json()["bot_message"]["content"] == FAQ_CARD_REQUIREMENTS_ANSWER
 
 
 def test_short_new_topic_does_not_inherit_unrelated_conversation_context(
@@ -523,7 +524,7 @@ def test_unverified_faqs_return_only_a_safe_general_answer(phase13_client) -> No
     assert body["sources"] == []
     assert body["offers_ticket"] is False
     answer = body["bot_message"]["content"].casefold()
-    assert "información verificada" in answer
+    assert answer == FAQ_CARD_REQUIREMENTS_ANSWER.casefold()
     assert "selfie" not in answer
     assert "teléfono" not in answer
 

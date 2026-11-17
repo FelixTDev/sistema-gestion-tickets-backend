@@ -21,6 +21,11 @@ from app.modules.chatbot.services.chatbot_service import ChatbotService
 from app.modules.chatbot.services.embedding_provider import EmbeddingGenerationResult
 from app.modules.chatbot.services.rag_service import RAGService, _RuntimeState
 from app.modules.conocimiento.models.faq import FAQ
+from app.modules.conocimiento.services.faq_content_policy import (
+    FAQ_CARD_REQUIREMENTS_ANSWER,
+    FAQ_PORTAL_ACCESS_ANSWER,
+    FAQ_PORTAL_PASSWORD_ANSWER,
+)
 from app.seed.demo_data import seed_demo_data
 
 
@@ -281,9 +286,7 @@ def test_unverified_faq_uses_safe_answer_without_rag_source(
     assert body["response_source"] == "DETERMINISTIC"
     assert body["sources"] == []
     assert provider.calls == []
-    assert body["bot_message"]["content"] == (
-        "No tengo información verificada para responder esta consulta financiera."
-    )
+    assert body["bot_message"]["content"] == FAQ_CARD_REQUIREMENTS_ANSWER
 
     with Session(engine) as session:
         message = session.exec(
@@ -305,7 +308,7 @@ def test_password_faq_without_source_omits_unverified_recovery_steps(
 ) -> None:
     client, engine = phase12_client
     source_id = faq_id_for_question(
-        engine, "¿Qué hago si olvidé mi contraseña de Banca Móvil?"
+        engine, "¿Qué hago si olvidé mi contraseña del portal?"
     )
     provider = FakeAIProvider(
         AIGenerationResult.generated(
@@ -338,6 +341,8 @@ def test_password_faq_without_source_omits_unverified_recovery_steps(
     answer = body["bot_message"]["content"].casefold()
     assert body["response_source"] == "DETERMINISTIC"
     assert body["sources"] == []
+    assert body["faq_id"] == source_id
+    assert body["bot_message"]["content"] == FAQ_PORTAL_PASSWORD_ANSWER
     assert provider.calls == []
     assert "selfie" not in answer
     assert "dni" not in answer
@@ -534,7 +539,7 @@ def test_mobile_banking_faq_without_source_is_not_retrieved_by_rag(
 ) -> None:
     client, engine = phase12_client
     question = "¿Cómo me afilio a Banca Móvil?"
-    source_id = faq_id_for_question(engine, question)
+    source_id = faq_id_for_question(engine, "¿Cómo ingreso al portal de solicitudes?")
     provider = FakeAIProvider(
         AIGenerationResult.generated(
             text="Sigue el procedimiento vigente de afiliación a Banca Móvil.",
@@ -561,9 +566,7 @@ def test_mobile_banking_faq_without_source_is_not_retrieved_by_rag(
     assert body["sources"] == []
     assert provider.calls == []
     assert body["faq_id"] == source_id
-    assert body["bot_message"]["content"] == (
-        "No tengo información verificada para responder esta consulta financiera."
-    )
+    assert body["bot_message"]["content"] == FAQ_PORTAL_ACCESS_ANSWER
 
 
 def test_updated_faq_does_not_generate_specific_content_without_source(
@@ -599,7 +602,7 @@ def test_updated_faq_does_not_generate_specific_content_without_source(
     assert "automáticamente" not in body["bot_message"]["content"].casefold()
 
 
-def test_hybrid_retrieval_reaches_existing_conversation_endpoint(
+def test_unreviewed_faq_is_not_used_for_hybrid_retrieval(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
@@ -655,14 +658,20 @@ def test_hybrid_retrieval_reaches_existing_conversation_endpoint(
     assert payload["response_source"] != "AI"
     assert payload["sources"] == []
     assert payload["faq_id"] is None
-    assert len(provider.calls) == 1
-    assert provider.calls[0].context == ()
-    assert provider.calls[0].grounding_required is False
+    assert provider.calls == []
     assert (
         "Usa el canal oficial descrito para bloquear la tarjeta perdida."
         not in (payload["bot_message"]["content"])
     )
-    assert embeddings.calls == []
+    assert embeddings.calls
+    embedded_text = "\n".join(
+        content for batch in embeddings.calls for content in batch
+    )
+    assert "semantic_target_marker" not in embedded_text
+    assert "Como bloquear una tarjeta perdida" not in embedded_text
+    assert "Usa el canal oficial descrito para bloquear la tarjeta perdida." not in (
+        embedded_text
+    )
 
 
 @pytest.mark.parametrize(

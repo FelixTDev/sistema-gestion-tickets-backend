@@ -21,6 +21,9 @@ from app.modules.chatbot.services.ai_provider import (
 from app.modules.chatbot.services.chatbot_service import ChatbotService
 from app.modules.chatbot.services.rag_service import RAGService, _RuntimeState
 from app.modules.conocimiento.models.category import TicketCategory
+from app.modules.conocimiento.services.faq_content_policy import (
+    FAQ_CARD_REQUIREMENTS_ANSWER,
+)
 from app.modules.tickets.models.comment import TicketComment
 from app.modules.tickets.models.history import TicketHistory
 from app.modules.tickets.models.ticket import (
@@ -1311,9 +1314,7 @@ def test_ticket_query_privacy_and_openapi_document_the_typed_contract(
     )
     assert follow_up.status_code == 200
     assert follow_up.json()["sources"] == []
-    assert "información verificada" in (
-        follow_up.json()["bot_message"]["content"].casefold()
-    )
+    assert follow_up.json()["bot_message"]["content"] == FAQ_CARD_REQUIREMENTS_ANSWER
     assert all(
         "TCK-AI-PRIVATE-001" not in repr(provider_request)
         and "Comentario privado para comprobar que no se envía a IA"
