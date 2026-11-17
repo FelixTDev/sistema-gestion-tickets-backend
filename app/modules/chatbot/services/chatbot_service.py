@@ -70,6 +70,7 @@ from app.modules.chatbot.services.ticket_draft_service import (
 from app.modules.conocimiento.models.faq import FAQ
 from app.modules.conocimiento.models.feedback import FAQFeedback
 from app.modules.conocimiento.repositories.faq_repository import FAQRepository
+from app.modules.conocimiento.services.faq_content_policy import is_safe_unverified_faq
 from app.modules.notificaciones.models.notification import NotificationType
 from app.modules.notificaciones.services.notification_service import NotificationService
 from app.modules.tickets.models.ticket import TicketPriority, TicketSource, TicketStatus
@@ -2205,7 +2206,7 @@ class ChatbotService:
             return []
         matches: list[FAQMatch] = []
         for faq in self.faqs.list_active(session):
-            if not has_verified_official_source(faq.source_url, faq.source_verified_at):
+            if not self._is_publicly_available_faq(faq):
                 continue
             question = self.normalize_text(faq.question)
             title = self.normalize_text(faq.title)
@@ -2385,11 +2386,17 @@ class ChatbotService:
         return [
             faq
             for faq in self.faqs.list_active(session)
-            if has_verified_official_source(faq.source_url, faq.source_verified_at)
+            if self._is_publicly_available_faq(faq)
             and not detect_prompt_injection(
                 f"{faq.title} {faq.question} {faq.summary} {faq.answer}"
             )
         ]
+
+    @staticmethod
+    def _is_publicly_available_faq(faq: FAQ) -> bool:
+        return has_verified_official_source(
+            faq.source_url, faq.source_verified_at
+        ) or is_safe_unverified_faq(faq)
 
     def _available_faq_categories(self, session: Session) -> list[tuple[str, str]]:
         categories: dict[str, str] = {}
@@ -2404,10 +2411,9 @@ class ChatbotService:
         labels = [name for _, name in categories]
         return {
             "answer": (
-                "Elige una categoría para ver preguntas frecuentes publicadas y "
-                "verificadas."
+                "Elige una categoría para ver preguntas frecuentes publicadas."
                 if categories
-                else "No hay preguntas frecuentes verificadas disponibles ahora."
+                else "No hay preguntas frecuentes publicadas disponibles ahora."
             ),
             "intent": "FAQ_CATEGORY_DISCOVERY",
             "faq_id": None,
@@ -2485,7 +2491,7 @@ class ChatbotService:
         return (
             {
                 "answer": (
-                    f"Elige un tema de {category_name} para ver preguntas verificadas."
+                    f"Elige un tema de {category_name} para ver preguntas frecuentes."
                 ),
                 "intent": "FAQ_SUBCATEGORY_DISCOVERY",
                 "faq_id": None,
@@ -2752,7 +2758,7 @@ class ChatbotService:
             faq.id: faq
             for faq in self.faqs.list_active(session)
             if faq.id in {value for value in raw_ids if isinstance(value, str)}
-            and has_verified_official_source(faq.source_url, faq.source_verified_at)
+            and self._is_publicly_available_faq(faq)
         }
         if not active:
             return None
@@ -5034,8 +5040,7 @@ class ChatbotService:
         active = {
             faq.id: faq
             for faq in self.faqs.list_active(session)
-            if faq.id in allowed_ids
-            and has_verified_official_source(faq.source_url, faq.source_verified_at)
+            if faq.id in allowed_ids and self._is_publicly_available_faq(faq)
         }
         faq_ids = [faq_id for faq_id in raw_ids if faq_id in active]
         labels = [active[faq_id].title or active[faq_id].question for faq_id in faq_ids]
@@ -5190,10 +5195,7 @@ class ChatbotService:
                 (
                     item
                     for item in self.faqs.list_active(session)
-                    if item.id == faq_id
-                    and has_verified_official_source(
-                        item.source_url, item.source_verified_at
-                    )
+                    if item.id == faq_id and self._is_publicly_available_faq(item)
                 ),
                 None,
             )
@@ -5276,6 +5278,10 @@ class ChatbotService:
         sources: list[dict[str, object]] = []
         for item in matches:
             if isinstance(item, FAQMatch):
+                if not has_verified_official_source(
+                    item.faq.source_url, item.faq.source_verified_at
+                ):
+                    continue
                 sources.append(
                     {
                         "title": item.faq.title or item.faq.question,
@@ -5285,6 +5291,10 @@ class ChatbotService:
                     }
                 )
             else:
+                if not getattr(item, "source_url", None) or not getattr(
+                    item, "source_verified_at", None
+                ):
+                    continue
                 sources.append(
                     {
                         "title": item.title,

@@ -1171,7 +1171,7 @@ def test_missing_or_ambiguous_codes_use_orchestration_without_ticket_data(
     assert all("TCK-" not in request.user_message for request in provider.requests)
 
 
-def test_ticket_queries_use_orchestration_and_openapi_documents_typed_contract(
+def test_ticket_query_privacy_and_openapi_document_the_typed_contract(
     phase2_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase2_client
@@ -1249,12 +1249,15 @@ def test_ticket_queries_use_orchestration_and_openapi_documents_typed_contract(
         endpoint, headers=headers, json={"content": follow_up_content}
     )
     assert follow_up.status_code == 200
-    assert provider.requests
-    provider_request = provider.requests[-1]
-    assert provider_request.user_message == follow_up_content
-    assert "TCK-AI-PRIVATE-001" not in str(provider_request)
-    assert "Comentario privado para comprobar que no se envía a IA" not in str(
-        provider_request
+    assert follow_up.json()["sources"] == []
+    assert "información verificada" in (
+        follow_up.json()["bot_message"]["content"].casefold()
+    )
+    assert all(
+        "TCK-AI-PRIVATE-001" not in repr(provider_request)
+        and "Comentario privado para comprobar que no se envía a IA"
+        not in repr(provider_request)
+        for provider_request in provider.requests
     )
     assert ticket_snapshot(engine) == before
     schema = app.openapi()

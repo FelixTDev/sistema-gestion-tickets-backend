@@ -8,7 +8,11 @@ from app.db import models  # noqa: F401
 from app.modules.conocimiento.models.faq import FAQ
 from app.modules.conocimiento.models.version import FAQVersion
 from app.modules.tickets.models.ticket import Ticket
-from app.seed.demo_data import DEMO_FAQS, seed_chatbot_knowledge, seed_demo_data
+from app.seed.demo_data import (
+    DEMO_FAQS,
+    seed_chatbot_knowledge,
+    seed_demo_data,
+)
 
 
 @pytest.fixture
@@ -23,7 +27,7 @@ def knowledge_seed_engine() -> Generator[object, None, None]:
     engine.dispose()
 
 
-def test_safe_knowledge_seed_is_source_traced_and_does_not_rewrite_tickets(
+def test_safe_knowledge_seed_clears_sources_and_does_not_rewrite_tickets(
     knowledge_seed_engine,
 ) -> None:
     with Session(knowledge_seed_engine) as session:
@@ -52,14 +56,12 @@ def test_safe_knowledge_seed_is_source_traced_and_does_not_rewrite_tickets(
         assert count == len(DEMO_FAQS)
         assert len(published) >= len(DEMO_FAQS)
         assert all(
-            faq.source_url is not None
-            and faq.source_url.startswith("https://www.bancognb.com.pe/")
-            and faq.source_verified_at is not None
+            faq.source_url is None and faq.source_verified_at is None
             for faq in published
             if faq.question in {item[1] for item in DEMO_FAQS}
         )
         assert all(
-            snapshot.source_url is not None and snapshot.source_verified_at is not None
+            snapshot.source_url is None and snapshot.source_verified_at is None
             for snapshot in snapshots
             if snapshot.faq_id in {faq.id for faq in published}
         )
@@ -77,7 +79,85 @@ def test_safe_knowledge_seed_is_source_traced_and_does_not_rewrite_tickets(
         } == tickets_before
 
 
-def test_password_recovery_faq_matches_the_official_guide() -> None:
+def test_faq_seed_removes_bank_specific_content_and_unverified_sources(
+    knowledge_seed_engine,
+) -> None:
+    from app.modules.conocimiento.models.category import TicketCategory
+
+    with Session(knowledge_seed_engine) as session:
+        seed_demo_data(session)
+        category_ids_before = {
+            category.id for category in session.exec(select(TicketCategory)).all()
+        }
+        faq_ids_before = {faq.id for faq in session.exec(select(FAQ)).all()}
+
+        seed_chatbot_knowledge(session)
+
+        categories = session.exec(select(TicketCategory)).all()
+        active_faqs = session.exec(select(FAQ).where(FAQ.is_active.is_(True))).all()
+        versions = session.exec(select(FAQVersion)).all()
+
+    assert {category.id for category in categories} == category_ids_before
+    assert {faq.id for faq in active_faqs} == faq_ids_before
+    for faq in active_faqs:
+        content = " ".join(
+            str(getattr(faq, field) or "")
+            for field in (
+                "title",
+                "question",
+                "answer",
+                "summary",
+                "keywords",
+                "tags",
+                "synonyms",
+                "normalized_content",
+                "normalized_title",
+                "normalized_question",
+                "intent",
+                "source_url",
+            )
+        )
+        assert "gnb" not in content.casefold()
+        assert faq.source_url is None
+        assert faq.source_verified_at is None
+    assert all(
+        version.source_url is None and version.source_verified_at is None
+        for version in versions
+        if version.faq_id in faq_ids_before
+    )
+
+
+def test_seed_updates_matching_question_without_replacing_id_or_category(
+    knowledge_seed_engine,
+) -> None:
+    with Session(knowledge_seed_engine) as session:
+        seed_demo_data(session)
+        faq = session.exec(
+            select(FAQ).where(
+                FAQ.question == "¿Qué requisitos necesito para solicitar una tarjeta?"
+            )
+        ).one()
+        faq_id = faq.id
+        category_id = faq.category_id
+        faq.answer = "Respuesta anterior de ejemplo."
+        session.add(faq)
+        session.commit()
+
+        seed_chatbot_knowledge(session)
+
+        faq_after = session.get(FAQ, faq_id)
+        faq_count = len(session.exec(select(FAQ)).all())
+
+    assert faq_after is not None
+    assert faq_after.id == faq_id
+    assert faq_after.category_id == category_id
+    assert faq_after.answer == (
+        "No tengo información verificada para responder esta consulta financiera."
+    )
+    assert faq_count == len(DEMO_FAQS)
+
+
+def test_password_recovery_faq_does_not_claim_unverified_bank_specific_steps() -> None:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -92,17 +172,8 @@ def test_password_recovery_faq_matches_the_official_guide() -> None:
             )
         ).one()
 
-        assert faq.source_url == (
-            "https://www.bancognb.com.pe/main/download?file="
-            "peru%2Fbanca_personas%2Fguia-cambio-de-contrasenia.pdf"
+        assert faq.answer == (
+            "No tengo información verificada para responder esta consulta financiera."
         )
-        assert faq.source_verified_at is not None
-        for detail in (
-            "¿Olvidó su contraseña?",
-            "DNI",
-            "selfie",
-            "código recibido en tu correo electrónico",
-            "notificación de confirmación",
-            "3 intentos",
-        ):
-            assert detail.casefold() in faq.answer.casefold()
+        assert faq.source_url is None
+        assert faq.source_verified_at is None

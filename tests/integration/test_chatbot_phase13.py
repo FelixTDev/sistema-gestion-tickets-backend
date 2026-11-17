@@ -73,7 +73,7 @@ def test_unhelpful_follow_up_keeps_context_and_asks_for_clarification(
 
     useful_answer = client.post(endpoint, json={"content": "tarjetas y requisitos"})
     assert useful_answer.status_code == 200
-    assert useful_answer.json()["resolved"] is True
+    assert useful_answer.json()["resolved"] is True, useful_answer.json()
 
     follow_up = client.post(endpoint, json={"content": "eso no me ayudó"})
 
@@ -341,7 +341,7 @@ class ContextCapturingAIProvider:
         )
 
 
-def test_referential_follow_up_reaches_provider_with_bounded_recent_turns(
+def test_referential_follow_up_to_unverified_faq_keeps_safe_answer(
     phase13_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _ = phase13_client
@@ -364,12 +364,11 @@ def test_referential_follow_up_reaches_provider_with_bounded_recent_turns(
     follow_up = client.post(endpoint, json={"content": "y eso cómo se solicita?"})
 
     assert follow_up.status_code == 200
-    assert len(provider.requests) == 2, follow_up.json()
-    assert "Mensaje previo del cliente: TARJETAS y REQUISITOS" in (
-        provider.requests[-1].user_message
+    assert provider.requests == []
+    assert follow_up.json()["sources"] == []
+    assert "información verificada" in (
+        follow_up.json()["bot_message"]["content"].casefold()
     )
-    assert "Respuesta previa del asistente:" in provider.requests[-1].user_message
-    assert provider.requests[-1].context
 
 
 def test_short_new_topic_does_not_inherit_unrelated_conversation_context(
@@ -393,10 +392,11 @@ def test_short_new_topic_does_not_inherit_unrelated_conversation_context(
     new_topic = client.post(endpoint, json={"content": "cuentas"})
 
     assert new_topic.status_code == 200
-    assert provider.requests[-1].user_message == "cuentas"
+    assert provider.requests == []
+    assert "tarjeta" not in new_topic.json()["bot_message"]["content"].casefold()
 
 
-def test_unverified_faqs_are_not_used_as_product_answers(phase13_client) -> None:
+def test_unverified_faqs_return_only_a_safe_general_answer(phase13_client) -> None:
     client, engine = phase13_client
     with Session(engine) as session:
         for faq in session.exec(select(FAQ)).all():
@@ -413,9 +413,13 @@ def test_unverified_faqs_are_not_used_as_product_answers(phase13_client) -> None
 
     assert response.status_code == 200
     body = response.json()
-    assert body["resolved"] is False
+    assert body["resolved"] is True
     assert body["sources"] == []
     assert body["offers_ticket"] is False
+    answer = body["bot_message"]["content"].casefold()
+    assert "información verificada" in answer
+    assert "selfie" not in answer
+    assert "teléfono" not in answer
 
 
 def test_conversion_authorization_and_daily_limit_remain_enforced(

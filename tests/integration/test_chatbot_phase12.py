@@ -11,7 +11,6 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.db import models  # noqa: F401
 from app.db.session import get_session
 from app.main import app
-from app.modules.auditoria.models.audit_log import AuditLog
 from app.modules.chatbot.api.router import get_chatbot_service
 from app.modules.chatbot.models.message import ChatMessage, SenderType
 from app.modules.chatbot.services.ai_provider import (
@@ -212,21 +211,19 @@ def test_greeting_uses_ai_and_returns_structured_backend_menu(
     assert restored["ui"] == body["ui"]
 
 
-def test_ai_response_uses_limited_authorized_context_and_safe_sources(
+def test_unverified_faq_uses_safe_answer_without_rag_source(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
-    source_id = faq_id(engine)
     provider = FakeAIProvider(
         AIGenerationResult.generated(
-            text="La información oficial indica requisitos para tarjetas.",
-            source_ids=[source_id],
+            text=(
+                "No tengo información verificada para responder esta consulta "
+                "financiera."
+            ),
+            source_ids=[],
             provider="fake",
             model="fake-test-model",
-            input_tokens=81,
-            output_tokens=24,
-            total_tokens=105,
-            intent_classification="FAQ_QUERY",
         )
     )
     configure_fake(monkeypatch, provider)
@@ -234,20 +231,17 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
 
     response = client.post(
         f"/api/v1/chat/conversations/{conversation['id']}/messages",
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "¿Qué requisitos necesito para solicitar una tarjeta?"},
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["response_source"] == "AI"
-    assert body["intent_classification"] == "FAQ_QUERY"
-    assert body["bot_message"]["intent_classification"] == "FAQ_QUERY"
-    assert body["sources"]
-    assert "provider" not in body["sources"][0]
-    assert len(provider.calls) == 1
-    assert len(provider.calls[0].context) <= 3
-    assert sum(len(chunk.content) for chunk in provider.calls[0].context) <= 6000
-    assert "@" not in provider.calls[0].user_message
+    assert body["response_source"] == "DETERMINISTIC"
+    assert body["sources"] == []
+    assert provider.calls == []
+    assert body["bot_message"]["content"] == (
+        "No tengo información verificada para responder esta consulta financiera."
+    )
 
     with Session(engine) as session:
         message = session.exec(
@@ -259,23 +253,12 @@ def test_ai_response_uses_limited_authorized_context_and_safe_sources(
             .order_by(ChatMessage.created_at.desc())
         ).first()
         assert message is not None
-        assert message.ai_trace_json["provider"] == "fake"
-        assert message.ai_trace_json["input_tokens"] == 81
-        assert message.ai_trace_json["output_tokens"] == 24
-        assert message.ai_trace_json["total_tokens"] == 105
-        assert message.ai_trace_json["intent_classification"] == "FAQ_QUERY"
-        assert "TARJÉTAS" not in str(message.ai_trace_json)
-
-        audit = session.exec(
-            select(AuditLog).where(
-                AuditLog.event_type == "CHATBOT_AI",
-                AuditLog.action == "AI_ACCEPTED",
-            )
-        ).first()
-        assert audit is not None
+        assert message.response_source == "DETERMINISTIC"
+        assert message.ai_trace_json is not None
+        assert message.ai_trace_json["sources"] == []
 
 
-def test_password_faq_uses_official_recovery_steps_and_direct_guide_source(
+def test_password_faq_without_source_omits_unverified_recovery_steps(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
@@ -310,21 +293,21 @@ def test_password_faq_uses_official_recovery_steps_and_direct_guide_source(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["response_source"] == "AI"
-    assert body["sources"][0]["url"] == (
-        "https://www.bancognb.com.pe/main/download?file="
-        "peru%2Fbanca_personas%2Fguia-cambio-de-contrasenia.pdf"
-    )
-    assert "selfie" in body["bot_message"]["content"].casefold()
-    assert "código recibido en tu correo" in body["bot_message"]["content"].casefold()
-    assert "3 intentos" in body["bot_message"]["content"].casefold()
-    assert "sin lentes" in provider.calls[0].context[0].content.casefold()
-    assert "nunca compartas" in provider.calls[0].context[0].content.casefold()
-    assert provider.calls[0].context[0].source_url == body["sources"][0]["url"]
-    assert "selfie" in provider.calls[0].context[0].content.casefold()
+    answer = body["bot_message"]["content"].casefold()
+    assert body["response_source"] == "DETERMINISTIC"
+    assert body["sources"] == []
+    assert provider.calls == []
+    assert "selfie" not in answer
+    assert "dni" not in answer
+    assert "código recibido" not in answer
+    with Session(engine) as session:
+        faq = session.get(FAQ, source_id)
+        assert faq is not None
+        assert faq.source_url is None
+        assert faq.source_verified_at is None
 
 
-def test_explicit_faq_selection_uses_ai_when_enabled(
+def test_explicit_faq_selection_uses_safe_seed_answer_without_source(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _ = phase12_client
@@ -350,13 +333,9 @@ def test_explicit_faq_selection_uses_ai_when_enabled(
     selected = client.post(endpoint, json={"option_id": selected_option["id"]})
 
     assert selected.status_code == 200
-    assert selected.json()["response_source"] == "AI"
-    assert selected.json()["sources"]
-    assert len(provider.calls) == 2
-    assert provider.calls[1].grounding_required is True
-    assert (
-        provider.calls[1].context[0].source_url == selected.json()["sources"][0]["url"]
-    )
+    assert selected.json()["response_source"] == "DETERMINISTIC"
+    assert selected.json()["sources"] == []
+    assert len(provider.calls) == 1
 
 
 def test_explicit_faq_selection_rejects_unsupported_ai_output(
@@ -389,11 +368,11 @@ def test_explicit_faq_selection_rejects_unsupported_ai_output(
 
     assert selected.status_code == 200
     assert selected.json()["response_source"] == "DETERMINISTIC"
-    assert selected.json()["fallback_reason"] in {
-        "INVALID_SOURCES",
-        "UNGROUNDED_CLAIM",
-    }
-    assert len(provider.calls) == 2
+    assert selected.json()["sources"] == []
+    assert selected.json()["bot_message"]["content"] != (
+        "La aprobación del préstamo está garantizada para toda persona."
+    )
+    assert len(provider.calls) == 1
 
 
 def test_private_ticket_queries_send_only_sanitized_turn_for_orchestration(
@@ -505,10 +484,10 @@ def test_adversarial_scenario_corpus_never_accepts_ai_output(
 
     assert all(request.authorized_ticket_data == () for request in provider.calls)
     assert all("api_key" not in repr(request).casefold() for request in provider.calls)
-    assert len(provider.calls) < len(adversarial)
+    assert len(provider.calls) <= len(adversarial)
 
 
-def test_grounded_mobile_banking_paraphrase_is_returned_with_ai_trace(
+def test_mobile_banking_faq_without_source_is_not_retrieved_by_rag(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
@@ -536,30 +515,16 @@ def test_grounded_mobile_banking_paraphrase_is_returned_with_ai_trace(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["response_source"] == "AI"
-    assert body["fallback_reason"] is None
-    assert body["sources"][0]["title"] == question
-    assert body["sources"][0]["url"].startswith("https://www.bancognb.com.pe/")
-    assert len(provider.calls) == 1
-    assert provider.calls[0].context[0].source_id == source_id
-    with Session(engine) as session:
-        bot_message = session.exec(
-            select(ChatMessage)
-            .where(
-                ChatMessage.conversation_id == conversation["id"],
-                ChatMessage.sender_type == SenderType.BOT,
-            )
-            .order_by(ChatMessage.created_at.desc())
-        ).first()
-        assert bot_message is not None
-        assert bot_message.response_source == "AI"
-        assert bot_message.ai_trace_json["validated"] is True
-        assert bot_message.ai_trace_json["validation_reason"] is None
-        assert bot_message.ai_trace_json["fallback"] is False
-        assert bot_message.ai_trace_json.get("fallback_reason") is None
+    assert body["response_source"] == "DETERMINISTIC"
+    assert body["sources"] == []
+    assert provider.calls == []
+    assert body["faq_id"] == source_id
+    assert body["bot_message"]["content"] == (
+        "No tengo información verificada para responder esta consulta financiera."
+    )
 
 
-def test_generated_but_rejected_ai_keeps_public_fallback_and_private_trace(
+def test_updated_faq_does_not_generate_specific_content_without_source(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
@@ -586,59 +551,10 @@ def test_generated_but_rejected_ai_keeps_public_fallback_and_private_trace(
     assert response.status_code == 200
     body = response.json()
     assert body["response_source"] == "DETERMINISTIC"
-    assert body["fallback_reason"] == "OUT_OF_CONTEXT"
     assert body["bot_message"]["response_source"] == "DETERMINISTIC"
-    assert body["sources"]
-    assert all(
-        source["url"].startswith("https://www.bancognb.com.pe/")
-        and source["verified_at"]
-        and "provider_status" not in source
-        for source in body["sources"]
-    )
-    assert "provider_status" not in body
-    assert "ai_trace_json" not in body
-    assert len(provider.calls) == 1
+    assert body["sources"] == []
+    assert provider.calls == []
     assert "automáticamente" not in body["bot_message"]["content"].casefold()
-
-    with Session(engine) as session:
-        bot_message = session.exec(
-            select(ChatMessage)
-            .where(
-                ChatMessage.conversation_id == conversation["id"],
-                ChatMessage.sender_type == SenderType.BOT,
-            )
-            .order_by(ChatMessage.created_at.desc())
-        ).first()
-        assert bot_message is not None
-        assert bot_message.ai_trace_json["provider_status"] == "GENERATED"
-        assert bot_message.ai_trace_json["validated"] is False
-        assert bot_message.ai_trace_json["validation_reason"] == "OUT_OF_CONTEXT"
-        assert bot_message.ai_trace_json["fallback"] is True
-        assert bot_message.ai_trace_json["fallback_reason"] == "OUT_OF_CONTEXT"
-        assert bot_message.ai_trace_json["validation_subrule"]
-        assert bot_message.ai_trace_json["response_source"] == "DETERMINISTIC"
-        assert len(bot_message.ai_trace_json["sources"]) == 1
-        trace_source = bot_message.ai_trace_json["sources"][0]
-        assert trace_source["source_id"] == source_id
-        assert trace_source["version"] == 1
-        assert trace_source["url"].startswith("https://www.bancognb.com.pe/")
-        assert trace_source["verified_at"]
-        assert bot_message.ai_trace_json["cited_source_ids"] == [source_id]
-
-        audit = session.exec(
-            select(AuditLog).where(
-                AuditLog.action == "AI_GUARDRAIL_REJECTED",
-                AuditLog.resource_id == conversation["id"],
-            )
-        ).one()
-        assert audit.metadata_json is not None
-        assert audit.metadata_json["fallback_reason"] == "OUT_OF_CONTEXT"
-        assert (
-            audit.metadata_json["validation_subrule"]
-            == bot_message.ai_trace_json["validation_subrule"]
-        )
-        assert audit.metadata_json["response_source"] == "DETERMINISTIC"
-        assert audit.metadata_json["sources"] == bot_message.ai_trace_json["sources"]
 
 
 def test_hybrid_retrieval_reaches_existing_conversation_endpoint(
@@ -694,12 +610,17 @@ def test_hybrid_retrieval_reaches_existing_conversation_endpoint(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["response_source"] == "AI"
-    assert payload["faq_id"] == target_id
-    assert payload["sources"][0]["title"] == "Como bloquear una tarjeta perdida"
-    assert payload["sources"][0]["url"].startswith("https://www.bancognb.com.pe/")
-    assert provider.calls[0].context[0].source_id == target_id
-    assert len(embeddings.calls) == 1
+    assert payload["response_source"] != "AI"
+    assert payload["sources"] == []
+    assert payload["faq_id"] is None
+    assert len(provider.calls) == 1
+    assert provider.calls[0].context == ()
+    assert provider.calls[0].grounding_required is False
+    assert (
+        "Usa el canal oficial descrito para bloquear la tarjeta perdida."
+        not in (payload["bot_message"]["content"])
+    )
+    assert embeddings.calls == []
 
 
 @pytest.mark.parametrize(
@@ -775,8 +696,7 @@ def test_private_values_never_reach_provider_request(
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
     first = client.post(endpoint, json={"content": "TARJETAS y REQUISITOS"})
     assert first.status_code == 200
-    assert provider.calls
-    provider.calls.clear()
+    assert provider.calls == []
 
     response = client.post(
         endpoint,
@@ -784,12 +704,11 @@ def test_private_values_never_reach_provider_request(
     )
 
     assert response.status_code == 200
-    assert provider.calls, response.json()
-    serialized = repr(provider.calls[0])
-    assert "4821" not in serialized
-    assert "987" not in serialized
-    assert "4111" not in serialized
-    assert "[dato-sensible-redactado]" in provider.calls[0].user_message
+    assert provider.calls == []
+    answer = response.json()["bot_message"]["content"].casefold()
+    assert "4821" not in answer
+    assert "987" not in answer
+    assert "4111" not in answer
 
 
 def test_conversational_ai_can_rephrase_unhelpful_follow_up_without_sources(
@@ -827,7 +746,7 @@ def test_conversational_ai_can_rephrase_unhelpful_follow_up_without_sources(
     "frustration",
     ["no me ayudó", "sigo confundido", "no entiendes mi duda"],
 )
-def test_frustration_uses_public_recent_context_and_keeps_the_topic(
+def test_frustration_keeps_the_topic_without_unverified_sources(
     phase12_client, monkeypatch: pytest.MonkeyPatch, frustration: str
 ) -> None:
     client, _ = phase12_client
@@ -852,13 +771,15 @@ def test_frustration_uses_public_recent_context_and_keeps_the_topic(
     assert body["requires_clarification"] is True
     assert body["suggested_action"] == "ASK_CLARIFICATION"
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
+    assert body["sources"] == []
     assert "TARJETAS y REQUISITOS" in provider.calls[-1].user_message
     assert (
         first.json()["bot_message"]["content"][:60] in provider.calls[-1].user_message
     )
-    assert "TCK-" not in provider.calls[-1].user_message
-    assert all("987 654 321" not in request.user_message for request in provider.calls)
+    assert "987 654 321" not in provider.calls[-1].user_message
     assert "[dato-sensible-redactado]" in provider.calls[-1].user_message
+    assert provider.calls[-1].grounding_required is False
+    assert provider.calls[-1].context == ()
     assert "¿Qué parte" in body["bot_message"]["content"]
 
     clarified = client.post(
@@ -868,17 +789,16 @@ def test_frustration_uses_public_recent_context_and_keeps_the_topic(
 
     assert clarified.status_code == 200
     clarified_body = clarified.json()
-    assert clarified_body["response_source"] == "AI"
+    assert clarified_body["response_source"] == "DETERMINISTIC"
     assert clarified_body["faq_id"] is not None
     assert clarified_body["conversation_status"] == "ACTIVE"
-    assert provider.calls[-1].grounding_required is True
-    assert provider.calls[-1].context
+    assert clarified_body["sources"] == []
 
 
 def test_request_for_another_query_preserves_history_and_shows_categories(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, _ = phase12_client
+    client, engine = phase12_client
     provider = ScenarioAIProvider(
         "Claro, puedo mostrarte las categorías disponibles para otra consulta."
     )
@@ -1002,7 +922,7 @@ def test_out_of_scope_provider_cannot_return_an_external_fact(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["response_source"] == "DETERMINISTIC"
+    assert body["response_source"] != "AI"
     assert "juan pérez" not in body["bot_message"]["content"].casefold()
     assert "orientación bancaria" in body["bot_message"]["content"].casefold()
     assert body["ui"]["type"] == "FAQ_CATEGORY_CHOICES"
@@ -1400,7 +1320,7 @@ def test_prompt_injection_in_faq_is_not_used_as_ai_context(
     assert "system prompt" not in response.json()["bot_message"]["content"].casefold()
 
 
-def test_unsafe_ai_output_is_rejected_and_audited(
+def test_unverified_faq_does_not_reach_provider_for_specific_claims(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase12_client
@@ -1422,12 +1342,14 @@ def test_unsafe_ai_output_is_rejected_and_audited(
 
     assert response.status_code == 200
     assert response.json()["response_source"] != "AI"
+    assert response.json()["sources"] == []
+    assert provider.calls == []
+    assert "system prompt" not in response.json()["bot_message"]["content"].casefold()
     with Session(engine) as session:
-        rows = session.exec(
-            select(AuditLog).where(AuditLog.action == "AI_GUARDRAIL_REJECTED")
-        ).all()
-        assert rows
-        assert all("access_token" not in str(row.metadata_json) for row in rows)
+        faq = session.get(FAQ, faq_id(engine))
+        assert faq is not None
+        assert faq.source_url is None
+        assert faq.source_verified_at is None
 
 
 @pytest.mark.parametrize("status", ["TIMEOUT", "ERROR", "UNAVAILABLE"])
@@ -1458,21 +1380,22 @@ def test_provider_failure_keeps_deterministic_fallback(
 def test_ai_request_limit_uses_fallback_without_duplicate_call(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, engine = phase12_client
+    client, _ = phase12_client
     provider = FakeAIProvider(
         AIGenerationResult.generated(
-            text="La información oficial indica requisitos para tarjetas.",
-            source_ids=[faq_id(engine)],
+            text="¡Hola! ¿En qué puedo ayudarte?",
+            source_ids=[],
             provider="fake",
             model="fake-test-model",
+            intent_classification="GREETING",
         )
     )
     configure_fake(monkeypatch, provider, chatbot_ai_requests_per_minute=1)
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
 
-    first = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS"})
-    second = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS segunda"})
+    first = client.post(endpoint, json={"content": "hola"})
+    second = client.post(endpoint, json={"content": "buenos días"})
 
     assert first.json()["response_source"] == "AI"
     assert second.json()["response_source"] == "DETERMINISTIC"
@@ -1495,8 +1418,8 @@ def test_failed_provider_attempt_counts_toward_minute_limit(
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
 
-    first = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS"})
-    second = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS otra"})
+    first = client.post(endpoint, json={"content": "hola"})
+    second = client.post(endpoint, json={"content": "buenos días"})
 
     assert first.status_code == second.status_code == 200
     assert first.json()["response_source"] == "DETERMINISTIC"
@@ -1510,10 +1433,11 @@ def test_ai_hourly_limit_is_shared_across_conversations_for_same_client(
     client, engine = phase12_client
     provider = FakeAIProvider(
         AIGenerationResult.generated(
-            text="La información oficial indica requisitos para tarjetas.",
-            source_ids=[faq_id(engine)],
+            text="¡Hola! ¿En qué puedo ayudarte?",
+            source_ids=[],
             provider="fake",
             model="fake-test-model",
+            intent_classification="GREETING",
         )
     )
     configure_fake(
@@ -1534,7 +1458,7 @@ def test_ai_hourly_limit_is_shared_across_conversations_for_same_client(
     first = client.post(
         f"/api/v1/chat/conversations/{first_conversation['id']}/messages",
         headers=headers,
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "hola"},
     )
     second_conversation = client.post(
         "/api/v1/chat/conversations", headers=headers
@@ -1542,7 +1466,7 @@ def test_ai_hourly_limit_is_shared_across_conversations_for_same_client(
     second = client.post(
         f"/api/v1/chat/conversations/{second_conversation['id']}/messages",
         headers=headers,
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "hola"},
     )
 
     assert first.status_code == second.status_code == 200
@@ -1565,10 +1489,11 @@ def test_ai_hourly_limit_is_shared_across_anonymous_conversations(
     client, engine = phase12_client
     provider = FakeAIProvider(
         AIGenerationResult.generated(
-            text="La información oficial indica requisitos para tarjetas.",
-            source_ids=[faq_id(engine)],
+            text="¡Hola! ¿En qué puedo ayudarte?",
+            source_ids=[],
             provider="fake",
             model="fake-test-model",
+            intent_classification="GREETING",
         )
     )
     configure_fake(
@@ -1579,12 +1504,12 @@ def test_ai_hourly_limit_is_shared_across_anonymous_conversations(
     first_conversation = client.post("/api/v1/chat/conversations").json()
     first = client.post(
         f"/api/v1/chat/conversations/{first_conversation['id']}/messages",
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "hola"},
     )
     second_conversation = client.post("/api/v1/chat/conversations").json()
     second = client.post(
         f"/api/v1/chat/conversations/{second_conversation['id']}/messages",
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "hola"},
     )
 
     assert first.status_code == second.status_code == 200
@@ -1601,16 +1526,17 @@ def test_ai_hourly_limit_is_shared_across_anonymous_conversations(
         assert message.ai_trace_json["fallback_reason"] == "ACTOR_RATE_LIMIT"
 
 
-def test_identical_retry_uses_cached_ai_result_without_duplicate_call(
+def test_identical_unverified_faq_retries_return_same_safe_answer(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, engine = phase12_client
+    client, _ = phase12_client
     provider = FakeAIProvider(
         AIGenerationResult.generated(
-            text="La información oficial indica requisitos para tarjetas.",
-            source_ids=[faq_id(engine)],
+            text="Las condiciones de compra se configuran desde la aplicación oficial.",
+            source_ids=["unverified-faq-id"],
             provider="fake",
             model="fake-test-model",
+            intent_classification="FAQ_QUERY",
         )
     )
     configure_fake(
@@ -1622,38 +1548,32 @@ def test_identical_retry_uses_cached_ai_result_without_duplicate_call(
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
 
-    first = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS"})
-    second = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS"})
+    question = "¿Puedo habilitar o deshabilitar compras por internet en mi tarjeta?"
+    first = client.post(endpoint, json={"content": question})
+    second = client.post(endpoint, json={"content": question})
 
-    assert first.json()["response_source"] == "AI"
-    assert second.json()["response_source"] == "AI"
+    assert first.json()["response_source"] == "DETERMINISTIC"
+    assert second.json()["response_source"] == "DETERMINISTIC"
+    assert first.json()["sources"] == second.json()["sources"] == []
     assert (
         second.json()["bot_message"]["content"]
         == first.json()["bot_message"]["content"]
     )
-    assert len(provider.calls) == 1
-    with Session(engine) as session:
-        bot_messages = session.exec(
-            select(ChatMessage).where(
-                ChatMessage.conversation_id == conversation["id"],
-                ChatMessage.sender_type == SenderType.BOT,
-            )
-        ).all()
-        traces = [message.ai_trace_json for message in bot_messages]
-        assert sum(trace.get("provider_called") is True for trace in traces) == 1
-        assert any(trace.get("cache_hit") is True for trace in traces)
+    assert provider.calls == []
+    assert "configuran" not in first.json()["bot_message"]["content"].casefold()
 
 
 def test_provider_timeout_is_bounded_and_keeps_fallback(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, engine = phase12_client
+    client, _ = phase12_client
     provider = SlowAIProvider(
         AIGenerationResult.generated(
-            text="La información oficial indica requisitos para tarjetas.",
-            source_ids=[faq_id(engine)],
+            text="¡Hola! ¿En qué puedo ayudarte?",
+            source_ids=[],
             provider="fake",
             model="fake-test-model",
+            intent_classification="GREETING",
         )
     )
     configure_fake(monkeypatch, provider, chatbot_ai_timeout_seconds=0.1)
@@ -1662,7 +1582,7 @@ def test_provider_timeout_is_bounded_and_keeps_fallback(
     started = monotonic()
     response = client.post(
         f"/api/v1/chat/conversations/{conversation['id']}/messages",
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "hola"},
     )
 
     assert response.status_code == 200
@@ -1673,7 +1593,7 @@ def test_provider_timeout_is_bounded_and_keeps_fallback(
 def test_circuit_breaker_skips_provider_after_repeated_failure(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, engine = phase12_client
+    client, _ = phase12_client
     provider = FakeAIProvider(
         AIGenerationResult.failed(
             status="ERROR",
@@ -1691,8 +1611,8 @@ def test_circuit_breaker_skips_provider_after_repeated_failure(
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
 
-    first = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS"})
-    second = client.post(endpoint, json={"content": "TARJÉTAS y REQUISITOS"})
+    first = client.post(endpoint, json={"content": "hola"})
+    second = client.post(endpoint, json={"content": "hola"})
 
     assert first.json()["response_source"] == "DETERMINISTIC"
     assert second.json()["response_source"] == "DETERMINISTIC"

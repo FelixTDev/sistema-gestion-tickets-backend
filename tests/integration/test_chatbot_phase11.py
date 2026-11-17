@@ -49,12 +49,14 @@ def login(client: TestClient, email: str) -> str:
     return response.json()["access_token"]
 
 
-def test_high_confidence_includes_source_and_context(phase11_client) -> None:
+def test_high_confidence_unverified_faq_has_no_source_or_bank_specific_context(
+    phase11_client,
+) -> None:
     client, _ = phase11_client
     conversation = client.post("/api/v1/chat/conversations").json()
     response = client.post(
         f"/api/v1/chat/conversations/{conversation['id']}/messages",
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "¿Qué requisitos necesito para solicitar una tarjeta?"},
     )
 
     assert response.status_code == 200
@@ -63,10 +65,10 @@ def test_high_confidence_includes_source_and_context(phase11_client) -> None:
     assert body["confidence"] >= 0.7
     assert body["faq_id"]
     assert body["source_category"]
-    assert body["sources"][0]["url"] == (
-        "https://www.bancognb.com.pe/inicio/banca-personas/tarjetas"
+    assert body["sources"] == []
+    assert body["bot_message"]["content"] == (
+        "No tengo información verificada para responder esta consulta financiera."
     )
-    assert body["sources"][0]["verified_at"].startswith("2026-10-10")
     assert body["requires_clarification"] is False
     assert body["conversation_status"] == "ACTIVE"
 

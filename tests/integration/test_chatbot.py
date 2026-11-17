@@ -81,6 +81,43 @@ def test_saves_user_and_bot_messages(chatbot_client):
     assert len(conversation.json()["messages"]) == 2
 
 
+def test_public_active_faq_api_does_not_return_gnb_references(chatbot_client):
+    client, _ = chatbot_client
+
+    response = client.get("/api/v1/faqs")
+
+    assert response.status_code == 200
+    faqs = response.json()
+    assert faqs
+    for faq in faqs:
+        serialized = str(faq).casefold()
+        assert "gnb" not in serialized
+        assert "bancognb.com.pe" not in serialized
+        assert faq["source_url"] is None
+        assert faq["source_verified_at"] is None
+
+
+def test_chatbot_does_not_retrieve_removed_bank_specific_faq_content(chatbot_client):
+    client, _ = chatbot_client
+    conversation_id = client.post("/api/v1/chat/conversations").json()["id"]
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        json={"content": "¿Cómo hago para afiliarme a la banca móvil?"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    answer = body["bot_message"]["content"].casefold()
+    assert "gnb" not in answer
+    assert "bancognb.com.pe" not in str(body).casefold()
+    assert "selfie" not in answer
+    assert "dni" not in answer
+    assert "fuentes" not in answer
+    assert body["sources"] == []
+    assert body["response_source"] != "AI"
+
+
 @pytest.mark.parametrize(
     "content",
     ["hola", "HOLA!!!", " ¡Buenas! ", "Buenos   días.", "¿BUENAS tardes?"],
@@ -171,7 +208,7 @@ def test_answers_active_faq_by_keyword_and_normalizes_accents(chatbot_client):
 
     response = client.post(
         f"/api/v1/chat/conversations/{conversation_id}/messages",
-        json={"content": "TARJÉTAS y REQUISITOS"},
+        json={"content": "¿Qué requisitos necesito para solicitar una tarjeta?"},
     )
 
     assert response.status_code == 200
@@ -224,7 +261,7 @@ def test_faq_discovery_lists_published_questions_and_selected_question_is_answer
             ).all()
         }
         assert set(options) <= public_questions
-    assert {source["title"] for source in body["sources"]} == set(options)
+    assert body["sources"] == []
 
     answer = client.post(
         f"/api/v1/chat/conversations/{conversation_id}/messages",
@@ -253,7 +290,7 @@ def test_faq_discovery_accepts_ordinal_follow_up(chatbot_client):
     endpoint = f"/api/v1/chat/conversations/{conversation_id}/messages"
 
     discovery = client.post(endpoint, json={"content": "¿Qué preguntas me puedes dar?"})
-    first_option = discovery.json()["ui"]["options"][0]["label"]
+    assert discovery.status_code == 200
     answer = client.post(endpoint, json={"content": "la primera"})
 
     assert answer.status_code == 200
@@ -262,7 +299,7 @@ def test_faq_discovery_accepts_ordinal_follow_up(chatbot_client):
     assert body["requires_clarification"] is False
     assert body["faq_id"] is not None
     assert body["bot_message"]["content"]
-    assert any(source["title"] == first_option for source in body["sources"])
+    assert body["sources"] == []
 
 
 def test_faq_discovery_exposes_stable_server_resolvable_option_ids(chatbot_client):
@@ -287,7 +324,7 @@ def test_faq_discovery_exposes_stable_server_resolvable_option_ids(chatbot_clien
     answer_body = answer.json()
     assert answer_body["faq_id"] == option["id"].removeprefix("faq:")
     assert answer_body["resolved"] is True
-    assert answer_body["sources"][0]["title"] == option["label"]
+    assert answer_body["sources"] == []
 
 
 def test_button_ids_are_accepted_only_when_offered_in_current_state(chatbot_client):
@@ -425,7 +462,7 @@ def test_faq_menu_browses_real_categories_then_questions(chatbot_client):
         for option in question_body["ui"]["options"]
         if option["action"] == "SELECT_FAQ"
     ]
-    assert question_body["sources"]
+    assert question_body["sources"] == []
     assert all(option["id"].startswith("faq:") for option in question_options)
     assert {"nav:back", "nav:menu"} <= {
         option["id"] for option in question_body["ui"]["options"]
@@ -441,9 +478,8 @@ def test_faq_menu_browses_real_categories_then_questions(chatbot_client):
                 )
             ).all()
         }
-    assert {source["title"] for source in question_body["sources"]} <= (
-        available_questions
-    )
+    assert question_options
+    assert all(option["label"] in available_questions for option in question_options)
 
 
 def _open_faq_category_choices(client: TestClient) -> tuple[str, dict]:
@@ -455,7 +491,7 @@ def _open_faq_category_choices(client: TestClient) -> tuple[str, dict]:
     return endpoint, response.json()
 
 
-def test_faq_category_drills_into_verified_subcategories(chatbot_client):
+def test_faq_category_drills_into_published_subcategories(chatbot_client):
     client, engine = chatbot_client
     endpoint, categories = _open_faq_category_choices(client)
     tarjetas_id = next(
@@ -480,10 +516,7 @@ def test_faq_category_drills_into_verified_subcategories(chatbot_client):
     assert any(
         option["id"] == "nav:menu" for option in subcategory_body["ui"]["options"]
     )
-    assert all(
-        source["url"].startswith("https://www.bancognb.com.pe/")
-        for source in subcategory_body["sources"]
-    )
+    assert subcategory_body["sources"] == []
 
     first_subcategory = next(
         option
@@ -506,7 +539,7 @@ def test_faq_category_drills_into_verified_subcategories(chatbot_client):
     assert {"nav:back", "nav:menu"} <= {
         option["id"] for option in question_body["ui"]["options"]
     }
-    assert all(source["category"] == "TARJETAS" for source in question_body["sources"])
+    assert question_body["sources"] == []
     with Session(engine) as session:
         faq_ids = {
             faq.id

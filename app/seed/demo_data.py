@@ -28,6 +28,12 @@ from app.db.models import (
 from app.db.session import engine
 from app.modules.chatbot.models.conversation import ConversationStatus
 from app.modules.chatbot.models.message import SenderType
+from app.modules.conocimiento.services.faq_content_policy import (
+    SAFE_UNVERIFIED_CARD_ACTIVITY,
+    SAFE_UNVERIFIED_CLAIM_STATUS,
+    SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+    SAFE_UNVERIFIED_LOAN_APPROVAL,
+)
 from app.modules.tickets.models.sla import SlaStatus
 from app.modules.tickets.models.ticket import TicketPriority, TicketSource, TicketStatus
 from app.shared.text import normalize_text
@@ -65,239 +71,139 @@ DEMO_USERS = (
     ),
 )
 
-KNOWLEDGE_VERIFIED_AT = datetime(2026, 10, 10, tzinfo=UTC)
-PASSWORD_GUIDE_VERIFIED_AT = datetime(2026, 11, 16, tzinfo=UTC)
-
 DEMO_FAQS = (
     (
         "TARJETAS",
         "¿Qué requisitos necesito para solicitar una tarjeta?",
-        (
-            "Los requisitos dependen del tipo de tarjeta y de la evaluación del Banco. "
-            "Revisa la información vigente de cada producto en el sitio oficial. "
-            "Este asistente no evalúa solicitudes ni garantiza aprobaciones."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "tarjeta,requisitos,solicitud,crédito,debito",
-        "https://www.bancognb.com.pe/inicio/banca-personas/tarjetas",
+        None,
     ),
     (
         "BANCA_DIGITAL",
         "¿Cómo ingreso a la banca digital?",
-        (
-            "Banco GNB ofrece Banca Móvil y Banca por Internet. Para afiliación, "
-            "acceso "
-            "o recuperación de contraseña, consulta las guías oficiales del canal. "
-            "Nunca compartas aquí tu contraseña, token ni código de verificación."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "banca,aplicacion,acceso,ingreso,clave,contraseña,afiliación",
-        "https://www.bancognb.com.pe/inicio/canales/canales-digitales/banca-movil-personas",
+        None,
     ),
     (
         "CUENTAS",
         "¿Cómo consulto el saldo de mi cuenta?",
-        (
-            "El Banco indica que puedes consultar saldos y movimientos mediante sus "
-            "canales digitales o Banca por Teléfono. Este asistente no accede a tus "
-            "cuentas ni puede mostrar saldos."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "cuenta,saldo,movimientos,consulta,ahorros",
-        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
+        None,
     ),
     (
         "TARJETAS",
         "¿Qué hago si mi tarjeta está bloqueada?",
-        (
-            "Si necesitas bloquear una tarjeta o canal digital, la página oficial "
-            "indica atención telefónica de bloqueos las 24 horas: Lima (01) 616-4722 "
-            "o provincias 0801-00088, opción 0; también señala la línea de emergencia "
-            "1820. Verifica los datos vigentes en la fuente oficial."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "bloqueada,bloqueo,desbloqueo,perdida,robo,urgente",
-        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta-24hr",
+        None,
     ),
     (
         "CREDITOS",
         "¿Cómo solicito información sobre un crédito?",
-        (
-            "Banco GNB publica información sobre sus préstamos personales y canales "
-            "de solicitud. Las condiciones, requisitos y cualquier oferta están "
-            "sujetos a evaluación y pueden cambiar; consulta la página oficial. Este "
-            "asistente no cotiza ni aprueba créditos."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "credito,crédito,prestamo,préstamo,cuota,requisitos,tasa",
-        "https://www.bancognb.com.pe/inicio/banca-personas/prestamos/prestamo-personal",
+        None,
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cómo consulto el estado de un reclamo?",
-        (
-            "Para conocer el estado de un reclamo formal, utiliza los canales de "
-            "atención oficiales y ten a mano tu código de seguimiento. El ticket de "
-            "este portal no equivale a un reclamo formal ante el Banco."
-        ),
+        SAFE_UNVERIFIED_CLAIM_STATUS,
         "reclamo,estado,seguimiento,incidencia,queja,código",
-        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta",
+        None,
     ),
     (
         "CUENTAS",
         "¿Cómo solicito un estado de cuenta?",
-        (
-            "La Banca por Teléfono incluye la solicitud de duplicado de estado de "
-            "cuenta. Comunícate con el Banco para confirmar requisitos y canales "
-            "vigentes; no compartas aquí números de cuenta ni documentos personales."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "estado,cuenta,documento,periodo,duplicado,extracto",
-        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
+        None,
     ),
     (
         "SOLICITUDES_INFORMACION",
         "¿Cómo puedo contactar a un asesor?",
-        (
-            "Para consultas, la página oficial publica Banca por Teléfono: (01) "
-            "616-4722 en Lima y 0801-00088 en provincias, con horarios regulares "
-            "indicados en el sitio. Los bloqueos tienen una ruta de atención distinta "
-            "y disponible 24 horas. Confirma la información actual en la fuente "
-            "oficial."
-        ),
-        "asesor,atencion,ayuda,telefono,contacto,horario",
-        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        "asesor,atencion,ayuda,telefono,contacto",
+        None,
     ),
     (
         "TARJETAS",
         "¿Puedo habilitar o deshabilitar compras por internet en mi tarjeta?",
-        (
-            "La página oficial indica que los servicios adicionales de tarjetas, como "
-            "compras por internet, pueden configurarse desde los canales digitales. "
-            "Si no tienes acceso, consulta las opciones de atención publicadas por el "
-            "Banco."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "tarjeta,internet,compras,habilitar,deshabilitar,configurar,seguridad",
-        "https://www.bancognb.com.pe/inicio/banca-personas/tarjetas",
+        None,
     ),
     (
         "BANCA_DIGITAL",
         "¿Cómo me afilio a Banca Móvil?",
-        (
-            "La página oficial de Banca Móvil enlaza la guía de afiliación y registro "
-            "para personas naturales. Sigue esa guía vigente; no compartas en este "
-            "chat "
-            "contraseñas, tokens, OTP ni códigos de seguridad."
-        ),
-        "banca movil,afiliar,afiliacion,registro,aplicacion,app,guia",
-        "https://www.bancognb.com.pe/inicio/canales/canales-digitales/banca-movil-personas",
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        "banca movil,activar,acceso,afiliacion,registro,aplicacion,app",
+        None,
     ),
     (
         "BANCA_DIGITAL",
         "¿Qué hago si olvidé mi contraseña de Banca Móvil?",
-        (
-            "Para recuperar tu contraseña, ingresa desde tu celular a la app oficial "
-            "Banca Móvil y elige «¿Olvidó su contraseña?». Selecciona el tipo de "
-            "documento DNI, registra el número y pulsa continuar. Valida tu identidad "
-            "con un selfie, sin lentes, gorra ni audífonos, con buena iluminación y "
-            "sin exceso de brillo, mirando de frente a la cámara. "
-            "Ingresa el código recibido en tu correo electrónico, crea una contraseña "
-            "segura que combine mayúsculas, minúsculas, números y símbolos y pulsa "
-            "continuar. Recibirás una notificación de confirmación. La guía indica "
-            "que tienes 3 intentos para generar el código. Nunca compartas aquí tu "
-            "contraseña ni códigos de seguridad."
-        ),
-        "olvide,olvidé,contraseña,clave,recuperar,restablecer,banca movil,dni,selfie",
-        "https://www.bancognb.com.pe/main/download?file=peru%2Fbanca_personas%2Fguia-cambio-de-contrasenia.pdf",
-        PASSWORD_GUIDE_VERIFIED_AT,
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        "olvide,olvidé,contraseña,clave,recuperar,restablecer,banca movil",
+        None,
     ),
     (
         "CUENTAS",
         "¿Qué necesito para abrir una Cuenta de Ahorro?",
-        (
-            "La página oficial de Cuenta de Ahorro publica los requisitos y documentos "
-            "aplicables. Revísala antes de iniciar, porque montos y condiciones del "
-            "producto pueden cambiar."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "cuenta ahorro abrir requisitos documento dni soles dolares",
-        "https://www.bancognb.com.pe/inicio/banca-personas/cuentas/cuenta-ahorro",
+        None,
     ),
     (
         "CUENTAS",
-        "¿Qué tipos de cuentas ofrece Banco GNB?",
-        (
-            "El sitio oficial presenta varias opciones de cuentas para personas, con "
-            "características distintas. Compara sus condiciones vigentes directamente "
-            "en la página del Banco antes de elegir."
-        ),
+        "¿Qué tipos de cuentas ofrece una entidad financiera?",
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "tipos cuenta corriente sueldo cts ahorro plazo opciones",
-        "https://www.bancognb.com.pe/inicio/banca-personas/cuentas",
+        None,
     ),
     (
         "CREDITOS",
         "¿El asistente puede decirme si me aprobarán un préstamo?",
-        (
-            "No. La aprobación y las condiciones dependen de la evaluación que realiza "
-            "el Banco. Consulta la información oficial del producto o sus canales de "
-            "atención; no compartas datos financieros sensibles en este chat."
-        ),
+        SAFE_UNVERIFIED_LOAN_APPROVAL,
         "prestamo credito aprobacion evaluar oferta calificacion",
-        "https://www.bancognb.com.pe/inicio/banca-personas/prestamos/prestamo-personal",
+        None,
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cuál es la diferencia entre un reclamo y un requerimiento?",
-        (
-            "Banco GNB define un reclamo como una manifestación de insatisfacción "
-            "relacionada con un producto, servicio u operación; un requerimiento busca "
-            "una acción, consulta o información del Banco. El ticket de este portal "
-            "no reemplaza esos canales formales."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "reclamo requerimiento diferencia consulta insatisfaccion solicitud",
-        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta",
+        None,
     ),
     (
         "RECLAMOS_SIMPLES",
-        "¿Cómo presento un reclamo formal a Banco GNB?",
-        (
-            "Utiliza el Libro de Reclamaciones y los canales publicados por Banco GNB. "
-            "El formulario oficial indica qué datos y medio de respuesta se solicitan. "
-            "No introduzcas documentos ni números de tarjeta en este portal."
-        ),
-        "presentar reclamo formal libro formulario queja canal",
-        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones",
+        "¿Cómo presento un reclamo formal ante una entidad financiera?",
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        "presentar reclamo formal formulario queja canal",
+        None,
     ),
     (
         "RECLAMOS_SIMPLES",
         "¿Cuánto tarda la respuesta de un reclamo formal?",
-        (
-            "La página oficial consultada indica un plazo de atención de hasta 15 días "
-            "hábiles para reclamos y requerimientos, con posibles extensiones "
-            "excepcionales comunicadas por el Banco. Verifica siempre la información "
-            "vigente en la fuente oficial."
-        ),
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
         "plazo tiempo respuesta reclamo requerimiento dias habiles demora",
-        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones-consulta",
+        None,
     ),
     (
         "SOLICITUDES_INFORMACION",
         "¿Cuál es el horario de Banca por Teléfono?",
-        (
-            "La página oficial consultada indica atención regular de lunes a viernes "
-            "de 9:00 a. m. a 6:30 p. m. y sábados de 9:00 a. m. a 1:00 p. m. Los "
-            "bloqueos tienen atención 24 horas. Confirma horarios vigentes en el sitio "
-            "oficial."
-        ),
-        "horario banca telefono lunes viernes sabado atencion",
-        "https://www.bancognb.com.pe/inicio/canales/banca-por-telefono",
+        SAFE_UNVERIFIED_FINANCIAL_INFORMATION,
+        "horario telefono atencion canal",
+        None,
     ),
     (
         "TARJETAS",
         "¿Qué hago si no reconozco una operación con mi tarjeta?",
-        (
-            "Comunícate de inmediato con los canales oficiales para recibir "
-            "orientación "
-            "y reportar el caso. Banco GNB informa que ciertos reclamos por "
-            "operaciones "
-            "no reconocidas pueden requerir documentación adicional. No compartas aquí "
-            "el número completo de tarjeta, claves ni códigos."
-        ),
+        SAFE_UNVERIFIED_CARD_ACTIVITY,
         "operacion no reconocida tarjeta fraude consumo desconocido reclamo",
-        "https://www.bancognb.com.pe/inicio/servicio-cliente/reclamaciones",
+        None,
     ),
 )
 
@@ -1001,7 +907,7 @@ def _seed_faq_catalog(
 ) -> int:
     for entry in DEMO_FAQS:
         category_name, question, answer, keywords, source_url = entry[:5]
-        source_verified_at = entry[5] if len(entry) > 5 else KNOWLEDGE_VERIFIED_AT
+        source_verified_at = entry[5] if len(entry) > 5 else None
         faq = session.exec(select(FAQ).where(FAQ.question == question)).first()
         legacy_faq = None
         if question in LEGACY_FAQ_QUESTIONS:
@@ -1029,6 +935,7 @@ def _seed_faq_catalog(
             ),
             "normalized_title": normalize_text(question),
             "normalized_question": normalize_text(question),
+            "intent": None,
             "source_url": source_url,
             "source_verified_at": source_verified_at,
             "status": FAQ.Status.PUBLISHED,
