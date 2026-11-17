@@ -51,6 +51,21 @@ cuentas y crea un Supervisor, roles, categorías, políticas SLA y las FAQs
 curadas. No crea cuentas demo, tickets, conversaciones ni datos operativos.
 Solo ejecútalo una vez; no reemplaza ni restablece cuentas existentes.
 
+## Alta puntual de un asesor
+
+Para agregar un asesor después del bootstrap inicial, usa el comando dedicado.
+Requiere que el rol `ASESOR` ya exista, se ejecuta una vez por persona y rechaza
+correos duplicados. Pide confirmación de acceso al correo y contraseña oculta;
+no incluyas la contraseña en el comando ni en el historial del shell.
+
+```bash
+sudo docker compose --profile bootstrap --env-file .env.production -f deploy/production/compose.yml run --rm --no-deps bootstrap python -m app.seed.production_advisor --email "asesor.demo1@tu-dominio-controlado.com" --name "Asesor Demo 1"
+```
+
+Repite el comando para el segundo asesor con otro correo y nombre. La cuenta se
+crea con el rol `ASESOR`, preferencia por defecto y un evento de auditoría. El
+comando no modifica el bootstrap del Supervisor, catálogos, FAQ ni tickets.
+
 Caddy obtiene y renueva HTTPS automáticamente. La emisión necesita DNS correcto
 y acceso entrante TCP a `80` y `443`; por eso el registro de API debe quedar
 DNS-only durante la configuración inicial.
