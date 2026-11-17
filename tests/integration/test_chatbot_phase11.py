@@ -15,6 +15,7 @@ from app.modules.chatbot.services import chatbot_service as chatbot_service_modu
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.conocimiento.models.faq import FAQ
 from app.modules.conocimiento.models.feedback import FAQFeedback
+from app.modules.tickets.models.ticket import Ticket
 from app.modules.tickets.services import ticket_service as ticket_service_module
 from app.seed.demo_data import seed_demo_data
 
@@ -147,7 +148,7 @@ def test_faq_discovery_does_not_consume_an_unknown_query_clarification_attempt(
 
 
 def test_manual_escalation_and_reset_are_idempotent(phase11_client) -> None:
-    client, _ = phase11_client
+    client, engine = phase11_client
     conversation = client.post("/api/v1/chat/conversations").json()
     endpoint = f"/api/v1/chat/conversations/{conversation['id']}/escalate"
     escalation = client.post(
@@ -155,11 +156,17 @@ def test_manual_escalation_and_reset_are_idempotent(phase11_client) -> None:
         json={"reason": "Necesito hablar con una persona"},
     )
     assert escalation.status_code == 200
-    assert escalation.json()["status"] == ConversationStatus.ACTIVE
+    assert escalation.json()["status"] == ConversationStatus.WAITING_CLARIFICATION
     assert escalation.json()["turn_count"] == 1
-    assert "no se ha creado una solicitud" in (
+    assert "no ofrece transferencia en vivo" in (
         escalation.json()["messages"][-1]["content"].casefold()
     )
+    assert (
+        "¿Quieres que prepare el borrador?"
+        in escalation.json()["messages"][-1]["content"]
+    )
+    with Session(engine) as session:
+        assert session.exec(select(Ticket)).all() == []
     repeated = client.post(
         endpoint,
         json={"reason": "Necesito hablar con una persona"},

@@ -3,7 +3,7 @@
 PERSONA_TEXTS = {
     "greeting": (
         "¡Hola! Soy el asistente virtual del prototipo académico de gestión de "
-        "tickets de Banco GNB Perú. No es un canal bancario oficial ni procesa "
+        "tickets. No es un canal bancario oficial ni procesa "
         "operaciones bancarias. ¿En qué "
         "puedo ayudarte hoy? Puedo orientarte sobre preguntas frecuentes o el "
         "seguimiento de una solicitud."

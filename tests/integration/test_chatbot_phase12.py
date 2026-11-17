@@ -211,6 +211,48 @@ def test_greeting_uses_ai_and_returns_structured_backend_menu(
     assert restored["ui"] == body["ui"]
 
 
+def test_lost_card_uses_unverified_free_conversation_without_faq_sources(
+    phase12_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase12_client
+    provider = FakeAIProvider(
+        AIGenerationResult.generated(
+            text=(
+                "Siento lo de tu tarjeta. Para indicaciones concretas, contacta al "
+                "emisor por un canal oficial. Este chat no puede bloquear tarjetas. "
+                "¿Quieres que prepare un borrador para un asesor?"
+            ),
+            source_ids=[],
+            provider="fake",
+            model="fake-test-model",
+            intent_classification="CLARIFICATION",
+        )
+    )
+    configure_fake(monkeypatch, provider)
+    conversation = client.post("/api/v1/chat/conversations").json()
+
+    response = client.post(
+        f"/api/v1/chat/conversations/{conversation['id']}/messages",
+        json={"content": "Perdí mi tarjeta de crédito"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["response_source"] == "AI"
+    assert body["sources"] == []
+    assert body["ticket_draft"]["status"] == "INACTIVE"
+    assert body["ticket_query"] is None
+    assert {reply["content"] for reply in body["quick_replies"]} == {
+        "Sí, prepara la solicitud",
+        "No, continuaré por aquí",
+    }
+    assert len(provider.calls) == 1
+    request = provider.calls[0]
+    assert request.grounding_required is False
+    assert request.context == ()
+    assert request.user_message == "Perdí mi tarjeta de crédito"
+
+
 def test_unverified_faq_uses_safe_answer_without_rag_source(
     phase12_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1071,7 +1113,7 @@ def test_natural_ticket_and_advisor_intents_use_safe_orchestration(
     client, _ = phase12_client
     provider = FakeAIProvider(
         AIGenerationResult.generated(
-            text="No debe utilizarse para procesar esta intención.",
+            text="Te transfiero con un asesor humano en vivo.",
             source_ids=[],
             provider="fake",
             model="fake-test-model",
@@ -1086,12 +1128,25 @@ def test_natural_ticket_and_advisor_intents_use_safe_orchestration(
     )
 
     assert response.status_code == 200
-    assert response.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
+    if content == "Quiero conversar con alguien":
+        assert response.json()["suggested_action"] == "ASK_CLARIFICATION"
+        assert response.json()["ticket_draft"]["status"] == "INACTIVE"
+        assert "no ofrece transferencia en vivo" in (
+            response.json()["bot_message"]["content"].casefold()
+        )
+        assert {reply["content"] for reply in response.json()["quick_replies"]} == {
+            "Sí, prepara la solicitud",
+            "No, continuaré por aquí",
+        }
+    else:
+        assert response.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
     assert len(provider.calls) == 1
     request = provider.calls[0]
     assert request.tools
     assert request.authorized_ticket_data == ()
     assert "user_id" not in repr(request)
+    if content == "Quiero conversar con alguien":
+        assert request.user_message == content
 
 
 def test_arithmetic_embedded_in_a_banking_query_never_reaches_ai_provider(

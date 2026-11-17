@@ -73,6 +73,40 @@ _UNGROUNDED_CLAIM_PATTERN = re.compile(
     r"proced\w*|sin\s+costo)\b",
     re.IGNORECASE,
 )
+_SAFE_ISSUER_CHANNEL_GUIDANCE_PATTERN = re.compile(
+    r"(?:para\s+(?:(?:recibir|obtener)\s+)?indicaciones\s+"
+    r"(?:concretas|especificas),\s*)?"
+    r"(?:contact\w*|comunicat\w*|consulta\w*)\s+"
+    r"(?:(?:al|a\s+la|con\s+el|con\s+la|el|la)\s+)?"
+    r"(?:emisor\w*|entidad\s+emisora)"
+    r"(?:\s+de\s+(?:tu|la)\s+tarjeta)?\s+"
+    r"(?:por|mediante|a\s+traves\s+de)\s+"
+    r"(?:un\s+|el\s+|los\s+)?canal(?:es)?\s+oficial(?:es)?",
+    re.IGNORECASE,
+)
+_UNAUTHORIZED_CONVERSATIONAL_ACTION_PATTERN = re.compile(
+    r"\b(?:tu\s+|la\s+|su\s+)?tarjetas?\s+"
+    r"(?:(?:ya\s+)?(?:esta|estan|fue|fueron|ha\s+sido|han\s+sido)\s+)?"
+    r"(?:bloquead\w*|desactivad\w*)\b|"
+    r"\b(?:(?:te\s+)?(?:recomiendo|sugiero)\s+(?:que\s+)?|"
+    r"(?:debes?|deberias?|podrias?)\s+(?:que\s+)?|"
+    r"tienes\s+que\s+|es\s+mejor\s+)"
+    r"(?:bloque\w*|desactiv\w*)\s+(?:tu\s+|la\s+|su\s+)?tarjetas?\b|"
+    r"\b(?:ya\s+)?(?:(?:he|hemos)\s+)?"
+    r"(?:bloque(?:e|o|ado|aste|amos|aron)|"
+    r"desactiv(?:e|o|ado|aste|amos|aron))\s+"
+    r"(?:tu\s+|la\s+)?tarjetas?\b|"
+    r"\b(?:bloquea|desactiva)\s+(?:tu\s+|la\s+)?tarjetas?\b|"
+    r"\b(?:te\s+(?:voy\s+a\s+)?|ahora\s+te\s+|voy\s+a\s+)"
+    r"(?:transfier\w*|deriv\w*|conect\w*|pas\w*)\b.{0,50}\b"
+    r"(?:asesor|persona|agente|humano)\w*\b|"
+    r"\bya\s+(?:(?:he|hemos)\s+)?"
+    r"(?:cread\w*|abiert\w*|registrad\w*|generad\w*)\s+"
+    r"(?:un\s+)?(?:ticket|solicitud|borrador)\b|"
+    r"\b(?:un\s+)?(?:asesor|persona|agente)\s+(?:ya\s+)?"
+    r"(?:te\s+)?(?:atiend\w*|contact\w*|respon\w*)\b",
+    re.IGNORECASE,
+)
 _OBLIGATION_PATTERN = re.compile(
     r"\b(?P<negation>no|nunca)?\s*"
     r"(?:(?:se\s+)?(?:deber?\w*|recomienda\w*)|hay\s+que|"
@@ -583,7 +617,12 @@ def validate_conversational_output(
     normalized = normalize_text(text)
     if _URL_PATTERN.search(text) or _NUMBER_PATTERN.search(text):
         return GuardrailDecision(False, "UNGROUNDED_CLAIM")
-    if _UNGROUNDED_CLAIM_PATTERN.search(normalized):
+    if _UNAUTHORIZED_CONVERSATIONAL_ACTION_PATTERN.search(normalized):
+        return GuardrailDecision(False, "UNSAFE_OUTPUT", "UNAUTHORIZED_ACTION_CLAIM")
+    if _UNGROUNDED_CLAIM_PATTERN.search(normalized) and not (
+        intent_classification == "CLARIFICATION"
+        and _only_safe_issuer_guidance_claims(text)
+    ):
         return GuardrailDecision(False, "UNGROUNDED_CLAIM")
     if any(
         re.search(pattern, normalized, re.IGNORECASE)
@@ -596,6 +635,23 @@ def validate_conversational_output(
     ):
         return GuardrailDecision(False, "OUT_OF_SCOPE_REDIRECT_REQUIRED")
     return GuardrailDecision(True)
+
+
+def _only_safe_issuer_guidance_claims(text: str) -> bool:
+    found_claim = False
+    for sentence in re.split(r"(?<=[.!?])\s+", text.strip()):
+        normalized_sentence = normalize_text(sentence).strip(" .!?¿¡;:")
+        claims = list(_UNGROUNDED_CLAIM_PATTERN.finditer(normalized_sentence))
+        if not claims:
+            continue
+        found_claim = True
+        if not _SAFE_ISSUER_CHANNEL_GUIDANCE_PATTERN.fullmatch(normalized_sentence):
+            return False
+        if any(
+            not match.group().startswith(("contact", "comunic")) for match in claims
+        ):
+            return False
+    return found_claim
 
 
 def validate_ticket_response(

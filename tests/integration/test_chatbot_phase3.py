@@ -157,11 +157,19 @@ def test_advisor_context_survives_pausing_and_resuming_draft(phase3_client) -> N
         headers=headers,
         json={"option_id": "menu:advisor"},
     )
-    initial_description = handoff.json()["ticket_draft"]["fields"]["description"]
     assert handoff.status_code == 200
-    assert handoff.json()["bot_message"]["intent"] == "ADVISOR_TICKET_DRAFT"
-    assert initial_description is None
-    assert "DESCRIPTION" in handoff.json()["ticket_draft"]["missing_fields"]
+    assert handoff.json()["ticket_draft"]["status"] == "INACTIVE"
+    assert handoff.json()["suggested_action"] == "ASK_CLARIFICATION"
+    assert {reply["content"] for reply in handoff.json()["quick_replies"]} == {
+        "Sí, prepara la solicitud",
+        "No, continuaré por aquí",
+    }
+
+    accepted = send(client, conversation_id, "Sí, prepara la solicitud", headers)
+    assert accepted.json()["bot_message"]["intent"] == "ADVISOR_TICKET_DRAFT"
+    assert accepted.json()["ticket_draft"]["fields"]["description"] is None
+    assert accepted.json()["ticket_draft"]["fields"]["subject"] is None
+    assert "DESCRIPTION" in accepted.json()["ticket_draft"]["missing_fields"]
 
     paused = send(client, conversation_id, "mostrar menú", headers)
     assert paused.status_code == 200
@@ -1394,16 +1402,19 @@ def test_advisor_request_creates_context_ticket_only_after_confirmation(phase3_c
     faq = send(client, conversation_id, "¿Qué requisitos tiene una tarjeta?", headers)
     assert faq.json()["response_source"] == "DETERMINISTIC"
     handoff = send(client, conversation_id, "Quiero hablar con un asesor", headers)
-    draft = handoff.json()["ticket_draft"]
 
     assert handoff.status_code == 200
     assert handoff.json()["conversation_status"] == "WAITING_CLARIFICATION"
-    assert "no hay transferencia en vivo" in (
+    assert "no ofrece transferencia en vivo" in (
         handoff.json()["bot_message"]["content"].casefold()
     )
-    assert "código de seguimiento" in (
-        handoff.json()["bot_message"]["content"].casefold()
-    )
+    assert handoff.json()["ticket_draft"]["status"] == "INACTIVE"
+    assert {reply["content"] for reply in handoff.json()["quick_replies"]} == {
+        "Sí, prepara la solicitud",
+        "No, continuaré por aquí",
+    }
+    accepted = send(client, conversation_id, "Sí, prepara la solicitud", headers)
+    draft = accepted.json()["ticket_draft"]
     assert draft["fields"]["category_id"]
     assert draft["fields"]["description"] is None
     assert "DESCRIPTION" in draft["missing_fields"]

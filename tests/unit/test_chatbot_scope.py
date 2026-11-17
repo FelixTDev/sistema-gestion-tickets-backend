@@ -226,9 +226,57 @@ def test_reporting_an_error_starts_the_existing_ticket_draft_flow() -> None:
 
 def test_natural_advisor_request_and_navigation_phrases_are_deterministic() -> None:
     assert ChatbotService._is_advisor_request("Quiero conversar con alguien")
+    assert ChatbotService._is_advisor_request("Derívame con un asesor")
+    assert ChatbotService._is_advisor_request("Pásame con una persona")
+    assert ChatbotService._is_advisor_request("Quiero que me atienda alguien")
     assert (
         ChatbotService._conversation_lifecycle_action("Regresa al inicio") is not None
     )
+
+
+def test_unhelpful_follow_up_recognizes_rejected_options() -> None:
+    assert ChatbotService._is_unhelpful_follow_up(
+        "Ninguna de esas opciones resuelve mi duda"
+    )
+    assert ChatbotService._is_unhelpful_follow_up("Ninguna opción me ayuda")
+
+
+def test_advisor_handoff_does_not_reuse_ticket_without_ticket_reference() -> None:
+    request = ChatbotService._contextual_ticket_query_request(
+        "Derívame con un asesor",
+        {
+            "last_ticket_query_codes": ["TCK-OLD-0001"],
+            "last_ticket_query_index": None,
+        },
+    )
+
+    assert request is None
+
+
+def test_ambiguous_advisor_follow_up_after_ticket_list_asks_which_ticket() -> None:
+    request = ChatbotService._contextual_ticket_query_request(
+        "¿Qué asesor lo atendió?",
+        {
+            "last_ticket_query_codes": ["TCK-OLD-0001", "TCK-OLD-0002"],
+            "last_ticket_query_index": None,
+        },
+    )
+
+    assert request is not None
+    assert request.query_type.value == "CLARIFY_TICKET_CODE"
+    assert request.clarification_query_type.value == "TICKET_STATUS"
+
+
+def test_bare_ticket_field_question_does_not_reuse_previous_ticket() -> None:
+    request = ChatbotService._contextual_ticket_query_request(
+        "¿Cuál es el estado?",
+        {
+            "last_ticket_query_codes": ["TCK-OLD-0001"],
+            "last_ticket_query_index": None,
+        },
+    )
+
+    assert request is None
 
 
 def test_unhelpful_rephrase_is_clarified_without_escalating() -> None:

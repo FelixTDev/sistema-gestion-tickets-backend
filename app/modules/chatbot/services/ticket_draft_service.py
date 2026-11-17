@@ -177,11 +177,13 @@ class TicketDraftService:
             if draft.status == ChatbotTicketDraftStatus.CONFIRMED:
                 draft.status = ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION
         elif start_requested or self._has_field_label(content):
+            initial_detail = self._initial_detail(initial_description)
             draft = ChatbotTicketDraft(
                 status=ChatbotTicketDraftStatus.COLLECTING,
                 fields=ChatbotTicketDraftFields(
                     category_id=suggested_category_id,
-                    description=initial_description,
+                    subject=self._initial_subject(initial_detail),
+                    description=initial_detail,
                 ),
             )
         else:
@@ -424,6 +426,25 @@ class TicketDraftService:
         if not normalized_candidate or normalized_candidate not in normalized_content:
             return None
         return candidate
+
+    @staticmethod
+    def _initial_detail(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        detail = value.strip()
+        prefix = "Resumen del problema (extracto determinístico):"
+        if detail.casefold().startswith(prefix.casefold()):
+            detail = detail[len(prefix) :].strip()
+        return detail if len(detail) >= 5 else None
+
+    @staticmethod
+    def _initial_subject(value: str | None) -> str | None:
+        if value is None:
+            return None
+        subject = re.split(r"(?<=[.!?])\s+", value, maxsplit=1)[0].strip(" .,:;-")
+        if not 3 <= len(subject) <= 200:
+            return None
+        return subject
 
     @staticmethod
     def _set_text_field(

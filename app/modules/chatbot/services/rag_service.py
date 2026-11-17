@@ -467,8 +467,10 @@ class RAGService:
             else (
                 GUARDRAIL_POLICY
                 + " Este turno es solo conversacional: reconoce el mensaje o "
-                "formula una aclaración breve. No incluyas datos, requisitos, "
-                "canales ni afirmaciones sobre productos o procesos bancarios."
+                "formula una aclaración breve. Puedes ofrecer orientación general "
+                "de seguridad y pasos no específicos, pero no inventes datos de una "
+                "entidad, teléfonos, canales concretos, requisitos, plazos, acciones "
+                "de bloqueo ni afirmes haber realizado una operación bancaria."
             )
         )
         if tools:
@@ -519,13 +521,24 @@ class RAGService:
                 ),
                 ChatbotIntent.CLARIFICATION: (
                     " Usa el contexto público reciente y pregunta de forma concreta "
-                    "qué parte falta; evita repetir una pregunta genérica."
+                    "qué parte falta; si una respuesta u opciones previas no ayudaron, "
+                    "reconócelo y continúa con el tema actual sin repetir la lista. "
+                    "No necesitas una FAQ para pedir una aclaración o proponer un "
+                    "siguiente paso seguro, como contactar al emisor por un canal "
+                    "oficial. No inventes instrucciones específicas de una entidad."
                 ),
                 ChatbotIntent.OUT_OF_SCOPE: (
                     " Reconoce la pregunta con empatía, indica que este asistente se "
                     "especializa en orientación bancaria y seguimiento de solicitudes, "
                     "y ofrece mostrar las categorías disponibles. No respondas el dato "
                     "externo ni añadas otros hechos."
+                ),
+                ChatbotIntent.REQUEST_ADVISOR: (
+                    " Reconoce que la persona pide atención de un asesor y pregunta "
+                    "claramente si quiere que prepare un borrador de solicitud. No "
+                    "afirmes que hay transferencia en vivo, que ya existe un ticket "
+                    "ni que un asesor fue asignado; el backend conserva la revisión "
+                    "y confirmación final."
                 ),
             }
             generation_policy += conversational_guidance.get(conversational_intent, "")

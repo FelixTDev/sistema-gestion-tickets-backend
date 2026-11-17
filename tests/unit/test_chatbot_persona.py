@@ -5,6 +5,7 @@ def test_persona_greeting_disclaims_official_channel_and_bank_operations() -> No
     greeting = persona_text("greeting", enabled=True, fallback="fallback")
 
     assert "prototipo académico" in greeting
+    assert "gnb" not in greeting.casefold()
     normalized = greeting.casefold()
     assert "no es un canal bancario oficial" in normalized
     assert "ni procesa operaciones bancarias" in normalized

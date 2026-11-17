@@ -620,18 +620,63 @@ def test_ambiguous_assignment_follow_up_asks_which_ticket(phase2_client) -> None
     response = client.post(
         endpoint,
         headers=headers,
-        json={"content": "¿Un asesor lo está atendiendo?"},
+        json={"content": "¿Qué asesor lo atendió?"},
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body["requires_clarification"] is True
-    assert body["ticket_query"]["query_type"] == "TICKET_LIST"
-    assert "¿Cuál" in body["bot_message"]["content"]
-    assert {item["tracking_code"] for item in body["ticket_query"]["tickets"]} == {
-        "TCK-AMBIGUOUS-FIRST",
-        "TCK-AMBIGUOUS-SECOND",
-    }
+    assert body["ticket_query"]["query_type"] == "CLARIFY_TICKET_CODE"
+    assert "Indícame un solo código" in body["bot_message"]["content"]
+    assert body["ticket_query"]["tickets"] == []
+    selected = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "TCK-AMBIGUOUS-SECOND"},
+    )
+    assert selected.status_code == 200
+    assert selected.json()["ticket_query"]["ticket"]["tracking_code"] == (
+        "TCK-AMBIGUOUS-SECOND"
+    )
+
+
+def test_new_card_topic_clears_ticket_context_before_advisor_request(
+    phase2_client,
+) -> None:
+    client, engine = phase2_client
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-OLD-CARD-TOPIC-001",
+            status=TicketStatus.CERRADO,
+        )
+        session.commit()
+
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    listed = client.post(
+        endpoint, headers=headers, json={"content": "Muéstrame mis tickets"}
+    )
+    card_topic = client.post(
+        endpoint, headers=headers, json={"content": "Perdí mi tarjeta de crédito"}
+    )
+    advisor = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "Derívame con un asesor"},
+    )
+
+    assert listed.status_code == card_topic.status_code == advisor.status_code == 200
+    assert listed.json()["ticket_query"]["total"] == 1
+    assert card_topic.json().get("ticket_query") is None
+    assert "TCK-OLD-CARD-TOPIC-001" not in str(card_topic.json())
+    assert advisor.json().get("ticket_query") is None
+    assert advisor.json()["ticket_draft"]["status"] == "INACTIVE"
+    assert "TCK-OLD-CARD-TOPIC-001" not in str(advisor.json())
 
 
 def test_single_ticket_assignment_question_resolves_without_code(phase2_client) -> None:
@@ -646,12 +691,28 @@ def test_single_ticket_assignment_question_resolves_without_code(phase2_client) 
         )
         session.commit()
     token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    listed = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "Muéstrame mis tickets"},
+    )
+    response = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "¿Qué asesor lo atendió?"},
+    )
 
-    response = ask(client, "¿Un asesor está atendiendo mi ticket?", token)
-
-    assert response["ticket_query"]["ticket"]["tracking_code"] == "TCK-ONLY-ASSIGNED"
-    assert response["ticket_query"]["ticket"]["assigned_advisor_name"] == "Asesor Demo"
-    assert "Asesor Demo" in response["bot_message"]["content"]
+    assert listed.status_code == response.status_code == 200
+    assert response.json()["ticket_query"]["ticket"]["tracking_code"] == (
+        "TCK-ONLY-ASSIGNED"
+    )
+    assert response.json()["ticket_query"]["ticket"]["assigned_advisor_name"] == (
+        "Asesor Demo"
+    )
+    assert "Asesor Demo" in response.json()["bot_message"]["content"]
 
 
 def test_attended_tickets_query_returns_status_and_assignment_not_generic_list(

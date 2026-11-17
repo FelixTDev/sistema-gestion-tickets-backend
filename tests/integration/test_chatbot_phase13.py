@@ -151,16 +151,25 @@ def test_anonymous_advisor_request_requires_login_without_claiming_assignment(
     response = client.post(endpoint, json={"content": "quiero hablar con un asesor"})
 
     assert response.status_code == 200
-    assert response.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
-    assert response.json()["ticket_query"]["authentication_required"] is True
-    assert response.json()["conversation_status"] == "ACTIVE"
+    assert response.json()["suggested_action"] == "ASK_CLARIFICATION"
+    assert response.json()["ticket_query"] is None
+    assert response.json()["ticket_draft"]["status"] == "INACTIVE"
+    assert {reply["content"] for reply in response.json()["quick_replies"]} == {
+        "Sí, prepara la solicitud",
+        "No, continuaré por aquí",
+    }
+    accepted = client.post(endpoint, json={"content": "Sí, prepara la solicitud"})
+    assert accepted.status_code == 200
+    assert accepted.json()["suggested_action"] == "AUTHENTICATION_REQUIRED"
+    assert accepted.json()["ticket_query"]["authentication_required"] is True
+    assert response.json()["conversation_status"] == "WAITING_CLARIFICATION"
     assert "no se ha creado una solicitud" in (
-        response.json()["bot_message"]["content"].casefold()
+        accepted.json()["bot_message"]["content"].casefold()
     )
     assert "ni se ha asignado un asesor" in (
-        response.json()["bot_message"]["content"].casefold()
+        accepted.json()["bot_message"]["content"].casefold()
     )
-    assert response.json()["offers_ticket"] is False
+    assert accepted.json()["offers_ticket"] is False
     token = login(client)
     headers = {"Authorization": f"Bearer {token}"}
     linked = client.post(
@@ -201,11 +210,29 @@ def test_authenticated_advisor_request_starts_confirmable_ticket_draft(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["ticket_draft"]["status"] == "COLLECTING"
+    assert body["ticket_draft"]["status"] == "INACTIVE"
     assert body["suggested_action"] == "ASK_CLARIFICATION"
     assert body["conversation_status"] == "WAITING_CLARIFICATION"
-    assert "no hay transferencia en vivo" in body["bot_message"]["content"].casefold()
-    assert "confirmes" in body["bot_message"]["content"].casefold()
+    assert body["ticket_query"] is None
+    assert "¿quieres" in body["bot_message"]["content"].casefold()
+    assert {reply["content"] for reply in body["quick_replies"]} == {
+        "Sí, prepara la solicitud",
+        "No, continuaré por aquí",
+    }
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+    accepted = client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"content": "Sí, prepara la solicitud"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["ticket_draft"]["status"] == "COLLECTING"
+    assert "no hay transferencia en vivo" in (
+        accepted.json()["bot_message"]["content"].casefold()
+    )
+    assert "confirmes" in accepted.json()["bot_message"]["content"].casefold()
 
     with Session(engine) as session:
         category = session.exec(
@@ -282,6 +309,85 @@ def test_authenticated_advisor_request_starts_confirmable_ticket_draft(
     assert "pendiente de asignación" in (
         status_reply.json()["bot_message"]["content"].casefold()
     )
+
+
+def test_lost_card_guidance_is_safe_and_offers_an_advisor_request(
+    phase13_client,
+) -> None:
+    client, engine = phase13_client
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    response = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "Perdí mi tarjeta de crédito"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    answer = body["bot_message"]["content"].casefold()
+    assert "canal oficial" in answer
+    assert "no puede bloquear" in answer
+    assert "¿quieres" in answer
+    assert body["ticket_draft"]["status"] == "INACTIVE"
+    assert body["ticket_query"] is None
+    assert {reply["content"] for reply in body["quick_replies"]} == {
+        "Sí, prepara la solicitud",
+        "No, continuaré por aquí",
+    }
+    assert not any(token in answer for token in ("llama al", "marca el", "bloqueé"))
+
+    accepted = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "Sí, prepara la solicitud"},
+    )
+    assert accepted.status_code == 200
+    draft = accepted.json()["ticket_draft"]
+    assert draft["status"] == "COLLECTING"
+    assert draft["fields"]["category_id"] is not None
+    assert "tarjeta" in draft["fields"]["description"].casefold()
+    assert "tarjeta" in draft["fields"]["subject"].casefold()
+    assert draft["missing_fields"] == ["PRIORITY"]
+    assert {reply["content"] for reply in accepted.json()["quick_replies"]} == {
+        "Prioridad: BAJA",
+        "Prioridad: MEDIA",
+        "Prioridad: ALTA",
+        "Prioridad: URGENTE",
+        "Cancelo el borrador",
+    }
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+
+def test_declining_advisor_offer_does_not_start_a_draft_or_ticket(
+    phase13_client,
+) -> None:
+    client, engine = phase13_client
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    offered = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "Quiero que me atienda una persona"},
+    )
+    declined = client.post(endpoint, headers=headers, json={"content": "No, gracias"})
+    continued = client.post(endpoint, headers=headers, json={"content": "Hola"})
+
+    assert offered.status_code == declined.status_code == continued.status_code == 200
+    assert offered.json()["ticket_draft"]["status"] == "INACTIVE"
+    assert declined.json()["ticket_draft"]["status"] == "INACTIVE"
+    assert continued.json()["ticket_draft"]["status"] == "INACTIVE"
+    assert declined.json()["ticket_query"] is None
+    assert "no prepararé" in declined.json()["bot_message"]["content"].casefold()
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
 
 
 def test_advisor_ticket_flow_can_be_disabled_without_creating_or_escalating(

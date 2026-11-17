@@ -135,7 +135,7 @@ def test_greeting_gets_a_friendly_reply_without_escalating(chatbot_client, conte
     body = response.json()
     assert body["bot_message"]["content"] == (
         "¡Hola! Soy el asistente virtual del prototipo académico de gestión de "
-        "tickets de Banco GNB Perú. No es un canal bancario oficial ni procesa "
+        "tickets. No es un canal bancario oficial ni procesa "
         "operaciones bancarias. ¿En qué "
         "puedo ayudarte hoy? Puedo orientarte sobre preguntas frecuentes o el "
         "seguimiento de una solicitud."
@@ -145,6 +145,8 @@ def test_greeting_gets_a_friendly_reply_without_escalating(chatbot_client, conte
     assert body["requires_clarification"] is False
     assert body["fallback_reason"] is None
     assert body["conversation_status"] == "ACTIVE"
+    assert body["ui"]["type"] == "MAIN_MENU"
+    assert "GNB" not in body["bot_message"]["content"]
     assert body["response_source"] == "DETERMINISTIC"
     assert body["faq_id"] is None
     assert body["sources"] == []
@@ -740,6 +742,8 @@ def test_unhelpful_follow_up_accepts_fused_words_and_offers_real_next_steps(
     assert "no resolvió" in body["bot_message"]["content"].casefold()
     assert "CONTACT_ADVISOR" in body["available_actions"]
     assert "CREATE_TICKET" in body["available_actions"]
+    assert body["ui"] is None
+    assert body["clarification_options"] == []
 
 
 def test_authorizes_conversation_owner_and_rejects_other_client(chatbot_client):
