@@ -34,9 +34,17 @@ class QueryMyTicketsArguments(_StrictArguments):
     ) = None
     tracking_code: str | None = Field(default=None, max_length=30)
     position: int | None = Field(default=None, ge=1, le=5)
-    fields: list[Literal["CODE", "SUBJECT", "STATUS", "DESCRIPTION"]] = Field(
-        default_factory=list, max_length=4
-    )
+    fields: list[
+        Literal[
+            "CODE",
+            "SUBJECT",
+            "STATUS",
+            "ASSIGNMENT",
+            "RESPONSE_STATUS",
+            "RESPONSE",
+            "DESCRIPTION",
+        ]
+    ] = Field(default_factory=list, max_length=7)
     page: int = Field(default=1, ge=1, le=10_000)
 
 

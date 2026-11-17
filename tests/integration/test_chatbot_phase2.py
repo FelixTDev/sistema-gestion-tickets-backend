@@ -545,6 +545,152 @@ def test_ticket_position_follow_up_returns_the_requested_subject(phase2_client) 
     )
 
 
+def test_assignment_follow_up_uses_selected_ticket_and_suppresses_global_actions(
+    phase2_client,
+) -> None:
+    client, engine = phase2_client
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-ASSIGNMENT-FIRST",
+            status=TicketStatus.EN_PROCESO,
+            created_at=datetime(2026, 10, 10, tzinfo=UTC),
+        )
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-ASSIGNMENT-SECOND",
+            status=TicketStatus.NUEVO,
+            created_at=datetime(2026, 10, 9, tzinfo=UTC),
+        )
+        session.commit()
+
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    listed = client.post(
+        endpoint, headers=headers, json={"content": "Muéstrame mis tickets recientes"}
+    )
+    assignment = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "¿Qué asesor tomó mi primer ticket?"},
+    )
+
+    assert listed.status_code == assignment.status_code == 200
+    assert listed.json()["ticket_query"]["total"] == 2
+    assert assignment.json()["ticket_query"]["ticket"]["tracking_code"] == (
+        "TCK-ASSIGNMENT-FIRST"
+    )
+    assert assignment.json()["ticket_query"]["ticket"]["assigned_advisor_name"] == (
+        "Asesor Demo"
+    )
+    assert "Asesor Demo" in assignment.json()["bot_message"]["content"]
+    assert assignment.json()["quick_replies"] == []
+
+
+def test_ambiguous_assignment_follow_up_asks_which_ticket(phase2_client) -> None:
+    client, engine = phase2_client
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-AMBIGUOUS-FIRST",
+            status=TicketStatus.EN_PROCESO,
+            created_at=datetime(2026, 10, 10, tzinfo=UTC),
+        )
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-AMBIGUOUS-SECOND",
+            status=TicketStatus.NUEVO,
+            created_at=datetime(2026, 10, 9, tzinfo=UTC),
+        )
+        session.commit()
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    client.post(endpoint, headers=headers, json={"content": "Muéstrame mis tickets"})
+
+    response = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "¿Un asesor lo está atendiendo?"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requires_clarification"] is True
+    assert body["ticket_query"]["query_type"] == "TICKET_LIST"
+    assert "¿Cuál" in body["bot_message"]["content"]
+    assert {item["tracking_code"] for item in body["ticket_query"]["tickets"]} == {
+        "TCK-AMBIGUOUS-FIRST",
+        "TCK-AMBIGUOUS-SECOND",
+    }
+
+
+def test_single_ticket_assignment_question_resolves_without_code(phase2_client) -> None:
+    client, engine = phase2_client
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-ONLY-ASSIGNED",
+            status=TicketStatus.EN_PROCESO,
+        )
+        session.commit()
+    token = login(client)
+
+    response = ask(client, "¿Un asesor está atendiendo mi ticket?", token)
+
+    assert response["ticket_query"]["ticket"]["tracking_code"] == "TCK-ONLY-ASSIGNED"
+    assert response["ticket_query"]["ticket"]["assigned_advisor_name"] == "Asesor Demo"
+    assert "Asesor Demo" in response["bot_message"]["content"]
+
+
+def test_attended_tickets_query_returns_status_and_assignment_not_generic_list(
+    phase2_client,
+) -> None:
+    client, engine = phase2_client
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-ATTENDED-001",
+            status=TicketStatus.EN_PROCESO,
+            created_at=datetime(2026, 10, 10, tzinfo=UTC),
+        )
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-ATTENDED-002",
+            status=TicketStatus.NUEVO,
+            created_at=datetime(2026, 10, 9, tzinfo=UTC),
+        )
+        session.commit()
+    token = login(client)
+
+    response = ask(client, "¿Mis tickets ya fueron atendidos?", token)
+
+    assert response["ticket_query"]["query_type"] == "TICKET_LIST"
+    assert response["ticket_query"]["total"] == 2
+    assert {
+        ticket["assignment_status"] for ticket in response["ticket_query"]["tickets"]
+    } == {
+        "ASSIGNED",
+        "UNASSIGNED",
+    }
+    assert "asesor" in response["bot_message"]["content"].casefold()
+    assert response["quick_replies"] == []
+
+
 def test_bare_ticket_code_question_does_not_fall_through_to_faq(phase2_client) -> None:
     client, _ = phase2_client
     token = login(client)
@@ -585,7 +731,7 @@ def test_authenticated_ticket_query_links_anonymous_conversation(phase2_client) 
     assert anonymous_read.status_code == 401
 
 
-def test_ticket_tool_uses_only_owned_summary_fields_for_provider_answer(
+def test_private_ticket_query_does_not_send_ticket_data_to_provider(
     phase2_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase2_client
@@ -630,28 +776,8 @@ def test_ticket_tool_uses_only_owned_summary_fields_for_provider_answer(
                         },
                     ),
                 )
-            authorized = request.authorized_ticket_data
-            assert len(authorized) == 1
-            item = authorized[0]
-            status_labels = {
-                "NUEVO": "Nuevo",
-                "ASIGNADO": "Asignado",
-                "EN_PROCESO": "En proceso",
-                "PENDIENTE_CLIENTE": "Pendiente del cliente",
-                "RESUELTO": "Resuelto",
-                "CERRADO": "Cerrado",
-                "CANCELADO": "Cancelado",
-            }
-            return AIGenerationResult.generated(
-                text=(
-                    f"Tu ticket {item['tracking_code']} tiene el asunto "
-                    f"{item['subject']} y está en estado "
-                    f"{status_labels[item['status']]}."
-                ),
-                source_ids=[],
-                provider=self.name,
-                model=self.model,
-                intent_classification="TICKET_DETAIL",
+            raise AssertionError(
+                "Private ticket results must not trigger a second call"
             )
 
     provider = ToolProvider()
@@ -660,25 +786,31 @@ def test_ticket_tool_uses_only_owned_summary_fields_for_provider_answer(
     )
     token = login(client)
 
-    response = ask(client, "Muéstrame mis tickets recientes.", token)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+    private_marker = "TEXTO_PRIVADO_QUE_NO_DEBE_LLEGAR_AL_PROVEEDOR"
+    client.post(endpoint, headers=headers, json={"content": private_marker})
+    provider.requests.clear()
+    response = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "Muéstrame mis tickets recientes."},
+    ).json()
 
-    assert response["response_source"] == "AI"
-    assert len(provider.requests) == 2
-    tool_request, answer_request = provider.requests
+    assert response["response_source"] == "DETERMINISTIC"
+    assert len(provider.requests) == 1
+    tool_request = provider.requests[0]
     tool_names = {tool.name for tool in tool_request.tools}
     assert "query_my_tickets" in tool_names
     assert "update_ticket_draft" in tool_names
     assert "create_ticket" not in tool_names
-    assert answer_request.response_mode == "ticket"
-    assert answer_request.authorized_ticket_data == (
-        {
-            "tracking_code": "TCK-MINIMAL-PROVIDER",
-            "subject": "Asunto TCK-MINIMAL-PROVIDER",
-            "status": "EN_PROCESO",
-        },
-    )
-    assert "description" not in str(answer_request.authorized_ticket_data).casefold()
-    assert "priority" not in str(answer_request.authorized_ticket_data).casefold()
+    assert tool_request.authorized_ticket_data == ()
+    assert private_marker not in repr(tool_request)
+    assert "Muéstrame mis tickets recientes" not in repr(tool_request)
+    assert "Asunto TCK-MINIMAL-PROVIDER" not in repr(tool_request)
+    assert "TCK-MINIMAL-PROVIDER" not in repr(tool_request)
+    assert response["quick_replies"] == []
 
 
 def test_ticket_prompt_injection_is_not_sent_even_when_description_is_requested(
@@ -751,9 +883,8 @@ def test_ticket_prompt_injection_is_not_sent_even_when_description_is_requested(
     )
 
     assert response["response_source"] == "DETERMINISTIC"
-    assert len(provider.requests) == 2, response.get("ticket_query")
-    authorized = provider.requests[1].authorized_ticket_data
-    assert authorized == ({},)
+    assert len(provider.requests) == 1, response.get("ticket_query")
+    assert provider.requests[0].authorized_ticket_data == ()
     assert injection not in repr(provider.requests)
     assert "TCK-UNTRUSTED-CONTENT" not in provider.requests[0].user_message
 
@@ -901,8 +1032,16 @@ def test_advisor_reply_queries_use_real_author_and_date_and_limit_content(
     token = login(client)
     before = ticket_snapshot(engine)
 
-    status = ask(client, "¿Ya me respondió el asesor?", token)
-    reply = ask(client, "¿Qué me respondió?", token)
+    status = ask(
+        client,
+        "¿Ya me respondió el asesor en el ticket TCK-REPLY-101?",
+        token,
+    )
+    reply = ask(
+        client,
+        "¿Qué me respondió el asesor en el ticket TCK-REPLY-101?",
+        token,
+    )
     no_reply = ask(
         client, "¿Ya me respondió el asesor en el ticket TCK-NOREPLY-102?", token
     )
@@ -924,6 +1063,54 @@ def test_advisor_reply_queries_use_real_author_and_date_and_limit_content(
     assert no_reply["ticket_query"]["advisor_responded"] is False
     assert no_reply["ticket_query"]["latest_advisor_response"] is None
     assert ticket_snapshot(engine) == before
+
+
+def test_ordinal_reply_after_ambiguity_keeps_the_requested_operation(
+    phase2_client,
+) -> None:
+    client, engine = phase2_client
+    created = datetime(2026, 10, 9, 10, tzinfo=UTC)
+    with Session(engine) as session:
+        owner = session.exec(select(User).where(User.email == "cliente@demo.com")).one()
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-PENDING-REPLY-FIRST",
+            status=TicketStatus.EN_PROCESO,
+            created_at=created,
+            comments=(("asesor@demo.com", "Respuesta al primer ticket", created),),
+        )
+        add_ticket(
+            session,
+            client_id=owner.id,
+            tracking_code="TCK-PENDING-REPLY-SECOND",
+            status=TicketStatus.ASIGNADO,
+            created_at=created - timedelta(days=1),
+        )
+        session.commit()
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    conversation = client.post("/api/v1/chat/conversations", headers=headers).json()
+    endpoint = f"/api/v1/chat/conversations/{conversation['id']}/messages"
+
+    clarification = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "¿Ya me respondió el asesor?"},
+    )
+    selected = client.post(
+        endpoint,
+        headers=headers,
+        json={"content": "el segundo"},
+    )
+
+    assert clarification.json()["suggested_action"] == "CLARIFY_TICKET_CODE"
+    assert selected.status_code == 200
+    assert selected.json()["ticket_query"]["query_type"] == "ADVISOR_RESPONSE_STATUS"
+    assert selected.json()["ticket_query"]["ticket"]["tracking_code"] == (
+        "TCK-PENDING-REPLY-SECOND"
+    )
+    assert selected.json()["ticket_query"]["advisor_responded"] is False
 
 
 def test_missing_or_ambiguous_codes_use_orchestration_without_ticket_data(

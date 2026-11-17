@@ -160,9 +160,8 @@ def test_advisor_context_survives_pausing_and_resuming_draft(phase3_client) -> N
     initial_description = handoff.json()["ticket_draft"]["fields"]["description"]
     assert handoff.status_code == 200
     assert handoff.json()["bot_message"]["intent"] == "ADVISOR_TICKET_DRAFT"
-    assert initial_description.startswith(
-        "Resumen de conversación (extracto determinístico):"
-    )
+    assert initial_description is None
+    assert "DESCRIPTION" in handoff.json()["ticket_draft"]["missing_fields"]
 
     paused = send(client, conversation_id, "mostrar menú", headers)
     assert paused.status_code == 200
@@ -193,8 +192,7 @@ def test_advisor_context_survives_pausing_and_resuming_draft(phase3_client) -> N
         headers,
     )
     saved_description = description.json()["ticket_draft"]["fields"]["description"]
-    assert saved_description.startswith(initial_description)
-    assert "Detalle comunicado por el cliente: No puedo completar" in saved_description
+    assert saved_description == "No puedo completar un trámite ficticio."
     assert description.json()["bot_message"]["intent"] == "ADVISOR_TICKET_DRAFT"
 
 
@@ -215,7 +213,13 @@ def test_faq_does_not_resume_paused_draft_but_explicit_resume_does(
     resumed = send(client, conversation_id, "retomar el ticket", headers)
 
     assert faq.status_code == 200
-    assert faq.json()["ticket_draft"]["paused"] is True
+    faq_body = faq.json()
+    assert faq_body["ticket_draft"]["paused"] is True, {
+        "intent": faq_body["intent_classification"],
+        "bot_intent": faq_body["bot_message"]["intent"],
+        "ticket_draft": faq_body["ticket_draft"],
+        "quick_replies": faq_body["quick_replies"],
+    }
     assert faq.json()["bot_message"]["intent"] != "TICKET_DRAFT_COLLECTING"
     assert resumed.status_code == 200
     assert resumed.json()["ticket_draft"]["paused"] is False
@@ -738,12 +742,12 @@ def test_urgent_word_in_subject_does_not_set_priority(phase3_client) -> None:
 
     send(client, conversation_id, "Quiero crear un ticket", headers)
     send(client, conversation_id, "Categoría: TARJETAS", headers)
-    response = send(client, conversation_id, "ASUNTO URGENTE", headers)
+    response = send(client, conversation_id, "Asunto: tarjeta urgente", headers)
 
     assert response.status_code == 200, response.text
     draft = response.json()["ticket_draft"]
     assert draft["fields"]["category_id"] == category.id
-    assert draft["fields"]["subject"] == "ASUNTO URGENTE"
+    assert draft["fields"]["subject"] == "tarjeta urgente"
     assert draft["fields"]["priority"] is None
     assert "PRIORITY" in draft["missing_fields"]
 
@@ -783,7 +787,7 @@ def test_invalid_description_correction_preserves_existing_draft_value(
     ]
 
 
-def test_llm_extracts_explicit_draft_fields_without_inferring_priority(
+def test_draft_fields_stay_local_and_model_cannot_infer_priority(
     phase3_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, engine = phase3_client
@@ -837,8 +841,8 @@ def test_llm_extracts_explicit_draft_fields_without_inferring_priority(
     response = send(
         client,
         conversation_id,
-        "Quiero crear un ticket. Categoría TARJETAS. "
-        "ASUNTO URGENTE: No llegó mi tarjeta. "
+        "Quiero crear un ticket. Categoría: TARJETAS. "
+        "Asunto: No llegó mi tarjeta urgente. "
         "Descripción: No recibí la tarjeta solicitada.",
         headers,
     )
@@ -847,7 +851,7 @@ def test_llm_extracts_explicit_draft_fields_without_inferring_priority(
     assert response.status_code == 200, response.text
     assert draft["fields"] == {
         "category_id": category.id,
-        "subject": "No llegó mi tarjeta",
+        "subject": "No llegó mi tarjeta urgente",
         "description": "No recibí la tarjeta solicitada.",
         "priority": None,
     }
@@ -858,6 +862,8 @@ def test_llm_extracts_explicit_draft_fields_without_inferring_priority(
     assert "update_ticket_draft" in tool_names
     assert "create_ticket" not in tool_names
     assert "convert_to_ticket" not in tool_names
+    assert "No llegó mi tarjeta urgente" not in repr(provider.requests[0])
+    assert "No recibí la tarjeta solicitada" not in repr(provider.requests[0])
 
 
 def test_correction_resume_cancel_and_unrelated_question_preserve_draft(
@@ -927,6 +933,103 @@ def test_correction_resume_cancel_and_unrelated_question_preserve_draft(
     ]
 
 
+def test_ticket_query_and_faq_pause_active_draft_without_mutating_it(phase3_client):
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    started = send(
+        client,
+        conversation_id,
+        "Quiero crear ticket. Categoría: TARJETAS. Asunto: Entrega pendiente.",
+        headers,
+    )
+    assert started.json()["ticket_draft"]["status"] == "COLLECTING", started.json()
+    before = started.json()["ticket_draft"]["fields"]
+    faq = send(
+        client,
+        conversation_id,
+        "¿Qué requisitos necesito para una tarjeta?",
+        headers,
+    )
+    tickets = send(client, conversation_id, "Quiero ver estado de mis tickets", headers)
+    resumed = send(client, conversation_id, "Continúa con el borrador", headers)
+    description = send(
+        client,
+        conversation_id,
+        "Cuando entro desde mi celular no me carga la app.",
+        headers,
+    )
+
+    assert faq.status_code == tickets.status_code == resumed.status_code == 200
+    faq_body = faq.json()
+    assert faq_body["ticket_draft"]["paused"] is True, {
+        "intent": faq_body["intent_classification"],
+        "bot_intent": faq_body["bot_message"]["intent"],
+        "ticket_draft": faq_body["ticket_draft"],
+        "quick_replies": faq_body["quick_replies"],
+    }
+    assert faq.json()["ticket_draft"]["fields"] == before
+    assert tickets.json()["ticket_query"]["query_type"] == "TICKET_LIST"
+    assert tickets.json()["ticket_draft"]["paused"] is True
+    assert tickets.json()["ticket_draft"]["fields"] == before
+    assert resumed.json()["ticket_draft"]["paused"] is False
+    assert resumed.json()["ticket_draft"]["fields"] == before
+    assert description.json()["ticket_draft"]["fields"]["description"] == (
+        "Cuando entro desde mi celular no me carga la app."
+    ), {
+        "intent": description.json().get("intent_classification"),
+        "action": description.json().get("suggested_action"),
+        "draft": description.json().get("ticket_draft"),
+        "bot": description.json().get("bot_message"),
+    }
+
+
+def test_ambiguous_message_asks_whether_to_continue_or_change_topic(phase3_client):
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    started = send(client, conversation_id, "Quiero crear un ticket", headers)
+    before = started.json()["ticket_draft"]["fields"]
+
+    ambiguous = send(
+        client, conversation_id, "No entiendo lo que me preguntas", headers
+    )
+
+    assert ambiguous.status_code == 200
+    body = ambiguous.json()
+    assert "continuar con el borrador" in body["bot_message"]["content"].casefold()
+    assert "cambiar de tema" in body["bot_message"]["content"].casefold()
+    assert body["ticket_draft"]["fields"] == before
+    assert body["ticket_draft"]["paused"] is True
+
+
+def test_description_edit_replaces_composed_value_without_repeating_summary(
+    phase3_client,
+) -> None:
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    handoff = send(
+        client,
+        conversation_id,
+        "Quiero hablar con un asesor. Motivo: La aplicación se cierra al iniciar.",
+        headers,
+    )
+    summary = handoff.json()["ticket_draft"]["fields"]["description"]
+    send(client, conversation_id, "Asunto: Aplicación no inicia", headers)
+    edited = (
+        f"{summary}\n\nDetalle comunicado por el cliente: "
+        "La aplicación se reinicia al iniciar sesión."
+    )
+
+    first_correction = send(client, conversation_id, f"Descripción: {edited}", headers)
+    repeated_correction = send(
+        client, conversation_id, f"Descripción: {edited}", headers
+    )
+
+    assert first_correction.json()["ticket_draft"]["fields"]["description"] == edited
+    assert repeated_correction.json()["ticket_draft"]["fields"]["description"] == edited
+    assert edited.count("Resumen de conversación") <= 1
+    assert edited.count("Detalle comunicado por el cliente:") == 1
+
+
 def test_ticket_draft_orchestration_receives_no_ticket_or_user_data(
     phase3_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -964,20 +1067,131 @@ def test_ticket_draft_orchestration_receives_no_ticket_or_user_data(
         ai_provider=provider
     )
     conversation_id, headers = create_linked_conversation(client)
-    send(client, conversation_id, "Quiero crear un ticket", headers)
+    private_subject = "Solicitud privada ficticia"
     send(
         client,
         conversation_id,
-        "No puedo ingresar a la aplicación; referencia TCK-PRIVATE-001",
+        f"Quiero crear un ticket. Categoría: TARJETAS. Asunto: {private_subject}.",
+        headers,
+    )
+    private_description = "No puedo ingresar a la aplicación; mis datos son ficticios."
+    draft = send(
+        client,
+        conversation_id,
+        private_description,
         headers,
     )
 
     assert len(provider.requests) == 2
+    assert draft.json()["ticket_draft"]["fields"]["description"] == private_description
     for request in provider.requests:
         assert request.tools
         assert request.authorized_ticket_data == ()
-        assert "TCK-PRIVATE-001" not in repr(request)
+        assert private_subject not in repr(request)
+        assert private_description not in repr(request)
+        assert "No puedo ingresar a la aplicación" not in repr(request)
         assert "create_ticket" not in {tool.name for tool in request.tools}
+
+
+def test_private_draft_history_is_excluded_from_menu_provider_context(
+    phase3_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase3_client
+    settings = rag_service_module.get_settings()
+    enabled_settings = settings.model_copy(update={"chatbot_ai_enabled": True})
+    monkeypatch.setattr(rag_service_module, "get_settings", lambda: enabled_settings)
+    monkeypatch.setattr(
+        chatbot_service_module, "get_settings", lambda: enabled_settings
+    )
+
+    class CapturingProvider:
+        name = "capturing-provider"
+        model = "test"
+
+        def __init__(self) -> None:
+            self.requests: list[AIProviderRequest] = []
+
+        def generate(self, request: AIProviderRequest) -> AIGenerationResult:
+            self.requests.append(request)
+            return AIGenerationResult.failed(
+                status="UNAVAILABLE",
+                provider=self.name,
+                model=self.model,
+                error_code="unexpected_provider_call",
+            )
+
+    provider = CapturingProvider()
+    app.dependency_overrides[get_chatbot_service] = lambda: ChatbotService(
+        ai_provider=provider
+    )
+    conversation_id, headers = create_linked_conversation(client)
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+    private_description = "La aplicación ficticia no carga al iniciar sesión."
+    send(client, conversation_id, private_description, headers)
+    provider.requests.clear()
+
+    send(
+        client,
+        conversation_id,
+        "volver al menú",
+        headers,
+    )
+
+    assert provider.requests
+    assert all(
+        private_description not in repr(request) for request in provider.requests
+    )
+    assert all(
+        "La aplicación ficticia no carga" not in repr(request)
+        for request in provider.requests
+    )
+
+
+def test_unclassified_ticket_message_is_redacted_before_provider(
+    phase3_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = phase3_client
+    settings = rag_service_module.get_settings()
+    enabled_settings = settings.model_copy(update={"chatbot_ai_enabled": True})
+    monkeypatch.setattr(rag_service_module, "get_settings", lambda: enabled_settings)
+    monkeypatch.setattr(
+        chatbot_service_module, "get_settings", lambda: enabled_settings
+    )
+
+    class CapturingProvider:
+        name = "capturing-provider"
+        model = "test"
+
+        def __init__(self) -> None:
+            self.requests: list[AIProviderRequest] = []
+
+        def generate(self, request: AIProviderRequest) -> AIGenerationResult:
+            self.requests.append(request)
+            return AIGenerationResult.failed(
+                status="UNAVAILABLE",
+                provider=self.name,
+                model=self.model,
+                error_code="unexpected_provider_call",
+            )
+
+    provider = CapturingProvider()
+    app.dependency_overrides[get_chatbot_service] = lambda: ChatbotService(
+        ai_provider=provider
+    )
+    conversation_id, headers = create_linked_conversation(client)
+    private_marker = "CASO-PRIVADO-SINTETICO-001"
+    private_message = f"Mi ticket ficticio no abre; dato {private_marker}."
+
+    send(
+        client,
+        conversation_id,
+        private_message,
+        headers,
+    )
+
+    assert provider.requests
+    assert all(private_message not in repr(request) for request in provider.requests)
+    assert all(private_marker not in repr(request) for request in provider.requests)
 
 
 def test_openapi_exposes_ticket_draft_status_fields_and_real_enums() -> None:
@@ -1191,15 +1405,14 @@ def test_advisor_request_creates_context_ticket_only_after_confirmation(phase3_c
         handoff.json()["bot_message"]["content"].casefold()
     )
     assert draft["fields"]["category_id"]
-    assert draft["fields"]["description"].startswith(
-        "Resumen de conversación (extracto determinístico):"
-    )
-    assert "requisitos tiene una tarjeta" in draft["fields"]["description"].casefold()
+    assert draft["fields"]["description"] is None
+    assert "DESCRIPTION" in draft["missing_fields"]
+    assert "requisitos tiene una tarjeta" not in str(draft).casefold()
     with Session(engine) as session:
         assert session.exec(select(func.count(Ticket.id))).one() == 0
 
     subject = send(client, conversation_id, "Asunto: Requisitos de mi tarjeta", headers)
-    assert "Elige una prioridad" in subject.json()["bot_message"]["content"]
+    assert "Describe el problema" in subject.json()["bot_message"]["content"]
     description = send(
         client,
         conversation_id,
@@ -1221,12 +1434,8 @@ def test_advisor_request_creates_context_ticket_only_after_confirmation(phase3_c
     assert created.status_code == 201, created.text
     assert created.json()["source"] == "CHATBOT"
     assert created.json()["status"] == "NUEVO"
-    assert created.json()["description"].startswith(
-        "Resumen de conversación (extracto determinístico):"
-    )
-    assert (
-        "Detalle comunicado por el cliente: Necesito una revisión ficticia"
-        in (created.json()["description"])
+    assert created.json()["description"] == (
+        "Necesito una revisión ficticia de este caso."
     )
     assert created.json()["description"] == payload["description"]
 

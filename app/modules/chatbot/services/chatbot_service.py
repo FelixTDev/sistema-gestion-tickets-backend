@@ -338,6 +338,7 @@ class TicketQueryRequest:
     tracking_code: str | None = None
     statuses: frozenset[TicketStatus] | None = None
     page: int = 1
+    position: int | None = None
     requested_fields: frozenset[str] | None = None
     clarification_action: ChatbotSuggestedAction | None = None
     clarification_query_type: ChatbotTicketQueryType | None = None
@@ -559,20 +560,35 @@ class ChatbotService:
             conversation.status == ConversationStatus.WAITING_CLARIFICATION
         )
         saved_context = dict(conversation.context_json or {})
-        is_ticket_request = self._is_ticket_request(clean_content)
         is_advisor_request = self._is_advisor_request(clean_content)
         advisor_ticket_enabled = get_settings().chatbot_escalation_ticket_enabled
         ticket_query_request = self._ticket_query_request(clean_content)
         ticket_query_request = self._resume_clarified_ticket_query(
             clean_content, conversation, ticket_query_request
         )
+        may_use_ticket_context = ticket_query_request is None or (
+            ticket_query_request.query_type
+            in {
+                ChatbotTicketQueryType.CLARIFY_TICKET_CODE,
+                ChatbotTicketQueryType.TICKET_STATUS,
+                ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS,
+                ChatbotTicketQueryType.ADVISOR_REPLY,
+            }
+            and ticket_query_request.tracking_code is None
+            and ticket_query_request.position is None
+        )
         if (
-            ticket_query_request is None
+            may_use_ticket_context
             and get_settings().chatbot_contextual_followups_enabled
         ):
-            ticket_query_request = self._contextual_ticket_query_request(
+            contextual_request = self._contextual_ticket_query_request(
                 clean_content, saved_context
             )
+            if contextual_request is not None:
+                ticket_query_request = contextual_request
+        is_ticket_request = (
+            self._is_ticket_request(clean_content) and ticket_query_request is None
+        )
         is_unhelpful_follow_up = bool(
             previous_bot_message and self._is_unhelpful_follow_up(clean_content)
         )
@@ -627,6 +643,36 @@ class ChatbotService:
             or resume_after_authentication
             or resume_paused_draft
         )
+        ticket_domain_message = bool(
+            re.search(
+                r"\b(?:tickets?|solicitudes?|reclamos?|casos?)\b",
+                normalize_text(clean_content),
+            )
+        )
+        clear_faq_question = self._is_clear_faq_question(clean_content)
+        active_draft = current_draft.status in {
+            ChatbotTicketDraftStatus.COLLECTING,
+            ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+            ChatbotTicketDraftStatus.CONFIRMED,
+        }
+        draft_topic_clarification = bool(
+            active_draft
+            and not paused_draft
+            and not start_ticket_draft
+            and ticket_query_request is None
+            and not ticket_domain_message
+            and not clear_faq_question
+            and (
+                "?" in clean_content
+                or clean_content.lstrip().startswith("¿")
+                or re.search(
+                    r"\b(?:no entiendo|no me queda claro|puedes aclararme|"
+                    r"me puedes aclarar|puedes explicarme|me puedes explicar|"
+                    r"a que te refieres)\b",
+                    normalize_text(clean_content),
+                )
+            )
+        )
         unrelated_special_message = lifecycle_action is not None or (
             not start_ticket_draft
             and (
@@ -639,6 +685,10 @@ class ChatbotService:
                 or is_faq_category_request
                 or selected_faq_category_id is not None
                 or is_unhelpful_follow_up
+                or ticket_query_request is not None
+                or ticket_domain_message
+                or clear_faq_question
+                or draft_topic_clarification
             )
         )
         ticket_draft_flow = (
@@ -656,8 +706,6 @@ class ChatbotService:
 
         orchestration_outcome = None
         orchestration_tool_name: str | None = None
-        orchestration_applied = False
-        extracted_draft_fields: dict[str, object] | None = None
         search_query_override: str | None = None
         confirmation_text = normalize_text(clean_content).strip(" .,!?:;¿¡")
         orchestration_user_message = clean_content
@@ -672,12 +720,6 @@ class ChatbotService:
                 previous_bot_message.content,
                 clean_content,
             )
-        ticket_domain_message = bool(
-            re.search(
-                r"\b(?:tickets?|solicitudes?|reclamos?|casos?)\b",
-                normalize_text(clean_content),
-            )
-        )
         orchestration_intent = (
             ChatbotIntent.TICKET_DRAFT_UPDATE
             if ticket_draft_flow or start_ticket_draft
@@ -710,6 +752,7 @@ class ChatbotService:
             and not is_banking_operation
             and not is_mixed_banking_arithmetic
             and orchestration_intent is not None
+            and not draft_topic_clarification
             and not (
                 current_draft.status == ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION
                 and confirmation_text
@@ -735,9 +778,26 @@ class ChatbotService:
             prior_ai_responses = self.conversations.count_ai_provider_attempts(
                 session, conversation.id
             )
-            provider_turn = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
-                "referencia de ticket", orchestration_user_message
-            )
+            if orchestration_intent == ChatbotIntent.TICKET_QUERY:
+                provider_turn = (
+                    "El usuario consulta sus tickets propios. "
+                    "Selecciona una herramienta compatible."
+                )
+            elif orchestration_intent == ChatbotIntent.TICKET_DRAFT_UPDATE:
+                provider_turn = (
+                    "El usuario quiere iniciar un borrador de ticket."
+                    if start_ticket_draft
+                    else "El usuario quiere actualizar un borrador de ticket."
+                )
+            elif orchestration_intent == ChatbotIntent.REQUEST_ADVISOR:
+                provider_turn = (
+                    "El usuario solicita hablar con un asesor. "
+                    "Selecciona una herramienta compatible."
+                )
+            else:
+                provider_turn = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
+                    "referencia de ticket", orchestration_user_message
+                )
             orchestration_outcome = self.rag.generate(
                 conversation_id=conversation.id,
                 user_message=provider_turn,
@@ -748,7 +808,14 @@ class ChatbotService:
                 grounding_required=False,
                 tools=available_chatbot_tools(),
                 conversation_context=self._provider_dialogue_context(
-                    recent_messages, saved_context, current_draft
+                    recent_messages,
+                    saved_context,
+                    current_draft,
+                    include_user_turns=orchestration_intent
+                    not in {
+                        ChatbotIntent.TICKET_QUERY,
+                        ChatbotIntent.TICKET_DRAFT_UPDATE,
+                    },
                 ),
                 response_mode="orchestration",
                 conversational_intent=orchestration_intent,
@@ -768,7 +835,6 @@ class ChatbotService:
                         ticket_draft_flow = False
                         start_ticket_draft = False
                         lifecycle_action = None
-                        orchestration_applied = True
                 elif orchestration_tool_name in {
                     "start_ticket_draft",
                     "update_ticket_draft",
@@ -788,8 +854,6 @@ class ChatbotService:
                         is_ticket_request = True
                         ticket_draft_flow = True
                         lifecycle_action = None
-                        extracted_draft_fields = tool_arguments
-                        orchestration_applied = True
                 elif orchestration_tool_name == "show_options":
                     may_show_options = bool(
                         lifecycle_action == ChatbotSuggestedAction.SHOW_MENU
@@ -808,9 +872,6 @@ class ChatbotService:
                     if may_show_options:
                         lifecycle_action = ChatbotSuggestedAction.SHOW_MENU
                         ticket_draft_flow = False
-                        orchestration_applied = True
-                elif orchestration_tool_name in {"respond", "ask_clarification"}:
-                    orchestration_applied = True
                 elif orchestration_tool_name == "search_public_faq":
                     query = tool_arguments.get("query")
                     if isinstance(query, str) and self._supported_provider_query(
@@ -834,9 +895,20 @@ class ChatbotService:
             ),
         )
         search_content = search_query_override or clean_content
-        ai_user_message = clean_content
+        ai_user_message = (
+            "Consulta o actualización de tickets sin datos privados."
+            if (
+                ticket_query_request is not None
+                or ticket_draft_flow
+                or is_ticket_request
+                or ticket_domain_message
+                or is_advisor_request
+            )
+            else clean_content
+        )
         if (
-            is_unhelpful_follow_up
+            ai_user_message == clean_content
+            and is_unhelpful_follow_up
             and previous_user_message is not None
             and previous_bot_message is not None
             and self._is_public_context_message(previous_bot_message)
@@ -958,7 +1030,6 @@ class ChatbotService:
                         else None
                     ),
                     initial_description=advisor_summary,
-                    extracted_fields=extracted_draft_fields,
                 )
                 if ticket_draft_reply.cancelled:
                     advisor_handoff_requested = False
@@ -967,6 +1038,23 @@ class ChatbotService:
                     ticket_draft_reply,
                     advisor_handoff=advisor_handoff_requested,
                 )
+            elif draft_topic_clarification:
+                reply = TicketDraftReply(
+                    draft=current_draft,
+                    answer=(
+                        "El borrador sigue guardado. ¿Quieres continuar con el "
+                        "borrador o cambiar de tema?"
+                    ),
+                    requires_clarification=True,
+                    offers_ticket=False,
+                    ready=False,
+                )
+                result = self._ticket_draft_response(conversation, reply)
+                result["options"] = [
+                    "Continuar con el borrador",
+                    "Cambiar de tema",
+                ]
+                result["draft_topic_clarification"] = True
             elif is_out_of_scope_request:
                 result = self._out_of_scope_response(session)
             elif is_new_consultation or is_faq_category_discovery:
@@ -1164,19 +1252,6 @@ class ChatbotService:
                 or (orchestration_tool_name is None and conversational_ai)
             )
         )
-        ticket_provider_data = result.get("ticket_provider_data")
-        authorized_ticket_data = (
-            tuple(item for item in ticket_provider_data if isinstance(item, dict))
-            if isinstance(ticket_provider_data, (list, tuple))
-            else ()
-        )
-        ticket_synthesis_requested = bool(
-            orchestration_applied
-            and orchestration_tool_name == "query_my_tickets"
-            and ticket_query_request is not None
-            and result.get("resolved") is True
-            and authorized_ticket_data
-        )
         orchestration_primary_response = bool(
             orchestration_should_run
             and orchestration_intent
@@ -1244,61 +1319,7 @@ class ChatbotService:
             }
             if orchestration_tool_name is not None:
                 deterministic_trace["orchestration_tool"] = orchestration_tool_name
-            if ticket_synthesis_requested:
-                orchestration_calls = self._provider_call_count(
-                    orchestration_outcome.trace
-                    if orchestration_outcome is not None
-                    else None
-                )
-                provider_calls_by_actor_last_hour = (
-                    self.conversations.count_recent_ai_provider_attempts_for_actor(
-                        session,
-                        user_id=conversation.user_id,
-                        anonymous_key=conversation.anonymous_key,
-                        since=datetime.now(UTC) - timedelta(hours=1),
-                    )
-                )
-                provider_calls_by_actor_last_hour += orchestration_calls
-                requests_last_minute = (
-                    self.conversations.count_recent_ai_provider_attempts(
-                        session,
-                        conversation.id,
-                        datetime.now(UTC) - timedelta(minutes=1),
-                    )
-                    + orchestration_calls
-                )
-                responses_in_conversation = (
-                    self.conversations.count_ai_provider_attempts(
-                        session, conversation.id
-                    )
-                    + orchestration_calls
-                )
-                provider_turn = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
-                    "referencia de ticket", clean_content
-                )
-                ai_outcome = self.rag.generate(
-                    conversation_id=conversation.id,
-                    user_message=provider_turn,
-                    matches=[],
-                    requests_last_minute=requests_last_minute,
-                    requests_by_actor_last_hour=provider_calls_by_actor_last_hour,
-                    responses_in_conversation=responses_in_conversation,
-                    grounding_required=False,
-                    conversation_context=self._provider_dialogue_context(
-                        recent_messages, saved_context, current_draft
-                    ),
-                    authorized_ticket_data=authorized_ticket_data,
-                    response_mode="ticket",
-                )
-                ai_outcomes.append(ai_outcome)
-                if ai_outcome.accepted:
-                    result["answer"] = ai_outcome.answer
-                    result["response_source"] = "AI"
-                    result["sources"] = []
-                    result["fallback_reason"] = None
-                elif ai_outcome.trace.get("provider_status") == "GENERATED":
-                    result["fallback_reason"] = ai_outcome.reason
-            elif orchestration_text_action and orchestration_outcome is not None:
+            if orchestration_text_action and orchestration_outcome is not None:
                 result["answer"] = orchestration_outcome.answer
                 result["response_source"] = "AI"
                 result["sources"] = []
@@ -1549,8 +1570,23 @@ class ChatbotService:
                 if ticket_query_request is not None
                 else None
             )
+            if selected_code is None and isinstance(
+                result.get("ticket_reference_codes"), list
+            ):
+                returned_codes = [
+                    code
+                    for code in result["ticket_reference_codes"]
+                    if isinstance(code, str)
+                ]
+                if len(returned_codes) == 1:
+                    selected_code = returned_codes[0]
             if (
-                ticket_query_payload.query_type == ChatbotTicketQueryType.TICKET_STATUS
+                ticket_query_payload.query_type
+                in {
+                    ChatbotTicketQueryType.TICKET_STATUS,
+                    ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS,
+                    ChatbotTicketQueryType.ADVISOR_REPLY,
+                }
                 and selected_code in stored_codes
             ):
                 context["last_ticket_query_codes"] = stored_codes
@@ -1703,7 +1739,9 @@ class ChatbotService:
             conversation.pending_question = None
         else:
             context["menu_open"] = is_greeting
-            if resume_paused_draft or start_ticket_draft:
+            if active_draft and not start_ticket_draft and unrelated_special_message:
+                context["ticket_draft_paused"] = True
+            elif resume_paused_draft or start_ticket_draft:
                 context.pop("ticket_draft_paused", None)
         conversation.context_json = context
         if lifecycle_action == ChatbotSuggestedAction.END_CONVERSATION:
@@ -2663,6 +2701,19 @@ class ChatbotService:
         normalized = normalize_text(content).strip(" .!?¿¡")
         return any(phrase in normalized for phrase in _NEW_CONSULTATION_PHRASES)
 
+    @staticmethod
+    def _is_clear_faq_question(content: str) -> bool:
+        normalized = normalize_text(content).strip(" .!?¿¡")
+        asks_for_information = bool(
+            re.search(
+                r"^(?:que|como|cuando|donde|quien|cual|cuanto|"
+                r"requisitos?|documentos?|plazos?|horarios?|costos?|"
+                r"beneficios?|canales?)\b",
+                normalized,
+            )
+        )
+        return asks_for_information and bool(_BANKING_TOPIC_PATTERN.search(normalized))
+
     def _requested_faq_category_id(self, session: Session, content: str) -> str | None:
         normalized = normalize_text(content)
         if re.search(r"\b(?:categoria|category)\s*[:=]", normalized):
@@ -3064,8 +3115,54 @@ class ChatbotService:
             )
             or re.search(r"\b(?:mi|mis|mio|mia|mios|mias)\s+reclamos?\b", normalized)
         )
+        plural_ticket_reference = bool(
+            re.search(
+                r"\bmis\s+(?:tickets?|casos?|solicitudes?|reclamos?)\b", normalized
+            )
+        )
         page_match = re.search(r"\bpagina\s+(\d+)\b", normalized)
         page = min(int(page_match.group(1)), 10_000) if page_match else 1
+        position = cls._ticket_position(content)
+        asks_assignment = bool(
+            re.search(
+                r"\b(?:asignad[oa]s?|asignacion|atendiendo|atendid[oa]s?|tom[oó]|"
+                r"se\s+hizo\s+cargo)\b|"
+                r"\b(?:asesor|agente|representante)\b.{0,35}"
+                r"\b(?:atiende|atendio|atendiendo|asignado|tomo)\b",
+                normalized,
+            )
+        )
+        asks_subject = bool(
+            re.search(r"\b(?:que|cual|cuales)\s+(?:asunto|titulo)\b", normalized)
+            or re.search(
+                r"\b(?:dime|muestrame|ver|consultar)\b.{0,35}"
+                r"\b(?:asunto|titulo)\b",
+                normalized,
+            )
+        )
+        asks_status = (has_explicit_ticket_reference or has_code_marker) and bool(
+            re.search(
+                r"\b(?:estado|situacion|seguimiento)\b|\bcomo\s+(?:va|esta|sigue)\b",
+                normalized,
+            )
+        )
+        asks_attended_tickets = plural_ticket_reference and bool(
+            asks_assignment
+            or re.search(
+                r"\b(?:ya\s+fueron\s+atendid[oa]s?|atendid[oa]s?|"
+                r"respondid[oa]s?|contestad[oa]s?)\b",
+                normalized,
+            )
+            or asks_status
+        )
+
+        if asks_attended_tickets:
+            return TicketQueryRequest(
+                action=ChatbotSuggestedAction.LIST_MY_TICKETS,
+                query_type=ChatbotTicketQueryType.TICKET_LIST,
+                page=page,
+                requested_fields=frozenset({"CODE", "SUBJECT", "STATUS", "ASSIGNMENT"}),
+            )
 
         if re.search(
             r"\b(?:que|cuales).{0,40}\b(?:esperan|esperando|pendiente|pendientes)\b"
@@ -3162,20 +3259,8 @@ class ChatbotService:
                 page=page,
             )
 
-        asks_status = (has_explicit_ticket_reference or has_code_marker) and bool(
-            re.search(
-                r"\b(?:estado|situacion|seguimiento)\b|\bcomo\s+(?:va|esta|sigue)\b",
-                normalized,
-            )
-        )
-        if asks_status:
+        if asks_assignment:
             if has_code_marker and (len(codes) != 1 or code is None):
-                return cls._clarify_ticket_code_request(
-                    page,
-                    action=ChatbotSuggestedAction.TICKET_STATUS,
-                    query_type=ChatbotTicketQueryType.TICKET_STATUS,
-                )
-            if code is None:
                 return cls._clarify_ticket_code_request(
                     page,
                     action=ChatbotSuggestedAction.TICKET_STATUS,
@@ -3186,6 +3271,60 @@ class ChatbotService:
                 query_type=ChatbotTicketQueryType.TICKET_STATUS,
                 tracking_code=code,
                 page=page,
+                position=position,
+                requested_fields=cls._requested_ticket_fields(
+                    content, default=frozenset({"CODE", "ASSIGNMENT"})
+                ),
+            )
+
+        if asks_status:
+            if has_code_marker and (len(codes) != 1 or code is None):
+                return cls._clarify_ticket_code_request(
+                    page,
+                    action=ChatbotSuggestedAction.TICKET_STATUS,
+                    query_type=ChatbotTicketQueryType.TICKET_STATUS,
+                )
+            if plural_ticket_reference:
+                return TicketQueryRequest(
+                    action=ChatbotSuggestedAction.LIST_MY_TICKETS,
+                    query_type=ChatbotTicketQueryType.TICKET_LIST,
+                    page=page,
+                    requested_fields=frozenset(
+                        {"CODE", "SUBJECT", "STATUS", "ASSIGNMENT"}
+                    ),
+                )
+            if code is None and position is None:
+                return cls._clarify_ticket_code_request(
+                    page,
+                    action=ChatbotSuggestedAction.TICKET_STATUS,
+                    query_type=ChatbotTicketQueryType.TICKET_STATUS,
+                )
+            return TicketQueryRequest(
+                action=ChatbotSuggestedAction.TICKET_STATUS,
+                query_type=ChatbotTicketQueryType.TICKET_STATUS,
+                tracking_code=code,
+                page=page,
+                position=position,
+                requested_fields=cls._requested_ticket_fields(
+                    content, default=frozenset({"CODE", "STATUS"})
+                ),
+            )
+
+        if asks_subject and has_ticket_subject:
+            if plural_ticket_reference and position is None:
+                return TicketQueryRequest(
+                    action=ChatbotSuggestedAction.LIST_MY_TICKETS,
+                    query_type=ChatbotTicketQueryType.TICKET_LIST,
+                    page=page,
+                    requested_fields=frozenset({"CODE", "SUBJECT"}),
+                )
+            return TicketQueryRequest(
+                action=ChatbotSuggestedAction.TICKET_STATUS,
+                query_type=ChatbotTicketQueryType.TICKET_STATUS,
+                tracking_code=code,
+                page=page,
+                position=position,
+                requested_fields=frozenset({"CODE", "SUBJECT"}),
             )
 
         asks_count = bool(
@@ -3317,9 +3456,31 @@ class ChatbotService:
         if not safe_codes:
             return None
         asks_code = bool(re.search(r"\b(?:codigo|numero)\b", normalized))
+        asks_assignment = bool(
+            re.search(
+                r"\b(?:asesor|agente|representante|asignad[oa]s?|asignacion|"
+                r"atendiendo|atendid[oa]s?|tomo)\b",
+                normalized,
+            )
+        )
+        asks_reply_content = bool(
+            re.search(
+                r"\b(?:que|cual).{0,35}\b(?:respondio|contesto)\b|"
+                r"\b(?:respuesta|comentario)\b.{0,25}\b(?:asesor|ticket)\b",
+                normalized,
+            )
+        )
+        asks_reply_status = bool(
+            re.search(
+                r"\b(?:respondio|contesto|respondieron|contestaron)\b", normalized
+            )
+        )
         asks_ticket_field = bool(
             re.search(
-                r"\b(?:asunto|estado|situacion|seguimiento|codigo|numero)\b", normalized
+                r"\b(?:asunto|estado|situacion|seguimiento|codigo|numero|"
+                r"asesor|asignad[oa]s?|asignacion|atendiendo|atendid[oa]s?|"
+                r"respuesta|comentario|respondio|contesto)\b",
+                normalized,
             )
         )
         is_other = bool(re.search(r"\b(?:el|la)\s+otro\b", normalized))
@@ -3331,12 +3492,56 @@ class ChatbotService:
         is_reference = bool(
             re.search(
                 r"\b(?:ese|este|el|la)\s+(?:ticket|caso|solicitud)\b|"
-                r"\b(?:el|la)\s+(?:primero|primera|segundo|segunda)\b",
+                r"\b(?:el|la)\s+(?:primero|primera|segundo|segunda)\b|"
+                r"\b(?:lo|ese|este|el mismo|la misma)\b",
                 normalized,
             )
         )
+        explicit_ticket_reference = bool(
+            re.search(r"\b(?:ese|este)\s+(?:ticket|caso|solicitud)\b", normalized)
+        )
         if not (asks_ticket_field or is_other or is_reference or ordinal_match):
             return None
+        query_type = (
+            ChatbotTicketQueryType.ADVISOR_REPLY
+            if asks_reply_content
+            else ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS
+            if asks_reply_status
+            else ChatbotTicketQueryType.TICKET_STATUS
+        )
+        action = (
+            ChatbotSuggestedAction.LATEST_ADVISOR_RESPONSE
+            if query_type == ChatbotTicketQueryType.ADVISOR_REPLY
+            else ChatbotSuggestedAction.ADVISOR_RESPONSE_STATUS
+            if query_type == ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS
+            else ChatbotSuggestedAction.TICKET_STATUS
+        )
+        pending_query = context.get("pending_ticket_query")
+        if isinstance(pending_query, dict) and (
+            ordinal_match is not None or is_other or is_reference
+        ):
+            try:
+                pending_action = ChatbotSuggestedAction(pending_query.get("action"))
+                pending_query_type = ChatbotTicketQueryType(
+                    pending_query.get("query_type")
+                )
+            except ValueError:
+                pending_action = None
+                pending_query_type = None
+            supported_queries = {
+                ChatbotSuggestedAction.TICKET_STATUS: (
+                    ChatbotTicketQueryType.TICKET_STATUS
+                ),
+                ChatbotSuggestedAction.ADVISOR_RESPONSE_STATUS: (
+                    ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS
+                ),
+                ChatbotSuggestedAction.LATEST_ADVISOR_RESPONSE: (
+                    ChatbotTicketQueryType.ADVISOR_REPLY
+                ),
+            }
+            if supported_queries.get(pending_action) == pending_query_type:
+                action = pending_action
+                query_type = pending_query_type
         current_index = context.get("last_ticket_query_index")
         current_index = (
             current_index
@@ -3369,14 +3574,17 @@ class ChatbotService:
             index = ordinal_to_index.get(ordinal)
             selected_index = index if index is not None else 0
             if selected_index >= len(safe_codes):
-                return cls._clarify_ticket_code_request(1)
+                return TicketQueryRequest(
+                    action=action,
+                    query_type=query_type,
+                    position=selected_index + 1,
+                    requested_fields=cls._requested_ticket_fields(
+                        content, default=frozenset({"CODE", "SUBJECT", "STATUS"})
+                    ),
+                )
         elif asks_code and len(safe_codes) > 1 and current_index is None:
-            clarification = cls._clarify_ticket_code_request(1)
-            return TicketQueryRequest(
-                action=clarification.action,
-                query_type=clarification.query_type,
-                clarification_action=ChatbotSuggestedAction.TICKET_STATUS,
-                clarification_query_type=ChatbotTicketQueryType.TICKET_STATUS,
+            return cls._clarify_ticket_code_request(
+                1, action=action, query_type=query_type
             )
         elif is_other:
             if len(safe_codes) < 2:
@@ -3384,15 +3592,33 @@ class ChatbotService:
             selected_index = (
                 1 if current_index is None else (current_index + 1) % len(safe_codes)
             )
+        elif current_index is not None:
+            selected_index = current_index
+        elif len(safe_codes) == 1:
+            selected_index = 0
+        elif explicit_ticket_reference:
+            selected_index = 0
         else:
-            selected_index = current_index if current_index is not None else 0
-        requested_fields = cls._requested_ticket_fields(
-            content,
-            default=frozenset({"CODE", "SUBJECT", "STATUS"}),
+            return TicketQueryRequest(
+                action=action,
+                query_type=query_type,
+                requested_fields=cls._requested_ticket_fields(
+                    content, default=frozenset({"CODE", "SUBJECT", "STATUS"})
+                ),
+            )
+        default_fields = (
+            frozenset({"CODE", "ASSIGNMENT"})
+            if asks_assignment
+            else frozenset({"CODE", "RESPONSE_STATUS"})
+            if asks_reply_status
+            else frozenset({"CODE", "RESPONSE"})
+            if asks_reply_content
+            else frozenset({"CODE", "SUBJECT", "STATUS"})
         )
+        requested_fields = cls._requested_ticket_fields(content, default=default_fields)
         return TicketQueryRequest(
-            action=ChatbotSuggestedAction.TICKET_STATUS,
-            query_type=ChatbotTicketQueryType.TICKET_STATUS,
+            action=action,
+            query_type=query_type,
             tracking_code=safe_codes[selected_index],
             requested_fields=requested_fields,
         )
@@ -3402,17 +3628,48 @@ class ChatbotService:
         recent_messages: list[ChatMessage],
         context: dict[str, object],
         draft: ChatbotTicketDraft,
+        *,
+        include_user_turns: bool = True,
     ) -> tuple[dict[str, str], ...]:
         turns: list[dict[str, str]] = []
-        for message in recent_messages:
-            if message.sender_type != SenderType.USER:
-                continue
-            content = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
-                "referencia de ticket", message.content
-            )
-            content = minimize_provider_input(content).strip()[:300]
-            if content:
-                turns.append({"role": "user", "content": content})
+        if include_user_turns:
+            for index, message in enumerate(recent_messages):
+                if message.sender_type != SenderType.USER:
+                    continue
+                following_bot = next(
+                    (
+                        item
+                        for item in recent_messages[index + 1 :]
+                        if item.sender_type == SenderType.BOT
+                    ),
+                    None,
+                )
+                is_ticket_draft_turn = following_bot is not None and (
+                    following_bot.intent is not None
+                    and (
+                        following_bot.intent.startswith("TICKET_DRAFT")
+                        or following_bot.intent == "ADVISOR_TICKET_DRAFT"
+                    )
+                )
+                is_ticket_data_turn = (
+                    TicketDraftService._has_field_label(message.content)
+                    or _TICKET_CODE_PATTERN.search(message.content) is not None
+                    or re.search(
+                        r"\b(?:tickets?|solicitudes?|reclamos?|casos?)\b",
+                        normalize_text(message.content),
+                    )
+                    is not None
+                    or ChatbotService._is_ticket_request(message.content)
+                    or ChatbotService._ticket_query_request(message.content) is not None
+                )
+                if is_ticket_draft_turn or is_ticket_data_turn:
+                    continue
+                content = _PROVIDER_TICKET_REFERENCE_PATTERN.sub(
+                    "referencia de ticket", message.content
+                )
+                content = minimize_provider_input(content).strip()[:300]
+                if content:
+                    turns.append({"role": "user", "content": content})
         turns = turns[-2:]
         references = context.get("last_ticket_query_codes")
         reference_count = (
@@ -3539,8 +3796,10 @@ class ChatbotService:
         asks_detail = bool(
             re.search(
                 r"\b(?:codigo|numero|asunto|titulo|estado|situacion|seguimiento|"
-                r"descripcion|detalle|primero|primera|segundo|segunda|tercero|"
-                r"tercera|cuarto|cuarta|quinto|quinta)\b",
+                r"descripcion|detalle|asesor|asignad[oa]s?|atendiendo|"
+                r"atendid[oa]s?|respuesta|comentario|respondio|contesto|"
+                r"primero|primera|segundo|segunda|tercero|tercera|cuarto|"
+                r"cuarta|quinto|quinta)\b",
                 normalized,
             )
         )
@@ -3622,7 +3881,11 @@ class ChatbotService:
 
         position = arguments.get("position")
         if not isinstance(position, int) or not 1 <= position <= _MAX_CHAT_TICKETS:
-            position = cls._ticket_position(content)
+            position = (
+                existing.position
+                if existing is not None and existing.position is not None
+                else cls._ticket_position(content)
+            )
         asks_code = bool(re.search(r"\b(?:codigo|numero)\b", normalized))
         if tracking_code is None and position is not None and stored_codes:
             if position <= len(stored_codes):
@@ -3640,6 +3903,26 @@ class ChatbotService:
             )
         if tracking_code is None and existing is not None:
             tracking_code = existing.tracking_code
+        requested_fields = cls._requested_ticket_fields(
+            content,
+            default=frozenset({"CODE", "SUBJECT", "STATUS"}),
+        )
+        if tracking_code is None and position is not None:
+            return TicketQueryRequest(
+                action=(
+                    existing.action
+                    if existing is not None
+                    else ChatbotSuggestedAction.TICKET_STATUS
+                ),
+                query_type=(
+                    existing.query_type
+                    if existing is not None
+                    else ChatbotTicketQueryType.TICKET_STATUS
+                ),
+                position=position,
+                page=page,
+                requested_fields=requested_fields,
+            )
         if tracking_code is None:
             return cls._clarify_ticket_code_request(
                 page,
@@ -3647,10 +3930,6 @@ class ChatbotService:
                 query_type=ChatbotTicketQueryType.TICKET_STATUS,
             )
 
-        requested_fields = cls._requested_ticket_fields(
-            content,
-            default=frozenset({"CODE", "SUBJECT", "STATUS"}),
-        )
         proposed_fields = arguments.get("fields")
         if isinstance(proposed_fields, list) and proposed_fields:
             selected_fields = requested_fields & set(proposed_fields)
@@ -3744,6 +4023,19 @@ class ChatbotService:
             fields.add("SUBJECT")
         if re.search(r"\b(?:estado|situacion|seguimiento)\b", normalized):
             fields.add("STATUS")
+        if re.search(
+            r"\b(?:asignad[oa]s?|asignacion|atendiendo|atendid[oa]s?|tomo)\b|"
+            r"\b(?:asesor|agente|representante)\b.{0,35}"
+            r"\b(?:atiende|atendio|atendiendo|asignado|tomo)\b",
+            normalized,
+        ):
+            fields.add("ASSIGNMENT")
+        if re.search(
+            r"\b(?:respondio|contesto|respondieron|contestaron)\b", normalized
+        ):
+            fields.add("RESPONSE_STATUS")
+        if re.search(r"\b(?:respuesta|comentario)\b", normalized):
+            fields.add("RESPONSE")
         if re.search(r"\b(?:descripcion|detalle)\b", normalized):
             fields.add("DESCRIPTION")
         return frozenset(fields) if fields else default
@@ -3847,6 +4139,42 @@ class ChatbotService:
                         if total == 0
                         else "Estos son tus tickets abiertos más recientes."
                     )
+                elif "ASSIGNMENT" in (request.requested_fields or frozenset()):
+                    assigned_count = sum(
+                        item.assigned_advisor_id is not None
+                        for item in result_page.items
+                    )
+                    shown_count = len(result_page.items)
+                    if total == 0:
+                        answer = "No tienes tickets registrados para revisar."
+                    elif assigned_count == shown_count:
+                        answer = (
+                            f"Los {shown_count} tickets mostrados tienen un asesor "
+                            "asignado; las tarjetas incluyen su estado actual."
+                        )
+                    elif assigned_count == 0:
+                        answer = (
+                            f"Ninguno de los {shown_count} tickets mostrados tiene "
+                            "un asesor asignado; las tarjetas incluyen su estado."
+                        )
+                    else:
+                        answer = (
+                            f"{assigned_count} de los {shown_count} tickets mostrados "
+                            "tienen un asesor asignado; las tarjetas incluyen "
+                            "su estado."
+                        )
+                elif "STATUS" in (request.requested_fields or frozenset()):
+                    answer = (
+                        "No tienes tickets registrados para revisar su estado."
+                        if total == 0
+                        else "Estos son tus tickets y su estado actual."
+                    )
+                elif "SUBJECT" in (request.requested_fields or frozenset()):
+                    answer = (
+                        "No tienes tickets registrados para revisar sus asuntos."
+                        if total == 0
+                        else "Estos son tus tickets y sus asuntos."
+                    )
                 else:
                     answer = (
                         "No tienes tickets registrados."
@@ -3870,16 +4198,6 @@ class ChatbotService:
             result["ticket_reference_codes"] = [
                 item.tracking_code for item in result_page.items
             ]
-            if request.query_type == ChatbotTicketQueryType.TICKET_COUNT:
-                result["ticket_provider_data"] = ({"count": total},)
-            else:
-                requested_fields = request.requested_fields or frozenset(
-                    {"CODE", "SUBJECT", "STATUS"}
-                )
-                result["ticket_provider_data"] = tuple(
-                    self._ticket_provider_projection(item, requested_fields)
-                    for item in result_page.items
-                )
             return result
 
         if request.query_type == ChatbotTicketQueryType.LATEST_TICKET:
@@ -3903,20 +4221,70 @@ class ChatbotService:
             result["ticket_reference_codes"] = (
                 [ticket.tracking_code] if ticket is not None else []
             )
-            result["ticket_provider_data"] = (
-                (
-                    self._ticket_provider_projection(
-                        ticket,
-                        request.requested_fields
-                        or frozenset({"CODE", "SUBJECT", "STATUS"}),
-                    ),
-                )
-                if ticket is not None
-                else ()
-            )
             return result
 
-        ticket = self._find_ticket_for_query(session, current_user, request)
+        ticket = None
+        if request.tracking_code is None:
+            owned_tickets = self.tickets.list_mine(
+                session, current_user, page=1, page_size=_MAX_CHAT_TICKETS
+            )
+            if request.position is not None:
+                if request.position <= len(owned_tickets.items):
+                    ticket = owned_tickets.items[request.position - 1]
+                else:
+                    payload = ChatbotTicketQuery(
+                        query_type=request.query_type,
+                        found=False,
+                    )
+                    result = self._ticket_query_result(
+                        "No encuentro un ticket en esa posición de tu lista.",
+                        request.action,
+                        payload,
+                        resolved=True,
+                    )
+                    result["ticket_reference_codes"] = [
+                        item.tracking_code for item in owned_tickets.items
+                    ]
+                    return result
+            elif len(owned_tickets.items) == 1:
+                ticket = owned_tickets.items[0]
+            elif len(owned_tickets.items) > 1:
+                cards = [self._ticket_card(item) for item in owned_tickets.items]
+                payload = ChatbotTicketQuery(
+                    query_type=ChatbotTicketQueryType.TICKET_LIST,
+                    found=True,
+                    tickets=cards,
+                    total=owned_tickets.total,
+                    pagination=ChatbotTicketPagination(
+                        page=owned_tickets.page,
+                        page_size=owned_tickets.page_size,
+                        total_pages=owned_tickets.total_pages,
+                    ),
+                )
+                result = self._ticket_query_result(
+                    "Veo varios tickets. ¿Cuál quieres que revise? Puedes indicar "
+                    "el primero, el segundo, el asunto o el código de seguimiento.",
+                    ChatbotSuggestedAction.CLARIFY_TICKET_CODE,
+                    payload,
+                    resolved=False,
+                    requires_clarification=True,
+                )
+                result["ticket_reference_codes"] = [
+                    item.tracking_code for item in owned_tickets.items
+                ]
+                result["pending_question"] = "¿Cuál de tus tickets quieres que revise?"
+                if request.query_type in {
+                    ChatbotTicketQueryType.TICKET_STATUS,
+                    ChatbotTicketQueryType.ADVISOR_RESPONSE_STATUS,
+                    ChatbotTicketQueryType.ADVISOR_REPLY,
+                }:
+                    result["pending_ticket_query"] = {
+                        "action": request.action.value,
+                        "query_type": request.query_type.value,
+                    }
+                return result
+        else:
+            ticket = self._find_ticket_for_query(session, current_user, request)
         if ticket is None:
             answer = (
                 "No encontré un ticket disponible con ese código. Verifica el "
@@ -3939,21 +4307,24 @@ class ChatbotService:
                 found=True,
                 ticket=card,
             )
-            answer = (
-                f"El ticket {ticket.tracking_code} está en estado "
-                f"{card.status_label}. {self._ticket_assignment_message(ticket)}"
+            requested_fields = request.requested_fields or frozenset(
+                {"CODE", "SUBJECT", "STATUS", "ASSIGNMENT"}
             )
+            answer_parts = []
+            if "SUBJECT" in requested_fields:
+                answer_parts.append(f"El asunto es {ticket.subject}.")
+            if "STATUS" in requested_fields:
+                answer_parts.append(
+                    f"El ticket {ticket.tracking_code} está en estado "
+                    f"{card.status_label}."
+                )
+            if "ASSIGNMENT" in requested_fields or "STATUS" in requested_fields:
+                answer_parts.append(self._ticket_assignment_message(ticket))
+            answer = " ".join(answer_parts)
             result = self._ticket_query_result(
                 answer, request.action, payload, resolved=True
             )
             result["ticket_reference_codes"] = [ticket.tracking_code]
-            result["ticket_provider_data"] = (
-                self._ticket_provider_projection(
-                    ticket,
-                    request.requested_fields
-                    or frozenset({"CODE", "SUBJECT", "STATUS"}),
-                ),
-            )
             return result
 
         advisor_comments = [
@@ -4051,25 +4422,6 @@ class ChatbotService:
         if request.statuses == frozenset({TicketStatus.PENDIENTE_CLIENTE}):
             return TicketStatus.PENDIENTE_CLIENTE.value
         return next(iter(request.statuses)).value
-
-    @staticmethod
-    def _ticket_provider_projection(
-        ticket: TicketRead,
-        requested_fields: frozenset[str],
-    ) -> dict[str, object]:
-        projected: dict[str, object] = {}
-        if "CODE" in requested_fields:
-            projected["tracking_code"] = ticket.tracking_code
-        if "SUBJECT" in requested_fields and not detect_prompt_injection(
-            ticket.subject
-        ):
-            projected["subject"] = minimize_provider_input(ticket.subject)
-        if "STATUS" in requested_fields:
-            projected["status"] = ticket.status.value
-        if "DESCRIPTION" in requested_fields:
-            if not detect_prompt_injection(ticket.description):
-                projected["description"] = minimize_provider_input(ticket.description)
-        return projected
 
     @staticmethod
     def _ticket_assignment_message(ticket: TicketRead) -> str:
@@ -5078,23 +5430,84 @@ class ChatbotService:
         )
 
     @staticmethod
-    def _conversation_summary(messages: list[ChatMessage], current_message: str) -> str:
-        user_turns = [
-            " ".join(minimize_provider_input(message.content).split())[:300]
-            for message in messages
-            if message.sender_type == SenderType.USER
-        ][-3:]
-        current_turn = " ".join(minimize_provider_input(current_message).split())
-        if current_turn:
-            reason = re.search(r"\bmotivo\s*:\s*(.+)$", current_turn, re.IGNORECASE)
-            if reason is not None:
-                user_turns.append(f"Motivo indicado: {reason.group(1)[:300]}")
-            elif not ChatbotService._is_advisor_request(current_turn):
-                user_turns.append(current_turn[:300])
-        context = " / ".join(user_turns)
-        if not context:
-            context = "El cliente solicita atención de un asesor."
-        return f"Resumen de conversación (extracto determinístico): {context}"[:1200]
+    def _conversation_summary(
+        messages: list[ChatMessage], current_message: str
+    ) -> str | None:
+        def relevant_detail(content: str) -> str | None:
+            clean_content = " ".join(minimize_provider_input(content).split())
+            labeled = re.search(
+                r"\b(?:motivo|problema)\s*[:=]\s*(.+)$",
+                clean_content,
+                re.IGNORECASE,
+            )
+            if labeled is not None:
+                detail = labeled.group(1).strip(" .,:;")
+                return detail[:300] if len(detail) >= 5 else None
+
+            description = TicketDraftService._labeled_values(clean_content).get(
+                "description"
+            )
+            if description and len(description) >= 5:
+                return description[:300]
+
+            incident = TicketDraftService._incident_text(clean_content)
+            if incident:
+                return incident[:300]
+
+            if ChatbotService._is_advisor_request(clean_content):
+                reason = re.search(
+                    r"\b(?:debido\s+a|porque|por|sobre)\s+(.+)$",
+                    clean_content,
+                    re.IGNORECASE,
+                )
+                if reason is not None:
+                    detail = reason.group(1).strip(" .,:;")
+                    if detail.casefold().startswith("favor "):
+                        return None
+                    return detail[:300] if len(detail) >= 5 else None
+            return None
+
+        current_detail = relevant_detail(current_message)
+        candidates = [current_detail] if current_detail else []
+        if not candidates:
+            for index, message in enumerate(messages):
+                if message.sender_type != SenderType.USER:
+                    continue
+                following_bot = next(
+                    (
+                        item
+                        for item in messages[index + 1 :]
+                        if item.sender_type == SenderType.BOT
+                    ),
+                    None,
+                )
+                if following_bot is None or following_bot.intent not in {
+                    "TICKET_DRAFT",
+                    "ADVISOR_TICKET_DRAFT",
+                }:
+                    continue
+                if (
+                    not re.search(
+                        r"\b(?:describe|descripcion|problema|incidente)\b",
+                        normalize_text(following_bot.content),
+                    )
+                    and not re.search(
+                        r"\b(?:descripcion|detalle|motivo|problema)\s*[:=]",
+                        message.content,
+                        re.IGNORECASE,
+                    )
+                    and TicketDraftService._incident_text(message.content) is None
+                ):
+                    continue
+                detail = relevant_detail(message.content)
+                if detail:
+                    candidates.append(detail)
+
+        distinct_candidates = list(dict.fromkeys(candidates[-3:]))
+        if not distinct_candidates:
+            return None
+        context = " / ".join(distinct_candidates)
+        return f"Resumen del problema (extracto determinístico): {context}"[:1200]
 
     def _proactive_notices(
         self,
@@ -5149,6 +5562,8 @@ class ChatbotService:
         result: dict[str, object],
     ) -> list[ChatbotQuickReply]:
         if not get_settings().chatbot_quick_replies_enabled:
+            return []
+        if isinstance(result.get("ticket_query"), ChatbotTicketQuery):
             return []
         if draft.status == ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION:
             return [

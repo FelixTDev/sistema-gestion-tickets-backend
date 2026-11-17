@@ -112,7 +112,8 @@ class TicketDraftService:
             or normalize_text(content) in _CONFIRMATION_WORDS
         ):
             return True
-        if "?" in content or _UNRELATED_QUESTION_PATTERN.search(content):
+        looks_like_question = "?" in content or content.lstrip().startswith("¿")
+        if looks_like_question and _UNRELATED_QUESTION_PATTERN.search(content):
             return False
         if self._mentions_priority(content):
             return True
@@ -253,10 +254,11 @@ class TicketDraftService:
                 )
             if value is None:
                 continue
-            value = " ".join(value.split())
-            if field_name == "description" and initial_description is not None:
-                summary = " ".join(initial_description.split())
-                value = f"{summary}\n\nDetalle comunicado por el cliente: {value}"
+            value = (
+                value.strip()
+                if field_name == "description"
+                else " ".join(value.split())
+            )
             if not minimum <= len(value) <= maximum:
                 errors[enum_field] = (
                     f"El campo debe tener entre {minimum} y {maximum} caracteres."
@@ -322,9 +324,13 @@ class TicketDraftService:
     def _labeled_values(content: str) -> dict[str, str]:
         values: dict[str, str] = {}
         for field_name, label in _FIELD_LABELS.items():
+            terminator = (
+                rf"(?=\s+(?:{_ALL_LABELS})\b\s*[:=]|$)"
+                if field_name == "description"
+                else rf"(?=\s+(?:{_ALL_LABELS})\b\s*[:=]|[;\n]|$)"
+            )
             pattern = re.compile(
-                rf"\b(?:{label})\b\s*[:=]\s*(.*?)"
-                rf"(?=\s+(?:{_ALL_LABELS})\b\s*[:=]|[;\n]|$)",
+                rf"\b(?:{label})\b\s*[:=]\s*(.*?)" + terminator,
                 re.IGNORECASE | re.DOTALL,
             )
             match = pattern.search(content)
@@ -426,7 +432,9 @@ class TicketDraftService:
         value: str,
         errors: dict[ChatbotTicketDraftField, str],
     ) -> None:
-        clean_value = " ".join(value.split())
+        clean_value = (
+            value.strip() if field_name == "description" else " ".join(value.split())
+        )
         field = (
             ChatbotTicketDraftField.SUBJECT
             if field_name == "subject"
