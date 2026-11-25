@@ -225,6 +225,15 @@ def list_categories(
     return service.list_active(session)
 
 
+@category_router.get("/admin", response_model=list[CategoryRead])
+def list_admin_categories(
+    session: Annotated[Session, Depends(get_session)],
+    current_user: CurrentUser,
+    service: Annotated[CategoryService, Depends(get_category_service)],
+) -> list[CategoryRead]:
+    return service.list_admin(session, current_user)
+
+
 @category_router.post(
     "", response_model=CategoryRead, status_code=status.HTTP_201_CREATED
 )

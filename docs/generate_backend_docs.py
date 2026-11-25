@@ -381,6 +381,14 @@ META: dict[str, RouteMeta] = {
     "GET /api/v1/categories": RouteMeta(
         "Lista categorías activas.", "No", "-", "Sin body", "list[CategoryRead]", "-"
     ),
+    "GET /api/v1/categories/admin": RouteMeta(
+        "Lista categorías activas e inactivas para administración.",
+        COMMON_AUTH,
+        SUPERVISOR,
+        "Sin body",
+        "list[CategoryRead]",
+        "401/403",
+    ),
     "POST /api/v1/categories": RouteMeta(
         "Crea una categoría de tickets.",
         COMMON_AUTH,
@@ -1575,6 +1583,8 @@ def build_markdown(
             "",
             "Los endpoints de tickets y FAQs mantienen compatibilidad: sin `page` ni `page_size` devuelven listas legacy; al enviar cualquiera de ellos devuelven página. Páginas fuera de rango devuelven `items: []`. Los listados ordenan tickets por `created_at DESC, id DESC`; notificaciones por `created_at DESC, id DESC`; comentarios e historiales siguen el orden registrado por repositorio.",
             "",
+            "Las respuestas de tickets, historial y SLA incluyen zona UTC solo cuando se puede verificar el origen de la escritura. Las fechas históricas ambiguas permanecen sin zona horaria; su serialización no modifica los valores guardados en MySQL.",
+            "",
             'No existe un `@ControllerAdvice`/manejador global equivalente: los routers y servicios convierten errores de dominio conocidos en `HTTPException`; errores no previstos quedan a cargo de FastAPI/Starlette. Los formatos observables más comunes son el detalle FastAPI (`{"detail": ...}`), respuestas de validación 422 y respuestas binarias para descarga/exportación.',
             "",
             "## 13. Configuración y ejecución",
@@ -1602,7 +1612,7 @@ def build_markdown(
             "",
             "## 14. Pruebas e infraestructura",
             "",
-            f"Se encontraron {counts['test_files']} archivos de prueba, {counts['test_functions']} funciones `test_*` y {counts['test_cases']} casos recogidos por Pytest (incluye parametrizaciones). Hay pruebas unitarias (`tests/unit`), integración (`tests/integration`) y evaluación de calidad del chatbot (`tests/evaluation`). Cubren auth/security, health, CORS, tickets, paginación, comentarios, operaciones de asesores, SLA, adjuntos, notificaciones, perfil/preferencias, knowledge base, chatbot fases 11/12, reports/exports, audit y seed.",
+            f"Se encontraron {counts['test_files']} archivos de prueba, {counts['test_functions']} funciones `test_*` y {counts['test_cases']} casos recogidos por Pytest (incluye parametrizaciones). Hay pruebas unitarias (`tests/unit`), integración (`tests/integration`) y evaluación de calidad del chatbot (`tests/evaluation`). Cubren auth/security, health, CORS, tickets, paginación, comentarios, operaciones de asesores, SLA, adjuntos, notificaciones, perfil/preferencias, knowledge base, chatbot fases 11/12/13, reports/exports, audit y seed.",
             "",
             md_table(
                 ["Tipo", "Ubicación", "Alcance"],
@@ -1625,7 +1635,7 @@ def build_markdown(
                 ],
             ),
             "",
-            "Validación ejecutada durante esta auditoría: `pytest` -> 219 passed, 2 warnings; `ruff check .` -> All checks passed; `ruff format --check .` -> 205 files already formatted. `alembic check` no pudo conectarse porque no había MySQL escuchando en `localhost:3307`; no se modificó el backend ni la base de datos.",
+            "Verificación ejecutada para esta revisión: `pytest` -> 659 passed, 44 warnings; `ruff check .` -> All checks passed; `ruff format --check .` -> 271 files already formatted; `git diff --check` -> sin errores; `alembic heads` -> `0021_faq_catalog_refresh` (único head). No se aplicaron migraciones.",
             "",
             "```mermaid",
             mermaid_diagrams()["modules"].rstrip(),
@@ -2339,7 +2349,7 @@ def build_pdf(
     story += [
         Paragraph("12. Pruebas, pendientes y conclusión", styles["H1x"]),
         p(
-            f"La auditoría ejecutó pytest: 219 passed, 2 warnings; ruff check y ruff format --check pasan. alembic check quedó bloqueado por MySQL no disponible en localhost:3307. Se encontraron {counts['test_cases']} casos de prueba en {counts['test_files']} archivos.",
+            f"La verificación de esta revisión ejecutó pytest: 659 passed, 44 warnings; ruff check y ruff format --check pasan. `alembic heads` muestra un único head, `0021_faq_catalog_refresh`; no se aplicaron migraciones. Se encontraron {counts['test_cases']} casos de prueba en {counts['test_files']} archivos.",
             styles["Bodyx"],
         ),
         p(

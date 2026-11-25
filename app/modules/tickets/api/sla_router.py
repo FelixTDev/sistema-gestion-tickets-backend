@@ -34,7 +34,7 @@ def get_ticket_sla(
     service: SlaServiceDependency,
 ) -> TicketSlaRead:
     sla, policy = service.get_for_ticket(session, ticket_id, current_user)
-    return service.to_read(sla, policy)
+    return service.to_read(sla, policy, session=session, ticket_id=ticket_id)
 
 
 @router.post("/tickets/{ticket_id}/sla/pause", response_model=TicketSlaRead)
@@ -46,7 +46,7 @@ def pause_ticket_sla(
     service: SlaServiceDependency,
 ) -> TicketSlaRead:
     sla, policy = service.pause(session, ticket_id, current_user, data.reason)
-    return service.to_read(sla, policy)
+    return service.to_read(sla, policy, session=session, ticket_id=ticket_id)
 
 
 @router.post("/tickets/{ticket_id}/sla/resume", response_model=TicketSlaRead)
@@ -57,7 +57,7 @@ def resume_ticket_sla(
     service: SlaServiceDependency,
 ) -> TicketSlaRead:
     sla, policy = service.resume(session, ticket_id, current_user)
-    return service.to_read(sla, policy)
+    return service.to_read(sla, policy, session=session, ticket_id=ticket_id)
 
 
 @router.post("/sla/evaluate", response_model=SlaEvaluationRead)

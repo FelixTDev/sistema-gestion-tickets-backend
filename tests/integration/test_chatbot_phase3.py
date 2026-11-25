@@ -633,6 +633,24 @@ def test_category_text_matches_active_catalog_name_across_separators(
     assert "CATEGORY_ID" not in draft["missing_fields"]
 
 
+def test_active_draft_accepts_reclamos_simples_as_category_selection(phase3_client):
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    send(client, conversation_id, "Quiero crear un ticket", headers)
+
+    selection = send(client, conversation_id, "Reclamos Simples", headers)
+
+    with Session(engine) as session:
+        category = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "RECLAMOS_SIMPLES")
+        ).one()
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+    draft = selection.json()["ticket_draft"]
+    assert selection.status_code == 200
+    assert draft["fields"]["category_id"] == category.id
+    assert "CATEGORY_ID" not in draft["missing_fields"]
+
+
 def test_unknown_category_requests_selection_without_assigning_category(
     phase3_client,
 ) -> None:
@@ -963,7 +981,8 @@ def test_ticket_query_and_faq_pause_active_draft_without_mutating_it(phase3_clie
     description = send(
         client,
         conversation_id,
-        "Cuando entro desde mi celular no me carga la app.",
+        "Banca Digital no abre desde ayer; la pantalla muestra un error y no me "
+        "deja continuar, ¿qué hago?",
         headers,
     )
 
@@ -982,13 +1001,98 @@ def test_ticket_query_and_faq_pause_active_draft_without_mutating_it(phase3_clie
     assert resumed.json()["ticket_draft"]["paused"] is False
     assert resumed.json()["ticket_draft"]["fields"] == before
     assert description.json()["ticket_draft"]["fields"]["description"] == (
-        "Cuando entro desde mi celular no me carga la app."
+        "Banca Digital no abre desde ayer; la pantalla muestra un error y no me "
+        "deja continuar, ¿qué hago?"
     ), {
         "intent": description.json().get("intent_classification"),
         "action": description.json().get("suggested_action"),
         "draft": description.json().get("ticket_draft"),
         "bot": description.json().get("bot_message"),
     }
+    assert (
+        description.json()["ticket_draft"]["fields"]["category_id"]
+        == before["category_id"]
+    )
+
+
+def test_active_draft_uses_expected_subject_for_unlabelled_category_name(phase3_client):
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    with Session(engine) as session:
+        cards = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+
+    send(
+        client,
+        conversation_id,
+        "Quiero crear ticket. Categoría: TARJETAS.",
+        headers,
+    )
+    subject = send(client, conversation_id, "RECLAMOS SIMPLES", headers)
+
+    draft = subject.json()["ticket_draft"]
+    assert subject.status_code == 200
+    assert draft["fields"]["subject"] == "RECLAMOS SIMPLES"
+    assert draft["fields"]["category_id"] == cards.id
+
+
+def test_active_draft_routes_subject_and_description_by_expected_field(phase3_client):
+    client, engine = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+    with Session(engine) as session:
+        cards = session.exec(
+            select(TicketCategory).where(TicketCategory.name == "TARJETAS")
+        ).one()
+
+    started = send(
+        client,
+        conversation_id,
+        "Quiero crear ticket. Categoría: TARJETAS.",
+        headers,
+    )
+    subject = send(
+        client,
+        conversation_id,
+        "ASUNTO: RECLAMO SIMPLE",
+        headers,
+    )
+    description = send(
+        client,
+        conversation_id,
+        "DESCRIPCIÓN: Mi reclamo es por el acceso a Banca Digital; no puedo ingresar.",
+        headers,
+    )
+
+    assert started.json()["ticket_draft"]["fields"]["category_id"] == cards.id
+    assert subject.status_code == description.status_code == 200
+    assert subject.json()["ticket_draft"]["paused"] is False
+    assert subject.json()["ticket_draft"]["fields"]["subject"] == "RECLAMO SIMPLE"
+    assert description.json()["ticket_draft"]["fields"]["category_id"] == cards.id
+    assert description.json()["ticket_draft"]["fields"]["description"] == (
+        "Mi reclamo es por el acceso a Banca Digital; no puedo ingresar."
+    )
+
+    priority = send(client, conversation_id, "Prioridad: MEDIA", headers)
+    assert priority.json()["ticket_draft"]["status"] == "READY_FOR_CONFIRMATION"
+    assert priority.json()["suggested_action"] == "CONFIRM_TICKET"
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+    confirmation = send(client, conversation_id, "Confirmo", headers)
+    assert confirmation.json()["ticket_draft"]["status"] == "CONFIRMED"
+    with Session(engine) as session:
+        assert session.exec(select(func.count(Ticket.id))).one() == 0
+
+
+def test_general_claim_status_query_keeps_ticket_query_classification(phase3_client):
+    client, _ = phase3_client
+    conversation_id, headers = create_linked_conversation(client)
+
+    response = send(client, conversation_id, "Quiero ver cómo va mi reclamo", headers)
+
+    assert response.status_code == 200
+    assert response.json()["ticket_query"]["query_type"] == "CLARIFY_TICKET_CODE"
 
 
 def test_ambiguous_message_asks_whether_to_continue_or_change_topic(phase3_client):

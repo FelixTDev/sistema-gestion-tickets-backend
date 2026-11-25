@@ -26,7 +26,14 @@ _FIELD_LABELS = {
 }
 _ALL_LABELS = "|".join(f"(?:{value})" for value in _FIELD_LABELS.values())
 _RESUME_PATTERN = re.compile(
-    r"\b(?:contin[uú]a(?:r)?|reanuda(?:r)?|retoma(?:r)?|seguir|prosigue)\b",
+    r"^\s*(?:s[ií]\s*[,;:]?\s*)?"
+    r"(?:(?:contin[uú]a(?:r)?|reanuda(?:r)?|retoma(?:r)?|seguir|prosigue)"
+    r"(?:\s+(?:con\s+)?(?:(?:el|tu|mi)\s+)?"
+    r"(?:borrador|ticket|solicitud|caso)"
+    r"(?:\s+de\s+(?:ticket|solicitud|caso))?)?|"
+    r"(?:borrador|ticket|solicitud|caso)\s+"
+    r"(?:contin[uú]a(?:r)?|reanuda(?:r)?|retoma(?:r)?|seguir|prosigue))"
+    r"\s*[.!?]*$",
     re.IGNORECASE,
 )
 _CANCEL_PATTERN = re.compile(
@@ -88,6 +95,22 @@ class TicketDraftService:
             mode="json",
             exclude={"category_options", "paused", "category_name"},
         )
+
+    @classmethod
+    def has_explicit_text_field(cls, content: str) -> bool:
+        values = cls._labeled_values(content)
+        return "subject" in values or "description" in values
+
+    @classmethod
+    def expects_text_input(cls, draft: ChatbotTicketDraft) -> bool:
+        return cls._next_missing_field(draft) in {
+            ChatbotTicketDraftField.SUBJECT,
+            ChatbotTicketDraftField.DESCRIPTION,
+        }
+
+    @classmethod
+    def is_cancel_request(cls, content: str) -> bool:
+        return cls._is_cancel(content)
 
     def should_handle(
         self,
@@ -193,13 +216,28 @@ class TicketDraftService:
         errors = {item.field: item.message for item in draft.validation_errors}
         explicit = self._labeled_values(content)
         extracted = extracted_fields or {}
+        pending_field = self._next_missing_field(draft)
+        has_explicit_text = "subject" in explicit or "description" in explicit
 
-        category_text = explicit.get("category_id") or self._supported_extracted_text(
-            extracted.get("category_name"), content
-        )
+        category_text = explicit.get("category_id")
+        if (
+            category_text is None
+            and pending_field == ChatbotTicketDraftField.CATEGORY_ID
+        ):
+            category_text = self._supported_extracted_text(
+                extracted.get("category_name"), content
+            )
         category_was_provided = category_text is not None
-        category_candidates = self._matching_categories(
-            category_text if category_was_provided else content, categories
+        can_match_category_in_free_text = (
+            pending_field == ChatbotTicketDraftField.CATEGORY_ID
+            and not has_explicit_text
+        )
+        category_candidates = (
+            self._matching_categories(
+                category_text if category_was_provided else content, categories
+            )
+            if category_was_provided or can_match_category_in_free_text
+            else []
         )
         if category_candidates or category_was_provided:
             if len(category_candidates) == 1:
@@ -269,17 +307,21 @@ class TicketDraftService:
                 draft.fields.__setattr__(draft_field, value)
                 errors.pop(enum_field, None)
 
-        if start_requested and draft.fields.description is None:
+        if (
+            start_requested
+            and existing.status
+            not in {
+                ChatbotTicketDraftStatus.COLLECTING,
+                ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                ChatbotTicketDraftStatus.CONFIRMED,
+            }
+            and draft.fields.description is None
+        ):
             incident = self._incident_text(content)
             if incident:
                 self._set_text_field(draft, "description", incident, errors)
-        elif (
-            not explicit
-            and not extracted
-            and not category_candidates
-            and not priority_candidates
-        ):
-            next_field = self._next_missing_field(draft)
+        elif not explicit and not extracted and not priority_candidates:
+            next_field = pending_field
             if next_field == ChatbotTicketDraftField.CATEGORY_ID:
                 errors[ChatbotTicketDraftField.CATEGORY_ID] = (
                     "Selecciona una de las categorías activas disponibles."
@@ -320,6 +362,33 @@ class TicketDraftService:
         return any(
             re.search(rf"\b(?:{label})\b\s*[:=]", content, re.IGNORECASE)
             for label in _FIELD_LABELS.values()
+        )
+
+    @classmethod
+    def has_explicit_category_selection(cls, content: str) -> bool:
+        return "category_id" in cls._labeled_values(content)
+
+    def is_category_selection(
+        self, session: Session, content: str, draft: ChatbotTicketDraft
+    ) -> bool:
+        if self.has_explicit_category_selection(content):
+            return True
+        if (
+            draft.status
+            not in {
+                ChatbotTicketDraftStatus.COLLECTING,
+                ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
+                ChatbotTicketDraftStatus.CONFIRMED,
+            }
+            or self._next_missing_field(draft) != ChatbotTicketDraftField.CATEGORY_ID
+        ):
+            return False
+        normalized_content = re.sub(r"[\s_-]+", " ", normalize_text(content)).strip(
+            " .,!?:;¿¡"
+        )
+        return any(
+            normalized_content == re.sub(r"[\s_-]+", " ", normalize_text(category.name))
+            for category in self.categories.list_active(session)
         )
 
     @staticmethod

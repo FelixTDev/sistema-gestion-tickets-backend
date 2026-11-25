@@ -429,6 +429,10 @@ descendente. El modo paginado usa consultas SQL limitadas y un conteo separado;
 los listados legacy se conservan para no romper el frontend actual y no deben
 usarse para bandejas grandes.
 
+Las respuestas de tickets, historial y SLA incluyen zona UTC solo cuando se puede
+verificar el origen de la escritura. Las fechas históricas ambiguas permanecen sin
+zona horaria; su serialización no modifica los valores guardados en MySQL.
+
 ### Directorio de asesores
 
 El supervisor puede consultar `GET /api/v1/users/advisors` para seleccionar un
@@ -458,7 +462,12 @@ Endpoints de conocimiento:
 - `GET /api/v1/faqs/{faq_id}/history`: snapshots editoriales, solo `SUPERVISOR`.
 - `POST /api/v1/faqs/{faq_id}/feedback`: utilidad anónima o de un `CLIENTE`.
 - `GET /api/v1/faqs/admin/metrics/utility`: métricas agregadas, solo `SUPERVISOR`.
-- `GET /api/v1/categories`, `POST /api/v1/categories`, `PATCH /api/v1/categories/{category_id}` y `PATCH /api/v1/categories/{category_id}/status`
+- `GET /api/v1/categories`: catálogo público de categorías activas.
+- `GET /api/v1/categories/admin`: catálogo completo, solo `SUPERVISOR`.
+- `POST /api/v1/categories`, `PATCH /api/v1/categories/{category_id}` y
+  `PATCH /api/v1/categories/{category_id}/status`: operaciones exclusivas de
+  `SUPERVISOR`; el cambio de estado también permite reactivar con
+  `{"is_active": true}`.
 
 Las FAQs conservan pregunta, respuesta y keywords existentes, y agregan título,
 resumen, tags, sinónimos, intención, prioridad, orden, contenido normalizado,

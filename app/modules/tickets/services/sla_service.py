@@ -20,6 +20,7 @@ from app.modules.tickets.models.sla import (
 )
 from app.modules.tickets.models.ticket import Ticket, TicketPriority, TicketStatus
 from app.modules.tickets.repositories.sla_repository import SlaRepository
+from app.modules.tickets.repositories.ticket_repository import TicketRepository
 from app.modules.tickets.schemas.sla import (
     SlaPolicyCreate,
     SlaPolicyUpdate,
@@ -35,6 +36,26 @@ class SlaEvaluationResult:
     breaches: int
 
 
+_SLA_TIMESTAMP_FIELDS_DERIVED_FROM_TICKET_CREATION = frozenset(
+    {"started_at", "first_response_due_at", "resolution_due_at"}
+)
+_SLA_TIMESTAMP_FIELDS_WRITTEN_AS_UTC = frozenset(
+    {
+        "first_responded_at",
+        "first_response_warning_sent_at",
+        "resolution_warning_sent_at",
+        "first_response_breached_at",
+        "resolved_at",
+        "paused_at",
+        "warning_sent_at",
+        "breached_at",
+        "resolution_breached_at",
+        "created_at",
+        "updated_at",
+    }
+)
+
+
 class SlaService:
     def __init__(
         self,
@@ -44,6 +65,7 @@ class SlaService:
         audit_service: AuditService | None = None,
     ) -> None:
         self.repository = repository or SlaRepository()
+        self.ticket_repository = TicketRepository()
         self.notifications = notification_service or NotificationService()
         self.clock = clock or (lambda: datetime.now(UTC))
         self.audit = audit_service or AuditService()
@@ -469,7 +491,14 @@ class SlaService:
         session.refresh(policy)
         return policy
 
-    def to_read(self, sla: TicketSla, policy: SlaPolicy) -> TicketSlaRead:
+    def to_read(
+        self,
+        sla: TicketSla,
+        policy: SlaPolicy,
+        *,
+        session: Session,
+        ticket_id: str,
+    ) -> TicketSlaRead:
         values: dict[str, Any] = {
             **sla.model_dump(),
             "policy_priority": policy.priority,
@@ -478,7 +507,41 @@ class SlaService:
             "policy_timezone_name": policy.timezone_name,
             "policy_calendar_name": policy.calendar_name,
         }
+        known_utc_fields = set(_SLA_TIMESTAMP_FIELDS_WRITTEN_AS_UTC)
+        ticket = self.ticket_repository.get(session, ticket_id)
+        if ticket is not None and self._ticket_creation_time_is_verified(
+            session, ticket
+        ):
+            known_utc_fields.update(_SLA_TIMESTAMP_FIELDS_DERIVED_FROM_TICKET_CREATION)
+        for field_name in known_utc_fields:
+            value = values.get(field_name)
+            if isinstance(value, datetime):
+                values[field_name] = as_utc(value)
         return TicketSlaRead.model_validate(values)
+
+    def _ticket_creation_time_is_verified(
+        self, session: Session, ticket: Ticket
+    ) -> bool:
+        if ticket.created_at.tzinfo is not None:
+            return True
+        history = self.ticket_repository.ticket_timestamp_history(session, [ticket.id])
+        return any(
+            action == "CREATED"
+            and new_value == "NUEVO"
+            and self._same_mysql_second(ticket.created_at, history_created_at)
+            for action, new_value, history_created_at in history.get(ticket.id, [])
+        )
+
+    @staticmethod
+    def _same_mysql_second(left: datetime, right: datetime) -> bool:
+        left_offset = left.utcoffset()
+        right_offset = right.utcoffset()
+        if (left_offset is None) != (right_offset is None):
+            return False
+        if left_offset is not None and right_offset is not None:
+            left = left.astimezone(UTC).replace(tzinfo=None)
+            right = right.astimezone(UTC).replace(tzinfo=None)
+        return left.replace(microsecond=0) == right.replace(microsecond=0)
 
     def _send_warning(
         self,

@@ -590,16 +590,29 @@ class ChatbotService:
             ChatbotTicketDraftStatus.READY_FOR_CONFIRMATION,
             ChatbotTicketDraftStatus.CONFIRMED,
         }
+        paused_draft = saved_context.get("ticket_draft_paused") is True
+        explicit_draft_text_field = (
+            active_draft
+            and not paused_draft
+            and self.ticket_drafts.has_explicit_text_field(clean_content)
+            and not self.ticket_drafts.is_cancel_request(clean_content)
+            and not is_new_consultation
+        )
         advisor_offer_pending = saved_context.get("advisor_offer_pending") is True
         advisor_offer_choice = (
             self._advisor_offer_choice(clean_content) if advisor_offer_pending else None
         )
         advisor_offer_accepted = advisor_offer_choice == "YES"
         advisor_offer_declined = advisor_offer_choice == "NO"
-        ticket_query_request = self._ticket_query_request(clean_content)
-        ticket_query_request = self._resume_clarified_ticket_query(
-            clean_content, conversation, ticket_query_request
+        ticket_query_request = (
+            None
+            if explicit_draft_text_field
+            else self._ticket_query_request(clean_content)
         )
+        if ticket_query_request is not None:
+            ticket_query_request = self._resume_clarified_ticket_query(
+                clean_content, conversation, ticket_query_request
+            )
         may_use_ticket_context = ticket_query_request is None or (
             ticket_query_request.query_type
             in {
@@ -623,17 +636,19 @@ class ChatbotService:
         if self._is_advisor_request(clean_content):
             ticket_query_request = (
                 ticket_query_request
-                if self._ticket_query_request(clean_content) is not None
+                if explicit_draft_text_field
+                or self._ticket_query_request(clean_content) is not None
                 else None
             )
         is_ticket_request = (
-            self._is_ticket_request(clean_content) and ticket_query_request is None
+            self._is_ticket_request(clean_content)
+            and ticket_query_request is None
+            and not explicit_draft_text_field
         )
         is_unhelpful_follow_up = bool(
             previous_bot_message and self._is_unhelpful_follow_up(clean_content)
         )
         is_greeting = self._is_pure_greeting(clean_content)
-        paused_draft = saved_context.get("ticket_draft_paused") is True
         resume_paused_draft = paused_draft and self.ticket_drafts.is_resume_request(
             clean_content
         )
@@ -656,7 +671,7 @@ class ChatbotService:
         )
         advisor_handoff_requested = advisor_ticket_enabled and (
             advisor_offer_accepted
-            or (is_advisor_request and active_draft)
+            or (is_advisor_request and active_draft and not explicit_draft_text_field)
             or (
                 saved_advisor_handoff
                 and (
@@ -699,6 +714,9 @@ class ChatbotService:
             or advisor_handoff_requested
             or resume_after_authentication
             or resume_paused_draft
+        )
+        category_selection = self.ticket_drafts.is_category_selection(
+            session, clean_content, current_draft
         )
         ticket_domain_message = bool(
             re.search(
@@ -744,8 +762,29 @@ class ChatbotService:
                 )
             )
         )
+        expected_draft_text_field = (
+            active_draft
+            and not paused_draft
+            and self.ticket_drafts.expects_text_input(current_draft)
+        )
+        draft_field_message = explicit_draft_text_field or (
+            expected_draft_text_field
+            and not is_greeting
+            and not is_faq_discovery
+            and not is_faq_category_discovery
+            and not is_new_consultation
+            and not is_faq_category_request
+            and requested_faq_category_id is None
+            and selected_faq_category_id is None
+            and selected_faq_subcategory is None
+            and not is_out_of_scope_request
+            and not is_unhelpful_follow_up
+            and ticket_query_request is None
+            and not clear_faq_question
+        )
         unrelated_special_message = lifecycle_action is not None or (
             not start_ticket_draft
+            and not draft_field_message
             and (
                 is_greeting
                 or is_faq_discovery
@@ -757,7 +796,7 @@ class ChatbotService:
                 or selected_faq_category_id is not None
                 or is_unhelpful_follow_up
                 or ticket_query_request is not None
-                or ticket_domain_message
+                or (ticket_domain_message and not category_selection)
                 or clear_faq_question
                 or draft_topic_clarification
             )

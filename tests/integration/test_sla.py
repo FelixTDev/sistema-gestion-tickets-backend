@@ -11,6 +11,7 @@ from app.db.session import get_session
 from app.main import app
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.notificaciones.models.notification import Notification
+from app.modules.tickets.models.history import TicketHistory
 from app.modules.tickets.models.sla import SlaPolicy, SlaPolicyHistory, TicketSla
 from app.modules.tickets.models.ticket import Ticket, TicketPriority, TicketSource
 from app.seed.demo_data import seed_demo_data
@@ -83,12 +84,57 @@ def test_creation_applies_priority_policy_and_returns_utc_sla(sla_client):
     body = response.json()
     assert body["status"] == "ACTIVE"
     assert body["policy_priority"] == "URGENTE"
-    assert datetime.fromisoformat(body["started_at"]).tzinfo is not None
+    for field in (
+        "started_at",
+        "first_response_due_at",
+        "resolution_due_at",
+        "created_at",
+        "updated_at",
+    ):
+        value = body[field]
+        assert value.endswith("Z") or value.endswith("+00:00")
+        assert datetime.fromisoformat(value.replace("Z", "+00:00")).utcoffset() == (
+            timedelta(0)
+        )
     assert datetime.fromisoformat(body["resolution_due_at"]) > datetime.fromisoformat(
         body["started_at"]
     )
     assert "password_hash" not in str(body)
     assert "storage_key" not in str(body)
+
+
+def test_sla_keeps_creation_derived_dates_naive_without_ticket_provenance(sla_client):
+    client, engine = sla_client
+    client_token = login(client, "cliente@demo.com")
+    ticket = create_ticket(client, client_token, category_id(engine))
+    ambiguous_start = datetime(2001, 2, 3, 4, 5, 6)
+    with Session(engine) as session:
+        sla = session.exec(
+            select(TicketSla).where(TicketSla.ticket_id == ticket["id"])
+        ).one()
+        creation_event = session.exec(
+            select(TicketHistory).where(
+                TicketHistory.ticket_id == ticket["id"],
+                TicketHistory.action == "CREATED",
+            )
+        ).one()
+        creation_event.created_at = datetime(2001, 2, 3, 5, 5, 6)
+        sla.started_at = ambiguous_start
+        sla.first_response_due_at = ambiguous_start + timedelta(minutes=10)
+        sla.resolution_due_at = ambiguous_start + timedelta(hours=1)
+        session.add_all([creation_event, sla])
+        session.commit()
+
+    response = client.get(
+        f"/api/v1/tickets/{ticket['id']}/sla",
+        headers={"Authorization": f"Bearer {client_token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["started_at"] == "2001-02-03T04:05:06"
+    assert body["first_response_due_at"] == "2001-02-03T04:15:06"
+    assert body["resolution_due_at"] == "2001-02-03T05:05:06"
 
 
 def test_category_policy_overrides_priority_and_manual_change_is_audited(sla_client):

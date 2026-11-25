@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.shared.datetime import as_utc
 
 
 class AuditRead(BaseModel):
@@ -22,6 +24,11 @@ class AuditRead(BaseModel):
     metadata: dict[str, object] | None
     request_id: str | None
     correlation_id: str | None
+
+    @field_validator("occurred_at")
+    @classmethod
+    def normalize_occurred_at(cls, value: datetime) -> datetime:
+        return as_utc(value)
 
     @classmethod
     def from_model(cls, audit: object) -> "AuditRead":

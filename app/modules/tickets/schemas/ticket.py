@@ -4,6 +4,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.modules.tickets.models.ticket import TicketPriority, TicketSource, TicketStatus
 
+_TIMESTAMP_DESCRIPTION = (
+    "Fecha ISO 8601. UTC se incluye solo cuando la procedencia de escritura es "
+    "verificable; las fechas históricas ambiguas permanecen sin zona horaria."
+)
+
 
 class TicketCreate(BaseModel):
     category_id: str
@@ -33,13 +38,13 @@ class TicketRead(BaseModel):
     assigned_advisor_name: str | None = Field(
         description="Nombre visible del asesor asignado; nulo si no hay responsable."
     )
-    created_at: datetime
-    updated_at: datetime
+    created_at: datetime = Field(description=_TIMESTAMP_DESCRIPTION)
+    updated_at: datetime = Field(description=_TIMESTAMP_DESCRIPTION)
     version: int
-    assigned_at: datetime | None
-    resolved_at: datetime | None
-    closed_at: datetime | None
-    cancelled_at: datetime | None
+    assigned_at: datetime | None = Field(description=_TIMESTAMP_DESCRIPTION)
+    resolved_at: datetime | None = Field(description=_TIMESTAMP_DESCRIPTION)
+    closed_at: datetime | None = Field(description=_TIMESTAMP_DESCRIPTION)
+    cancelled_at: datetime | None = Field(description=_TIMESTAMP_DESCRIPTION)
 
 
 class TicketPage(BaseModel):
@@ -115,4 +120,10 @@ class HistoryRead(BaseModel):
     old_value: str | None
     new_value: str | None
     description: str
-    created_at: datetime
+    created_at: datetime = Field(
+        description=(
+            "Fecha ISO 8601. Se incluye UTC para acciones con una escritura conocida; "
+            "los registros de origen ambiguo se conservan sin zona porque MySQL "
+            "no conserva el origen ni el tzinfo de DATETIME."
+        )
+    )

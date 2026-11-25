@@ -46,6 +46,7 @@ from app.modules.tickets.schemas.ticket import (
     TicketRead,
 )
 from app.modules.tickets.services.sla_service import SlaService
+from app.shared.datetime import as_utc
 from app.shared.exceptions import AppError
 from app.shared.pagination import PaginationResult
 
@@ -76,6 +77,60 @@ REQUIRES_ASSIGNED_ADVISOR = frozenset(
     }
 )
 
+# These action codes are written by application paths that use TicketHistory's
+# UTC default, explicit UTC seed times, or the UTC assignment-repair migration.
+# Unknown codes may come from historical imports, whose timezone cannot be inferred.
+_KNOWN_UTC_HISTORY_ACTIONS = frozenset(
+    {
+        "CREATED",
+        "COMMENT_ADDED",
+        "ASSIGNED",
+        "TAKEN",
+        "RELEASED",
+        "STATUS_CHANGED",
+        "CANCELLED",
+        "SLA_STARTED",
+        "SLA_FIRST_RESPONSE",
+        "SLA_REOPENED",
+        "SLA_STATUS_CHANGED",
+        "SLA_PAUSED",
+        "SLA_RESUMED",
+        "SLA_WARNING",
+        "SLA_BREACHED",
+        "ATTACHMENT_UPLOADED",
+        "ATTACHMENT_DELETED",
+        "SYSTEM_ASSIGNMENT_REPAIR",
+    }
+)
+_TICKET_CREATION_HISTORY_DESCRIPTIONS = frozenset(
+    {
+        "Ticket creado",
+        "Ticket creado desde el canal de atención correspondiente.",
+    }
+)
+_ASSIGNMENT_HISTORY_ACTIONS = frozenset({"ASSIGNED", "TAKEN"})
+_STATUS_TIMESTAMP_VALUES = {
+    "RESUELTO": "resolved_at",
+    "CERRADO": "closed_at",
+    "CANCELADO": "cancelled_at",
+}
+_SYSTEM_ASSIGNMENT_REPAIR_DESCRIPTIONS = frozenset(
+    {
+        "Reparación defensiva: el estado requería asesor, pero el ticket no tenía "
+        "un asesor asignado.",
+        "Reparación defensiva: un ticket NUEVO no puede conservar asesor ni marcas "
+        "temporales de asignación o cierre.",
+    }
+)
+_SYSTEM_SLA_HISTORY_SIGNATURES = {
+    "SLA_WARNING": ("first_response", "resolution", "Advertencia SLA emitida"),
+    "SLA_BREACHED": (
+        "first_response",
+        "resolution",
+        "Incumplimiento SLA registrado",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class TicketConversionResult:
@@ -101,7 +156,11 @@ class TicketService:
     ) -> TicketRead:
         self._require_client(actor)
         ticket = self._create(session, data, actor.user.id, actor, TicketSource.MANUAL)
-        return self._ticket_read(session, ticket)
+        return self._ticket_read(
+            session,
+            ticket,
+            known_utc_fields=frozenset({"created_at", "updated_at"}),
+        )
 
     def convert_conversation(
         self,
@@ -210,7 +269,12 @@ class TicketService:
             )
         session.refresh(ticket)
         return TicketConversionResult(
-            ticket=self._ticket_read(session, ticket), created=True
+            ticket=self._ticket_read(
+                session,
+                ticket,
+                known_utc_fields=frozenset({"created_at", "updated_at"}),
+            ),
+            created=True,
         )
 
     def _recover_after_conversion_conflict(
@@ -691,7 +755,11 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return self._ticket_read(session, ticket)
+        return self._ticket_read(
+            session,
+            ticket,
+            known_utc_fields=frozenset({"updated_at", "assigned_at"}),
+        )
 
     def take(
         self,
@@ -744,7 +812,11 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return self._ticket_read(session, ticket)
+        return self._ticket_read(
+            session,
+            ticket,
+            known_utc_fields=frozenset({"updated_at", "assigned_at"}),
+        )
 
     def release(
         self,
@@ -796,7 +868,9 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return self._ticket_read(session, ticket)
+        return self._ticket_read(
+            session, ticket, known_utc_fields=frozenset({"updated_at"})
+        )
 
     def change_status(
         self,
@@ -875,7 +949,13 @@ class TicketService:
         )
         session.commit()
         session.refresh(ticket)
-        return self._ticket_read(session, ticket)
+        known_utc_fields = {"updated_at"}
+        timestamp_field = _STATUS_TIMESTAMP_VALUES.get(data.status.value)
+        if timestamp_field is not None:
+            known_utc_fields.add(timestamp_field)
+        return self._ticket_read(
+            session, ticket, known_utc_fields=frozenset(known_utc_fields)
+        )
 
     def cancel(
         self,
@@ -961,30 +1041,169 @@ class TicketService:
                 old_value=item.old_value,
                 new_value=item.new_value,
                 description=item.description,
-                created_at=item.created_at,
+                created_at=self._history_read_timestamp(item),
             )
             for item in history
         ]
 
-    def _ticket_read(self, session: Session, ticket: Ticket) -> TicketRead:
-        return self._ticket_reads(session, [ticket])[0]
+    @staticmethod
+    def _history_read_timestamp(item: TicketHistory) -> datetime:
+        if item.created_at.tzinfo is not None:
+            return as_utc(item.created_at)
+        if item.action == "CREATED":
+            is_known_creation = (
+                item.actor_id is not None
+                and item.old_value is None
+                and item.new_value == TicketStatus.NUEVO.value
+                and item.description in _TICKET_CREATION_HISTORY_DESCRIPTIONS
+            )
+            return as_utc(item.created_at) if is_known_creation else item.created_at
+        if item.action == "SYSTEM_ASSIGNMENT_REPAIR":
+            is_known_repair = (
+                item.actor_id is None
+                and item.new_value == TicketStatus.NUEVO.value
+                and item.description in _SYSTEM_ASSIGNMENT_REPAIR_DESCRIPTIONS
+            )
+            return as_utc(item.created_at) if is_known_repair else item.created_at
+        system_sla_signature = _SYSTEM_SLA_HISTORY_SIGNATURES.get(item.action)
+        if system_sla_signature is not None:
+            is_known_system_event = (
+                item.actor_id is None
+                and item.new_value in system_sla_signature[:2]
+                and item.description == system_sla_signature[2]
+            )
+            return as_utc(item.created_at) if is_known_system_event else item.created_at
+        if item.action in _KNOWN_UTC_HISTORY_ACTIONS and item.actor_id is not None:
+            return as_utc(item.created_at)
+        return item.created_at
+
+    def _ticket_read(
+        self,
+        session: Session,
+        ticket: Ticket,
+        *,
+        known_utc_fields: frozenset[str] = frozenset(),
+    ) -> TicketRead:
+        return self._ticket_reads(session, [ticket], known_utc_fields=known_utc_fields)[
+            0
+        ]
 
     def _ticket_reads(
-        self, session: Session, tickets: list[Ticket]
+        self,
+        session: Session,
+        tickets: list[Ticket],
+        *,
+        known_utc_fields: frozenset[str] = frozenset(),
     ) -> list[TicketRead]:
         participants = self.repository.ticket_participant_names(
             session, [ticket.id for ticket in tickets]
         )
-        return [
-            TicketRead.model_validate(
-                ticket.model_dump()
-                | {
-                    "client_name": participants[ticket.id][0],
-                    "assigned_advisor_name": participants[ticket.id][1],
-                }
-            )
+        needs_timestamp_provenance = any(
+            getattr(ticket, field) is not None and field not in known_utc_fields
             for ticket in tickets
-        ]
+            for field in (
+                "created_at",
+                "updated_at",
+                "assigned_at",
+                "resolved_at",
+                "closed_at",
+                "cancelled_at",
+            )
+        )
+        timestamp_history = (
+            self.repository.ticket_timestamp_history(
+                session, [ticket.id for ticket in tickets]
+            )
+            if needs_timestamp_provenance
+            else {}
+        )
+        ticket_reads: list[TicketRead] = []
+        for ticket in tickets:
+            ticket_data = ticket.model_dump()
+            ticket_known_utc_fields = set(known_utc_fields)
+            creation_time_is_verified = any(
+                action == "CREATED"
+                and new_value == TicketStatus.NUEVO.value
+                and self._same_mysql_second(ticket.created_at, history_created_at)
+                for action, new_value, history_created_at in timestamp_history.get(
+                    ticket.id, []
+                )
+            )
+            if creation_time_is_verified:
+                ticket_known_utc_fields.add("created_at")
+            # Runtime _touch() and migration 0018 are the only version incrementers;
+            # both write UTC. Require a matching history event as evidence of that
+            # write; for version 1, only a matching new-ticket signature can separate
+            # updated_at from values backfilled by migration 0009.
+            update_time_is_verified = ticket.version > 1 and any(
+                action != "CREATED"
+                and self._same_mysql_second(ticket.updated_at, history_created_at)
+                for action, _, history_created_at in timestamp_history.get(
+                    ticket.id, []
+                )
+            )
+            new_ticket_update_is_verified = creation_time_is_verified and (
+                self._same_mysql_second(ticket.created_at, ticket.updated_at)
+            )
+            if update_time_is_verified or new_ticket_update_is_verified:
+                ticket_known_utc_fields.add("updated_at")
+            assigned_time_is_verified = ticket.assigned_at is not None and any(
+                action in _ASSIGNMENT_HISTORY_ACTIONS
+                and new_value == ticket.assigned_advisor_id
+                and self._same_mysql_second(ticket.assigned_at, history_created_at)
+                for action, new_value, history_created_at in timestamp_history.get(
+                    ticket.id, []
+                )
+            )
+            if assigned_time_is_verified:
+                ticket_known_utc_fields.add("assigned_at")
+            for status_value, timestamp_field in _STATUS_TIMESTAMP_VALUES.items():
+                timestamp = getattr(ticket, timestamp_field)
+                status_time_is_verified = timestamp is not None and any(
+                    action == "STATUS_CHANGED"
+                    and new_value == status_value
+                    and self._same_mysql_second(timestamp, history_created_at)
+                    for action, new_value, history_created_at in timestamp_history.get(
+                        ticket.id, []
+                    )
+                )
+                if status_time_is_verified:
+                    ticket_known_utc_fields.add(timestamp_field)
+            # MySQL strips tzinfo; attach UTC only when the write path is known.
+            for field in (
+                "created_at",
+                "updated_at",
+                "assigned_at",
+                "resolved_at",
+                "closed_at",
+                "cancelled_at",
+            ):
+                value = ticket_data[field]
+                if value is not None and (
+                    field in ticket_known_utc_fields or value.tzinfo is not None
+                ):
+                    ticket_data[field] = as_utc(value)
+            ticket_reads.append(
+                TicketRead.model_validate(
+                    ticket_data
+                    | {
+                        "client_name": participants[ticket.id][0],
+                        "assigned_advisor_name": participants[ticket.id][1],
+                    }
+                )
+            )
+        return ticket_reads
+
+    @staticmethod
+    def _same_mysql_second(left: datetime, right: datetime) -> bool:
+        left_offset = left.utcoffset()
+        right_offset = right.utcoffset()
+        if (left_offset is None) != (right_offset is None):
+            return False
+        if left_offset is not None and right_offset is not None:
+            left = left.astimezone(UTC).replace(tzinfo=None)
+            right = right.astimezone(UTC).replace(tzinfo=None)
+        return left.replace(microsecond=0) == right.replace(microsecond=0)
 
     def _comment_reads(
         self, session: Session, comments: list[TicketComment]

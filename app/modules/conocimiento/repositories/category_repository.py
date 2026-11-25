@@ -21,6 +21,11 @@ class CategoryRepository:
             ).all()
         )
 
+    def list_all(self, session: Session) -> list[TicketCategory]:
+        return list(
+            session.exec(select(TicketCategory).order_by(TicketCategory.name)).all()
+        )
+
     def add(self, session: Session, category: TicketCategory) -> TicketCategory:
         session.add(category)
         session.flush()

@@ -108,9 +108,17 @@ class TicketSlaRead(BaseModel):
     policy_source: TicketSource | None = None
     policy_timezone_name: str
     policy_calendar_name: str
-    started_at: datetime
-    first_response_due_at: datetime
-    resolution_due_at: datetime
+    started_at: datetime = Field(
+        description=(
+            "UTC se incluye cuando la fecha de creación del ticket está verificada."
+        )
+    )
+    first_response_due_at: datetime = Field(
+        description="UTC se incluye cuando la fecha de inicio del SLA está verificada."
+    )
+    resolution_due_at: datetime = Field(
+        description="UTC se incluye cuando la fecha de inicio del SLA está verificada."
+    )
     first_responded_at: datetime | None
     first_response_within_sla: bool | None
     first_response_warning_sent_at: datetime | None
@@ -128,29 +136,6 @@ class TicketSlaRead(BaseModel):
     reopen_count: int
     created_at: datetime
     updated_at: datetime
-
-    @field_validator(
-        "started_at",
-        "first_response_due_at",
-        "resolution_due_at",
-        "first_responded_at",
-        "first_response_warning_sent_at",
-        "resolution_warning_sent_at",
-        "first_response_breached_at",
-        "resolved_at",
-        "paused_at",
-        "warning_sent_at",
-        "breached_at",
-        "resolution_breached_at",
-        "created_at",
-        "updated_at",
-        mode="before",
-    )
-    @classmethod
-    def timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
-        if value is None:
-            return None
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
 class SlaEvaluationRead(BaseModel):

@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +11,8 @@ from app.db.session import get_session
 from app.main import app
 from app.modules.conocimiento.models.category import TicketCategory
 from app.modules.tickets.models.history import TicketHistory
+from app.modules.tickets.models.ticket import Ticket
+from app.modules.usuarios.models.user import User
 from app.seed.demo_data import seed_demo_data
 
 
@@ -92,6 +95,12 @@ def create_ticket(
     return response.json()
 
 
+def assert_utc_timestamp(value: str) -> None:
+    assert value.endswith("Z") or value.endswith("+00:00")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    assert parsed.utcoffset() == timedelta(0)
+
+
 def test_creates_ticket_from_authenticated_unresolved_conversation(ticket_client):
     client, engine = ticket_client
     client_token = token(client, "cliente@demo.com")
@@ -103,6 +112,8 @@ def test_creates_ticket_from_authenticated_unresolved_conversation(ticket_client
     assert ticket["source"] == "CHATBOT"
     assert ticket["conversation_id"] == conversation_id
     assert ticket["tracking_code"].startswith("TCK-")
+    assert_utc_timestamp(ticket["created_at"])
+    assert_utc_timestamp(ticket["updated_at"])
 
     history = client.get(
         f"/api/v1/tickets/{ticket['id']}/history",
@@ -111,6 +122,206 @@ def test_creates_ticket_from_authenticated_unresolved_conversation(ticket_client
     assert history.status_code == 200
     actions = [item["action"] for item in history.json()]
     assert actions.index("CREATED") < actions.index("SLA_STARTED")
+
+
+def test_ticket_get_and_list_serialize_verified_creation_timestamps(ticket_client):
+    client, engine = ticket_client
+    client_token = token(client, "cliente@demo.com")
+    headers = {"Authorization": f"Bearer {client_token}"}
+    ticket = create_ticket(client, client_token, category_id(engine))
+
+    detail = client.get(f"/api/v1/tickets/{ticket['id']}", headers=headers)
+    listing = client.get("/api/v1/tickets/mine", headers=headers)
+
+    assert detail.status_code == 200
+    assert_utc_timestamp(detail.json()["created_at"])
+    assert_utc_timestamp(detail.json()["updated_at"])
+    assert listing.status_code == 200
+    listed_ticket = next(item for item in listing.json() if item["id"] == ticket["id"])
+    assert_utc_timestamp(listed_ticket["created_at"])
+    assert_utc_timestamp(listed_ticket["updated_at"])
+
+
+def test_ticket_get_and_list_keep_ambiguous_creation_timestamps_naive(ticket_client):
+    client, engine = ticket_client
+    client_token = token(client, "cliente@demo.com")
+    headers = {"Authorization": f"Bearer {client_token}"}
+    ticket = create_ticket(client, client_token, category_id(engine))
+    ambiguous_created_at = datetime(2001, 2, 3, 4, 5, 6)
+    ambiguous_updated_at = datetime(2001, 2, 3, 4, 5, 7)
+    with Session(engine) as session:
+        row = session.get(Ticket, ticket["id"])
+        row.created_at = ambiguous_created_at
+        row.updated_at = ambiguous_updated_at
+        creation_event = session.exec(
+            select(TicketHistory).where(
+                TicketHistory.ticket_id == ticket["id"],
+                TicketHistory.action == "CREATED",
+            )
+        ).one()
+        creation_event.created_at = ambiguous_created_at + timedelta(hours=1)
+        session.add_all([row, creation_event])
+        session.commit()
+
+    detail = client.get(f"/api/v1/tickets/{ticket['id']}", headers=headers)
+    listing = client.get("/api/v1/tickets/mine", headers=headers)
+
+    assert detail.status_code == 200
+    assert detail.json()["created_at"] == "2001-02-03T04:05:06"
+    assert detail.json()["updated_at"] == "2001-02-03T04:05:07"
+    assert listing.status_code == 200
+    listed_ticket = next(item for item in listing.json() if item["id"] == ticket["id"])
+    assert listed_ticket["created_at"] == "2001-02-03T04:05:06"
+    assert listed_ticket["updated_at"] == "2001-02-03T04:05:07"
+    with Session(engine) as session:
+        stored = session.get(Ticket, ticket["id"])
+        assert stored.created_at == ambiguous_created_at
+        assert stored.updated_at == ambiguous_updated_at
+
+
+def test_assignment_and_status_timestamps_serialize_verified_utc(ticket_client):
+    client, engine = ticket_client
+    client_token = token(client, "cliente@demo.com")
+    supervisor_headers = {
+        "Authorization": f"Bearer {token(client, 'supervisor@demo.com')}"
+    }
+    ticket = create_ticket(client, client_token, category_id(engine))
+    with Session(engine) as session:
+        advisor = session.exec(
+            select(User).where(User.email == "asesor@demo.com")
+        ).one()
+
+    assigned = client.post(
+        f"/api/v1/tickets/{ticket['id']}/assignments",
+        headers=supervisor_headers,
+        json={"advisor_id": advisor.id},
+    )
+    in_progress = client.post(
+        f"/api/v1/tickets/{ticket['id']}/status",
+        headers=supervisor_headers,
+        json={"status": "EN_PROCESO"},
+    )
+    resolved = client.post(
+        f"/api/v1/tickets/{ticket['id']}/status",
+        headers=supervisor_headers,
+        json={"status": "RESUELTO"},
+    )
+    closed = client.post(
+        f"/api/v1/tickets/{ticket['id']}/confirm-resolution",
+        headers={"Authorization": f"Bearer {client_token}"},
+    )
+
+    assert assigned.status_code == 201
+    assert_utc_timestamp(assigned.json()["assigned_at"])
+    assert in_progress.status_code == resolved.status_code == 200
+    assert_utc_timestamp(resolved.json()["resolved_at"])
+    assert closed.status_code == 200
+    assert_utc_timestamp(closed.json()["closed_at"])
+
+    detail = client.get(f"/api/v1/tickets/{ticket['id']}", headers=supervisor_headers)
+    listing = client.get("/api/v1/tickets", headers=supervisor_headers)
+    assert detail.status_code == listing.status_code == 200
+    for response_ticket in (
+        detail.json(),
+        next(item for item in listing.json() if item["id"] == ticket["id"]),
+    ):
+        for field in ("assigned_at", "resolved_at", "closed_at", "updated_at"):
+            assert_utc_timestamp(response_ticket[field])
+
+    cancellable_ticket = create_ticket(client, client_token, category_id(engine))
+    cancelled = client.post(
+        f"/api/v1/tickets/{cancellable_ticket['id']}/cancel",
+        headers=supervisor_headers,
+        json={"reason": "Cancelación solicitada para probar fecha."},
+    )
+    assert cancelled.status_code == 200
+    assert_utc_timestamp(cancelled.json()["cancelled_at"])
+
+
+def test_history_uses_explicit_utc_for_known_events_and_preserves_ambiguous_rows(
+    ticket_client,
+):
+    client, engine = ticket_client
+    client_token = token(client, "cliente@demo.com")
+    ticket = create_ticket(client, client_token, category_id(engine))
+    ambiguous_time = datetime(2001, 2, 3, 4, 5, 6)
+    with Session(engine) as session:
+        session.add(
+            TicketHistory(
+                ticket_id=ticket["id"],
+                actor_id=None,
+                action="CREATED",
+                old_value=None,
+                new_value="NUEVO",
+                description="Evento CREATED importado sin procedencia UTC verificable.",
+                created_at=ambiguous_time,
+            )
+        )
+        session.add(
+            TicketHistory(
+                ticket_id=ticket["id"],
+                actor_id=None,
+                action="LEGACY_IMPORTED",
+                old_value=None,
+                new_value=None,
+                description="Evento histórico sin procedencia horaria verificable.",
+                created_at=ambiguous_time,
+            )
+        )
+        session.commit()
+
+    history = client.get(
+        f"/api/v1/tickets/{ticket['id']}/history",
+        headers={"Authorization": f"Bearer {client_token}"},
+    )
+
+    assert history.status_code == 200
+    history_rows = history.json()
+    known_rows = {
+        action: next(
+            item
+            for item in history_rows
+            if item["action"] == action
+            and item["description"]
+            in {
+                "Ticket creado",
+                "SLA iniciado con la creación del ticket",
+            }
+        )
+        for action in ("CREATED", "SLA_STARTED")
+    }
+    for action in ("CREATED", "SLA_STARTED"):
+        value = known_rows[action]["created_at"]
+        assert value.endswith("Z") or value.endswith("+00:00")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        assert parsed.utcoffset().total_seconds() == 0
+    with Session(engine) as session:
+        stored = {
+            item.id: item.created_at
+            for item in session.exec(
+                select(TicketHistory).where(TicketHistory.ticket_id == ticket["id"])
+            ).all()
+        }
+    for action in ("CREATED", "SLA_STARTED"):
+        parsed = datetime.fromisoformat(
+            known_rows[action]["created_at"].replace("Z", "+00:00")
+        )
+        assert parsed.replace(tzinfo=None) == stored[known_rows[action]["id"]]
+    assert (
+        next(
+            item["created_at"]
+            for item in history_rows
+            if item["action"] == "LEGACY_IMPORTED"
+        )
+        == "2001-02-03T04:05:06"
+    )
+    ambiguous_created = next(
+        item
+        for item in history_rows
+        if item["action"] == "CREATED"
+        and item["description"].startswith("Evento CREATED importado")
+    )
+    assert ambiguous_created["created_at"] == "2001-02-03T04:05:06"
 
 
 def test_rejects_ticket_creation_without_authentication(ticket_client):

@@ -17,6 +17,12 @@ class CategoryService:
     def list_active(self, session: Session) -> list[TicketCategory]:
         return self.repository.list_active(session)
 
+    def list_admin(
+        self, session: Session, actor: AuthenticatedUser
+    ) -> list[TicketCategory]:
+        self._require_supervisor(actor)
+        return self.repository.list_all(session)
+
     def create(
         self, session: Session, data: CategoryCreate, actor: AuthenticatedUser
     ) -> TicketCategory:

@@ -44,7 +44,7 @@ El backend es un monolito modular FastAPI con persistencia MySQL. Administra usu
 
 ### Estado actual
 
-El inventario contiene 8 módulos de dominio, 73 rutas HTTP incluyendo health, 24 entidades SQLModel, 12 repositorios y 14 archivos de servicio. La IA generativa y el envío real de correo/notificaciones están desacoplados mediante puertos, pero los adaptadores locales por defecto son `Noop`.
+El inventario contiene 8 módulos de dominio, 74 rutas HTTP incluyendo health, 24 entidades SQLModel, 12 repositorios y 14 archivos de servicio. La IA generativa y el envío real de correo/notificaciones están desacoplados mediante puertos, pero los adaptadores locales por defecto son `Noop`.
 
 ## 3. Tecnologías utilizadas
 
@@ -143,7 +143,7 @@ Los adjuntos se validan por nombre, extensión, MIME declarado, firma detectada,
 
 ## 7. API REST
 
-Todas las rutas se registraron desde decoradores FastAPI del código: **73 endpoints**. La documentación interactiva `/docs`, `/redoc` y `/openapi.json` solo se habilita en desarrollo.
+Todas las rutas se registraron desde decoradores FastAPI del código: **74 endpoints**. La documentación interactiva `/docs`, `/redoc` y `/openapi.json` solo se habilita en desarrollo.
 
 ### Índice rápido por método
 
@@ -170,6 +170,7 @@ Todas las rutas se registraron desde decoradores FastAPI del código: **73 endpo
 | POST | /api/v1/auth/reset-password | Consume un token de recuperación de un solo uso y revoca sesiones previas. | No | - |
 | POST | /api/v1/auth/verify-email | Consume un token de verificación de correo de un solo uso. | No | - |
 | GET | /api/v1/categories | Lista categorías activas. | No | - |
+| GET | /api/v1/categories/admin | Lista categorías activas e inactivas. | Bearer JWT | SUPERVISOR |
 | POST | /api/v1/categories | Crea una categoría de tickets. | Bearer JWT | SUPERVISOR |
 | PATCH | /api/v1/categories/{category_id} | Actualiza nombre o descripción de una categoría. | Bearer JWT | SUPERVISOR |
 | PATCH | /api/v1/categories/{category_id}/status | Activa o desactiva una categoría; las categorías usadas por tickets no pueden desactivarse. | Bearer JWT | SUPERVISOR |
@@ -376,6 +377,18 @@ Todas las rutas se registraron desde decoradores FastAPI del código: **73 endpo
 - Respuesta: HTTP 200 con `list[CategoryRead]`
 - Errores observables: -
 - Implementación: `list_categories` en `app/modules/conocimiento/api/router.py:210`
+
+
+### GET /api/v1/categories/admin
+
+**Descripción.** Lista categorías activas e inactivas para administración.
+
+- Autenticación: Bearer JWT
+- Rol o alcance: SUPERVISOR
+- Entrada: Sin body
+- Respuesta: HTTP 200 con `list[CategoryRead]`
+- Errores observables: 401/403
+- Implementación: `list_admin_categories` en `app/modules/conocimiento/api/router.py`
 
 
 ### POST /api/v1/categories
@@ -1279,6 +1292,8 @@ Los contratos públicos están en `schemas/`: auth/profile, tickets/operations/S
 
 Los endpoints de tickets y FAQs mantienen compatibilidad: sin `page` ni `page_size` devuelven listas legacy; al enviar cualquiera de ellos devuelven página. Páginas fuera de rango devuelven `items: []`. Los listados ordenan tickets por `created_at DESC, id DESC`; notificaciones por `created_at DESC, id DESC`; comentarios e historiales siguen el orden registrado por repositorio.
 
+Las respuestas de tickets, historial y SLA incluyen zona UTC solo cuando se puede verificar el origen de la escritura. Las fechas históricas ambiguas permanecen sin zona horaria; su serialización no modifica los valores guardados en MySQL.
+
 No existe un `@ControllerAdvice`/manejador global equivalente: los routers y servicios convierten errores de dominio conocidos en `HTTPException`; errores no previstos quedan a cargo de FastAPI/Starlette. Los formatos observables más comunes son el detalle FastAPI (`{"detail": ...}`), respuestas de validación 422 y respuestas binarias para descarga/exportación.
 
 ## 13. Configuración y ejecución
@@ -1318,7 +1333,7 @@ Swagger queda en `http://localhost:8000/docs` solo en development; health es `GE
 
 ## 14. Pruebas e infraestructura
 
-Se encontraron 23 archivos de prueba, 181 funciones `test_*` y 219 casos recogidos por Pytest (incluye parametrizaciones). Hay pruebas unitarias (`tests/unit`), integración (`tests/integration`) y evaluación de calidad del chatbot (`tests/evaluation`). Cubren auth/security, health, CORS, tickets, paginación, comentarios, operaciones de asesores, SLA, adjuntos, notificaciones, perfil/preferencias, knowledge base, chatbot fases 11/12, reports/exports, audit y seed.
+Se encontraron 47 archivos de prueba, 491 funciones `test_*` y 659 casos recogidos por Pytest (incluye parametrizaciones). Hay pruebas unitarias (`tests/unit`), integración (`tests/integration`) y evaluación de calidad del chatbot (`tests/evaluation`). Cubren auth/security, health, CORS, tickets, paginación, comentarios, operaciones de asesores, SLA, adjuntos, notificaciones, perfil/preferencias, knowledge base, chatbot fases 11/12/13, reports/exports, audit y seed.
 
 | Tipo | Ubicación | Alcance |
 | --- | --- | --- |
@@ -1326,7 +1341,7 @@ Se encontraron 23 archivos de prueba, 181 funciones `test_*` y 219 casos recogid
 | Integración | tests/integration/*.py | API con TestClient, base de datos de prueba y reglas de permisos. |
 | Evaluación | tests/evaluation/test_chatbot_phase12_quality.py | Calidad y guardrails del flujo IA/RAG. |
 
-Validación ejecutada durante esta auditoría: `pytest` -> 219 passed, 2 warnings; `ruff check .` -> All checks passed; `ruff format --check .` -> 205 files already formatted. `alembic check` no pudo conectarse porque no había MySQL escuchando en `localhost:3307`; no se modificó el backend ni la base de datos.
+Verificación ejecutada para esta revisión: `pytest` -> 659 passed, 44 warnings; `ruff check .` -> All checks passed; `ruff format --check .` -> 271 files already formatted; `git diff --check` -> sin errores; `alembic heads` -> `0021_faq_catalog_refresh` (único head). No se aplicaron migraciones.
 
 ```mermaid
 flowchart TB
@@ -1380,6 +1395,7 @@ flowchart TB
 | Consume un token de recuperación de un solo uso y revoca sesiones previas. | /api/v1/auth/reset-password | app/modules/usuarios/api/auth_router.py | AuthService | UserRepository / AuthRepository / UserProfileRepository | User, Role, AuthSession, AuthToken, AuthRateLimit, UserPreference, UserProfileAudit |
 | Consume un token de verificación de correo de un solo uso. | /api/v1/auth/verify-email | app/modules/usuarios/api/auth_router.py | AuthService | UserRepository / AuthRepository / UserProfileRepository | User, Role, AuthSession, AuthToken, AuthRateLimit, UserPreference, UserProfileAudit |
 | Lista categorías activas. | /api/v1/categories | app/modules/conocimiento/api/router.py | CategoryService | CategoryRepository | TicketCategory |
+| Lista categorías activas e inactivas para administración. | /api/v1/categories/admin | app/modules/conocimiento/api/router.py | CategoryService | CategoryRepository | TicketCategory |
 | Crea una categoría de tickets. | /api/v1/categories | app/modules/conocimiento/api/router.py | CategoryService | CategoryRepository | TicketCategory |
 | Actualiza nombre o descripción de una categoría. | /api/v1/categories/{category_id} | app/modules/conocimiento/api/router.py | CategoryService | CategoryRepository | TicketCategory |
 | Activa o desactiva una categoría; las categorías usadas por tickets no pueden de | /api/v1/categories/{category_id}/status | app/modules/conocimiento/api/router.py | CategoryService | CategoryRepository | TicketCategory |
@@ -1477,7 +1493,7 @@ El backend actual es un prototipo modular funcional de gestión de tickets con a
 | Métrica | Cantidad / resultado |
 | --- | --- |
 | Módulos | 8 |
-| Endpoints HTTP | 73 |
+| Endpoints HTTP | 74 |
 | Entidades persistentes | 24 |
 | Repositories | 12 |
 | Archivos de servicios | 14 |
@@ -1485,7 +1501,7 @@ El backend actual es un prototipo modular funcional de gestión de tickets con a
 | Integraciones externas activas | 0 |
 | Puertos opcionales de integración IA | 1 |
 | Adaptadores IA disponibles | 2 |
-| Archivos de prueba | 23 |
-| Funciones de prueba definidas | 181 |
-| Casos recogidos por Pytest | 219 |
+| Archivos de prueba | 47 |
+| Funciones de prueba definidas | 491 |
+| Casos recogidos por Pytest | 659 |
 | Archivos generados | docs/DOCUMENTACION_OFICIAL_BACKEND.md; output/pdf/DOCUMENTACION_OFICIAL_BACKEND.pdf |

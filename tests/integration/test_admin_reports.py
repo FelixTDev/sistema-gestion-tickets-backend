@@ -165,6 +165,65 @@ def test_supervisor_can_crud_category_and_duplicate_names_are_rejected(admin_cli
     assert disabled.status_code == 200
 
 
+def test_admin_category_catalog_requires_supervisor_and_includes_inactive(
+    admin_client,
+):
+    client, _ = admin_client
+
+    anonymous = client.get("/api/v1/categories/admin")
+    assert anonymous.status_code == 401
+
+    for email in ("cliente@demo.com", "asesor@demo.com"):
+        response = client.get(
+            "/api/v1/categories/admin",
+            headers={"Authorization": f"Bearer {login(client, email)}"},
+        )
+        assert response.status_code == 403
+
+    supervisor = client.get(
+        "/api/v1/categories/admin", headers=supervisor_headers(client)
+    )
+    public = client.get("/api/v1/categories")
+
+    assert supervisor.status_code == public.status_code == 200
+    admin_categories = {item["name"]: item for item in supervisor.json()}
+    public_categories = {item["name"]: item for item in public.json()}
+    assert admin_categories["INFORMACION_GENERAL"]["is_active"] is False
+    assert "INFORMACION_GENERAL" not in public_categories
+    assert all(item["is_active"] for item in public_categories.values())
+
+
+def test_supervisor_can_reactivate_category_through_status_route(admin_client):
+    client, _ = admin_client
+    headers = supervisor_headers(client)
+    created = client.post(
+        "/api/v1/categories",
+        headers=headers,
+        json={"name": "CATEGORIA_REACTIVABLE", "description": "Temporal"},
+    )
+    category_id = created.json()["id"]
+    disabled = client.patch(
+        f"/api/v1/categories/{category_id}/status",
+        headers=headers,
+        json={"is_active": False},
+    )
+    hidden = client.get("/api/v1/categories")
+    reactivated = client.patch(
+        f"/api/v1/categories/{category_id}/status",
+        headers=headers,
+        json={"is_active": True},
+    )
+    visible = client.get("/api/v1/categories")
+
+    assert created.status_code == 201
+    assert disabled.status_code == 200
+    assert disabled.json()["is_active"] is False
+    assert all(item["id"] != category_id for item in hidden.json())
+    assert reactivated.status_code == 200
+    assert reactivated.json()["is_active"] is True
+    assert any(item["id"] == category_id for item in visible.json())
+
+
 def test_category_management_is_supervisor_only(admin_client):
     client, _ = admin_client
     for email in ("cliente@demo.com", "asesor@demo.com"):

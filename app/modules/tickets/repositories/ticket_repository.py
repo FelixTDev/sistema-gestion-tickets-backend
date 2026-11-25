@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
@@ -20,6 +20,18 @@ from app.modules.tickets.models.ticket import (
 from app.modules.tickets.schemas.operations import OperationalQueue
 from app.modules.usuarios.models.role import Role
 from app.modules.usuarios.models.user import User
+
+_RUNTIME_TICKET_UPDATE_HISTORY_ACTIONS = (
+    "COMMENT_ADDED",
+    "ASSIGNED",
+    "TAKEN",
+    "RELEASED",
+    "STATUS_CHANGED",
+)
+_TICKET_CREATION_HISTORY_DESCRIPTIONS = (
+    "Ticket creado",
+    "Ticket creado desde el canal de atención correspondiente.",
+)
 
 
 class TicketRepository:
@@ -55,6 +67,44 @@ class TicketRepository:
             ticket_id: (client_name, advisor_name)
             for ticket_id, client_name, advisor_name in rows
         }
+
+    def ticket_timestamp_history(
+        self, session: Session, ticket_ids: list[str]
+    ) -> dict[str, list[tuple[str, str | None, datetime]]]:
+        if not ticket_ids:
+            return {}
+        rows = session.exec(
+            select(
+                TicketHistory.ticket_id,
+                TicketHistory.action,
+                TicketHistory.new_value,
+                TicketHistory.created_at,
+            ).where(
+                TicketHistory.ticket_id.in_(ticket_ids),
+                or_(
+                    and_(
+                        TicketHistory.action == "CREATED",
+                        TicketHistory.actor_id.is_not(None),
+                        TicketHistory.old_value.is_(None),
+                        TicketHistory.new_value == "NUEVO",
+                        TicketHistory.description.in_(
+                            _TICKET_CREATION_HISTORY_DESCRIPTIONS
+                        ),
+                    ),
+                    and_(
+                        TicketHistory.action.in_(
+                            _RUNTIME_TICKET_UPDATE_HISTORY_ACTIONS
+                        ),
+                        TicketHistory.actor_id.is_not(None),
+                    ),
+                    TicketHistory.action == "SYSTEM_ASSIGNMENT_REPAIR",
+                ),
+            )
+        ).all()
+        history: dict[str, list[tuple[str, str | None, datetime]]] = {}
+        for ticket_id, action, new_value, created_at in rows:
+            history.setdefault(ticket_id, []).append((action, new_value, created_at))
+        return history
 
     def user_identities(
         self, session: Session, user_ids: set[str]
